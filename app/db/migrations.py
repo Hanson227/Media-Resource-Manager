@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 # -*- coding: utf-8 -*-
-# -*- coding: utf-8 -*-
 """
 数据库迁移与初始化。
 
@@ -12,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import OperationalError
 
 from app.db.engine import DatabaseManager
 from app.db.models import Base
@@ -53,14 +53,14 @@ def _get_schema_version(engine) -> int:
         with engine.connect() as conn:
             result = conn.execute(text("PRAGMA user_version;")).scalar()
             return result or 0
-    except Exception:
+    except OperationalError:
         return 0
 
 
 def _set_schema_version(engine, version: int) -> None:
     """设置数据库 Schema 版本。"""
     with engine.connect() as conn:
-        conn.execute(text(f"PRAGMA user_version = {version};"))
+        conn.execute(text(f"PRAGMA user_version = {int(version)};"))
         conn.commit()
 
 
