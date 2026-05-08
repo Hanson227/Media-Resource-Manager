@@ -8,6 +8,7 @@
 # -*- coding: utf-8 -*-
 # -*- coding: utf-8 -*-
 # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 自动化端到端测试 —— 模拟完整使用流程。
 
@@ -172,7 +173,7 @@ def test_preflight():
         print(f"    失败: {err}")
 
 def test_db():
-    section("测试 1: 数据库初始化")
+    section("测试 1: 数据库初始化 + 完整性检查")
     db_path = Path("data/test_flow.db")
     init_db(db_path)
     engine = DatabaseManager.get_engine()
@@ -184,7 +185,24 @@ def test_db():
     check("包含 messages 表", "messages" in tables)
     check("包含 face_vectors 表", "face_vectors" in tables)
     check("包含 whitelist 表", "whitelist" in tables)
+    # 完整性检查
+    integrity = DatabaseManager.check_integrity()
+    check("数据库完整性检查通过", integrity is None)
     return db_path
+
+
+def test_db_integrity():
+    """测试 1.5: 数据库损坏检测与修复机制。"""
+    section("测试 1.5: 数据库完整性检测")
+    from app.db.engine import DatabaseManager as DM
+
+    # 正常数据库应通过检查
+    ok = DM.check_integrity()
+    check("正常数据库完整性通过", ok is None)
+
+    # try_repair 在正常库上不应报错
+    repaired = DM.try_repair()
+    check("正常数据库 VACUUM 修复成功", repaired is True)
 
 
 def test_scanner(root: Path):
@@ -818,6 +836,7 @@ def main():
 
         # 核心测试
         test_db()
+        test_db_integrity()
         result = test_scanner(temp_root)
         test_save_to_db(result, temp_root)
         test_scanner_nested_promotion()
