@@ -91,7 +91,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
             painter.drawRect(thumb_area)
             painter.setPen(self._dim_color)
             font = QFont(option.font)
-            font.setPointSize(10)
+            font.setPixelSize(13)
             painter.setFont(font)
             media_type = index.data(Qt.ItemDataRole.UserRole + 2) or ""
             hint = "VID" if media_type == "video" else "IMG"
@@ -109,7 +109,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
             painter.fillRect(badge_rect, QColor(0, 0, 0, 140))
             painter.setPen(QColor(255, 255, 255))
             font = QFont(option.font)
-            font.setPointSize(8)
+            font.setPixelSize(11)
             painter.setFont(font)
             painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, "VID")
 
@@ -119,10 +119,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
 
         filename = index.data(Qt.ItemDataRole.DisplayRole) or "???"
         font_name = QFont(option.font)
-        if option.font.pointSize() > 0:
-            font_name.setPointSize(max(7, option.font.pointSize() - 2))
-        else:
-            font_name.setPixelSize(11)
+        font_name.setPixelSize(13)
         painter.setFont(font_name)
         painter.setPen(text_color)
 
@@ -138,10 +135,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
         # ---- 第二行（文件数或大小） ----
         size_text = index.data(Qt.ItemDataRole.UserRole + 3) or ""
         font_sz = QFont(option.font)
-        if option.font.pointSize() > 0:
-            font_sz.setPointSize(max(6, option.font.pointSize() - 3))
-        else:
-            font_sz.setPixelSize(10)
+        font_sz.setPixelSize(11)
         painter.setFont(font_sz)
         painter.setPen(self._dim_color)
         painter.drawText(

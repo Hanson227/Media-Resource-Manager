@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QMenu, QToolBar, QSplitter, QWidget, QVBoxLayout,
     QLabel, QMessageBox, QSystemTrayIcon, QApplication,
     QFileDialog, QHBoxLayout, QPushButton, QLineEdit, QComboBox,
+    QInputDialog,
 )
 
 from config import AppConfig
@@ -334,6 +335,10 @@ class MainWindow(QMainWindow):
         self._tree_view.exclude_requested.connect(self._on_exclude_unit)
         self._tree_view.remove_root_requested.connect(self._on_remove_root)
 
+        # ---- F2 重命名 / Ctrl+C 复制路径 ----
+        self._tree_view.rename_requested.connect(self._on_rename_unit)
+        self._tree_view.copy_path_requested.connect(self._on_copy_path)
+
         # ---- 刷新 ----
         self.refresh_requested.connect(self._on_refresh_all)
 
@@ -569,6 +574,40 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "取消收藏失败", str(e))
 
     @Slot(int)
+    def _on_rename_unit(self, unit_id: int) -> None:
+        """重命名资源单元。"""
+        try:
+            with DatabaseManager.session() as session:
+                unit = q.get_unit_by_id(session, unit_id)
+                if not unit:
+                    return
+                old_name = unit.name
+        except Exception as e:
+            logger.error(f"获取单元信息失败: {e}")
+            return
+
+        new_name, ok = QInputDialog.getText(
+            self, "重命名", "新名称:", text=old_name,
+        )
+        if not ok or not new_name.strip() or new_name.strip() == old_name:
+            return
+
+        try:
+            with DatabaseManager.session() as session:
+                q.rename_unit(session, unit_id, new_name.strip())
+            self._tree_view.refresh_model()
+            self._status_bar.set_status(f"已重命名: {old_name} → {new_name.strip()}")
+        except Exception as e:
+            QMessageBox.critical(self, "重命名失败", str(e))
+
+    @Slot(str)
+    def _on_copy_path(self, path: str) -> None:
+        """复制文件夹路径到剪贴板。"""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(path)
+        self._status_bar.set_status(f"已复制路径: {path}")
+
+    @Slot(int)
     def _on_exclude_unit(self, unit_id: int) -> None:
         """排除资源单元：标记为 excluded。"""
         try:
@@ -762,7 +801,11 @@ class MainWindow(QMainWindow):
         if current_index < 0:
             current_index = 0
 
-        dlg = QuickLookPreviewDialog(file_list, current_index, self)
+        dlg = QuickLookPreviewDialog(
+            file_list, current_index,
+            seek_step_sec=self._config.preview_seek_step,
+            parent=self,
+        )
         screen = self.screen().availableGeometry()
         dlg.resize(int(screen.width() * 0.75), int(screen.height() * 0.75))
         dlg.move(screen.center() - dlg.rect().center())

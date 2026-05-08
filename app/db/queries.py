@@ -139,6 +139,14 @@ def set_unit_starred(session: Session, unit_id: int, starred: bool = True) -> No
     })
 
 
+def rename_unit(session: Session, unit_id: int, new_name: str) -> None:
+    """重命名资源单元（仅修改显示名称，不影响磁盘路径）。"""
+    session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
+        "name": new_name,
+        "updated_at": datetime.now(),
+    })
+
+
 def get_starred_units(session: Session) -> list[ResourceUnit]:
     """获取所有已收藏的资源单元。"""
     return session.query(ResourceUnit).filter(
@@ -225,8 +233,11 @@ def get_files_without_hash(session: Session, hash_type: str = "md5",
 
 
 def get_unindexed_files(session: Session, limit: int = 1000) -> list[MediaFile]:
-    """获取所有未计算任何哈希的文件。"""
-    return session.query(MediaFile).filter(
+    """获取所有活跃单元中未计算任何哈希的文件。"""
+    return session.query(MediaFile).join(
+        ResourceUnit, MediaFile.resource_unit_id == ResourceUnit.id
+    ).filter(
+        ResourceUnit.status == "active",
         or_(
             MediaFile.md5_hash == None,
             MediaFile.phash == None,

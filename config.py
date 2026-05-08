@@ -126,6 +126,10 @@ class AppConfig:
     api_port: int = 19527
     """API 监听端口。"""
 
+    # ========== 预览 ==========
+    preview_seek_step: int = 5
+    """预览对话框中左右方向键跳转视频的步长（秒）。"""
+
     # ========== SMB 共享 ==========
     smb_share_name_prefix: str = "Media_"
     """SMB 共享名的默认前缀。"""
@@ -208,6 +212,7 @@ class AppConfig:
             "api_host": self.api_host,
             "api_port": self.api_port,
             "smb_share_name_prefix": self.smb_share_name_prefix,
+            "preview_seek_step": self.preview_seek_step,
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

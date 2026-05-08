@@ -286,6 +286,8 @@ class FolderTreeView(QTreeView):
     unstar_requested = Signal(int)
     exclude_requested = Signal(int)
     remove_root_requested = Signal(int)
+    rename_requested = Signal(int)        # F2: 重命名单元
+    copy_path_requested = Signal(str)     # Ctrl+C: 复制路径
 
     def __init__(self, model: FolderTreeModel, parent=None) -> None:
         super().__init__(parent)
@@ -371,3 +373,19 @@ class FolderTreeView(QTreeView):
         menu.remove_root_requested.connect(self.remove_root_requested.emit)
         menu.refresh_requested.connect(self.refresh_model)
         menu.exec(self.viewport().mapToGlobal(pos))
+
+    def keyPressEvent(self, event) -> None:
+        """处理键盘快捷键：F2 重命名，Ctrl+C 复制路径。"""
+        if event.key() == Qt.Key.Key_F2:
+            ids = self.selected_unit_ids()
+            if ids:
+                self.rename_requested.emit(ids[0])
+            return
+        if event.key() == Qt.Key.Key_C and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            ids = self.selected_unit_ids()
+            if ids:
+                node = self._model.get_node_by_unit_id(ids[0])
+                if node and node.path:
+                    self.copy_path_requested.emit(node.path)
+            return
+        super().keyPressEvent(event)

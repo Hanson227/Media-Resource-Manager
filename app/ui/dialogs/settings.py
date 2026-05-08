@@ -124,6 +124,17 @@ class SettingsDialog(QDialog):
 
         tabs.addTab(watcher_tab, "文件监控")
 
+        # ==== 预览选项卡 ====
+        preview_tab = QWidget()
+        preview_form = QFormLayout(preview_tab)
+
+        self._seek_step_spin = QSpinBox()
+        self._seek_step_spin.setRange(1, 60)
+        self._seek_step_spin.setSuffix(" 秒")
+        preview_form.addRow("方向键跳转步长:", self._seek_step_spin)
+
+        tabs.addTab(preview_tab, "预览")
+
         layout.addWidget(tabs)
 
         # ==== 按钮 ====
@@ -146,6 +157,7 @@ class SettingsDialog(QDialog):
         self._api_host_edit.setText(cfg.api_host)
         self._watcher_enabled_check.setChecked(cfg.watcher_enabled)
         self._watcher_debounce_spin.setValue(cfg.watcher_debounce_ms)
+        self._seek_step_spin.setValue(cfg.preview_seek_step)
 
     @Slot()
     def _on_save(self) -> None:
@@ -160,6 +172,7 @@ class SettingsDialog(QDialog):
             api_host=self._api_host_edit.text(),
             watcher_enabled=self._watcher_enabled_check.isChecked(),
             watcher_debounce_ms=self._watcher_debounce_spin.value(),
+            preview_seek_step=self._seek_step_spin.value(),
             # 以下保持原值
             media_extensions=self._config.media_extensions,
             exclude_patterns=self._config.exclude_patterns,
