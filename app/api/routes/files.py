@@ -6,7 +6,7 @@
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Request
 
 from app.api.schemas import FileItem, FileDetailResponse, FileListResponse, StatusResponse
 from app.db.engine import DatabaseManager
@@ -91,13 +91,24 @@ async def delete_file(file_id: int):
 
 
 @router.get("/{file_id}/thumbnail")
-async def get_file_thumbnail(file_id: int):
+async def get_file_thumbnail(file_id: int, request: Request = None):
     """获取文件缩略图路径信息。"""
     try:
         with DatabaseManager.session() as session:
             f = q.get_file_by_id(session, file_id)
             if not f:
                 raise HTTPException(status_code=404, detail=f"文件不存在: {file_id}")
+            # 优先集中缓存，其次旧版 per-unit 缓存
+            if request is not None:
+                cfg = getattr(request.app.state, "config", None)
+                if cfg and cfg.thumbnail_cache_dir:
+                    central = Path(cfg.thumbnail_cache_dir) / f"{file_id}_thumb.jpg"
+                    if central.exists():
+                        return {
+                            "file_id": file_id,
+                            "thumbnail_path": str(central),
+                            "size": central.stat().st_size,
+                        }
             unit = q.get_unit_by_id(session, f.resource_unit_id)
             if unit:
                 thumb_file = Path(unit.path) / ".thumbnails" / f"{file_id}_thumb.jpg"

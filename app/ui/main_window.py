@@ -963,7 +963,7 @@ class MainWindow(QMainWindow):
                 if hasattr(w, 'cancel'):
                     w.cancel()
                 w.wait(3000)
-        self._grid_view._cancel_worker()
+        self._grid_view._cancel_all_workers()
 
     # ============================================================
     # 通知

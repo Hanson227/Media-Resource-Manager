@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import AppConfig
-from app.ui.theme import BASE, TEXT, SURFACE_0, OVERLAY_0
+from app.ui.theme import BASE, TEXT, SURFACE_0, OVERLAY_0, INDIGO
 
 
 class SettingsDialog(QDialog):
