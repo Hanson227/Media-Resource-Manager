@@ -471,6 +471,13 @@ def get_file_matches_for_result(session: Session, dedup_result_id: int) -> list[
     ).all()
 
 
+def delete_file_matches_for_result(session: Session, dedup_result_id: int) -> None:
+    """删除一次查重结果中的所有文件匹配对。"""
+    session.query(DedupFileMatch).filter(
+        DedupFileMatch.dedup_result_id == dedup_result_id
+    ).delete()
+
+
 # ============================================================
 # 消息
 # ============================================================

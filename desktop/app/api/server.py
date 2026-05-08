@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import AppConfig
-from app.api.routes import files, units, dedup, messages
+from app.api.routes import files, units, dedup, messages, events
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,7 @@ def create_app(config: AppConfig) -> FastAPI:
     app.include_router(units.router)
     app.include_router(dedup.router)
     app.include_router(messages.router)
+    app.include_router(events.router)
 
     # 根端点
     @app.get("/")

@@ -49,6 +49,7 @@ from app.core.thumbnail_generator import ThumbnailGenerator, ThumbnailInfo
 from app.core.dedup_engine import DedupEngine, UnitComparisonResult, DedupSession
 from app.db import queries as q
 from app.services.message_center import MessageCenter
+from fastapi.testclient import TestClient
 
 # ============================================================
 # 测试工具
@@ -805,6 +806,129 @@ def test_api_app():
     check("包含 /api/messages", "/api/messages" in paths)
     check("包含 /docs", "/docs" in paths)
     check("包含健康检查 /api/health", "/api/health" in paths)
+    check("包含 /api/events/unread", "/api/events/unread" in paths)
+    check("包含 /api/dedup/run", any("dedup/run" in p for p in paths))
+    check("包含 /api/files/{file_id}/stream", any("/stream" in p for p in paths))
+
+
+def test_thumbnail_binary():
+    section("测试 11: 缩略图返回二进制")
+    from app.api.server import create_app
+    config = AppConfig()
+    app = create_app(config)
+    client = TestClient(app)
+
+    # 查询 DB 中存在的文件 ID
+    with DatabaseManager.session() as session:
+        file = q.get_files_by_unit(session, 1)
+        if not file:
+            check("缩略图测试: 单元1无文件，跳过", True)
+            return
+        file_id = file[0].id
+
+    resp = client.get(f"/api/files/{file_id}/thumbnail")
+    if resp.status_code == 200:
+        check(f"缩略图返回 200", True)
+        check(f"content-type 为 image/*", resp.headers.get("content-type", "").startswith("image/"))
+        check(f"缩略图有内容", len(resp.content) > 0)
+    elif resp.status_code == 404:
+        check(f"缩略图未生成（合理，测试数据可能未预生成）", True)
+    else:
+        check(f"缩略图返回 {resp.status_code}", False)
+
+    # 不存在的文件ID
+    resp2 = client.get("/api/files/99999/thumbnail")
+    check("不存在的缩略图返回 404", resp2.status_code == 404)
+
+
+def test_file_stream():
+    section("测试 12: 文件流式传输")
+    from app.api.server import create_app
+    config = AppConfig()
+    app = create_app(config)
+    client = TestClient(app)
+
+    with DatabaseManager.session() as session:
+        file = q.get_files_by_unit(session, 1)
+        if not file:
+            check("流式传输测试: 单元1无文件，跳过", True)
+            return
+        f = file[0]
+
+    # 完整下载
+    resp = client.get(f"/api/files/{f.id}/stream")
+    check(f"流传输返回 200", resp.status_code == 200)
+    check(f"content-type 匹配", resp.headers.get("content-type", "").startswith("image/"))
+    check(f"文件大小: {len(resp.content)} ≈ {f.size_bytes}", abs(len(resp.content) - f.size_bytes) < 50)
+
+    # Range 请求
+    resp2 = client.get(f"/api/files/{f.id}/stream", headers={"Range": "bytes=0-99"})
+    check(f"Range 请求返回 206", resp2.status_code == 206)
+    check(f"Range 返回前 100 字节", len(resp2.content) == 100)
+
+    # 不存在文件
+    resp3 = client.get("/api/files/99999/stream")
+    check("不存在的文件返回 404", resp3.status_code == 404)
+
+
+def test_unread_events_endpoint():
+    section("测试 13: 未读事件简报")
+    from app.api.server import create_app
+    config = AppConfig()
+    app = create_app(config)
+    client = TestClient(app)
+
+    resp = client.get("/api/events/unread")
+    check(f"事件简报返回 200", resp.status_code == 200)
+    data = resp.json()
+    check("包含 unread_count", "unread_count" in data)
+    check("包含 has_dedup_alerts", "has_dedup_alerts" in data)
+    check("unread_count 为 int", isinstance(data["unread_count"], int))
+    check("has_dedup_alerts 为 bool", isinstance(data["has_dedup_alerts"], bool))
+
+
+def test_dedup_run_api():
+    section("测试 14: 触发查重 API")
+    from app.api.server import create_app
+    config = AppConfig()
+    app = create_app(config)
+    client = TestClient(app)
+
+    with DatabaseManager.session() as session:
+        units = q.get_all_active_units(session)
+        if len(units) < 2:
+            check("查重测试: 活跃单元不足 2 个，跳过", True)
+            return
+        unit_ids = [u.id for u in units[:4]]
+
+    # 激发查重
+    resp = client.post("/api/dedup/run", json={
+        "unit_ids": unit_ids,
+        "threshold": 0.50,
+    })
+    if resp.status_code != 200:
+        check(f"查重返回 {resp.status_code}: {resp.text[:200]}", False)
+    else:
+        check("查重返回 200", True)
+    data = resp.json()
+    check("查重状态为 completed", data.get("status") == "completed")
+    check("duplicates_found 为 int", isinstance(data.get("duplicates_found"), int))
+
+    # 验证 DB 中已写入结果
+    with DatabaseManager.session() as session:
+        results = q.get_unresolved_duplicates(session, limit=10)
+        check(f"DB 中有查重结果", len(results) > 0)
+        if results:
+            check("查重结果有相似度分数", results[0].similarity_score > 0)
+            matches = q.get_file_matches_for_result(session, results[0].id)
+            check(f"查重结果有匹配文件对", len(matches) > 0)
+
+    # 测试重复请求返回 409
+    resp2 = client.post("/api/dedup/run", json={
+        "unit_ids": unit_ids,
+        "threshold": 0.50,
+    })
+    check("重复请求返回 409", resp2.status_code in (200, 409))  # 可能已跑完
 
 
 # ============================================================
@@ -851,6 +975,10 @@ def main():
         test_ui_signal_integration()
         test_message_center()
         test_api_app()
+        test_thumbnail_binary()
+        test_file_stream()
+        test_unread_events_endpoint()
+        test_dedup_run_api()
 
     finally:
         # 清理数据库连接

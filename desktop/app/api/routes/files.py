@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Query, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from app.api.schemas import FileItem, FileDetailResponse, FileListResponse, StatusResponse
 from app.db.engine import DatabaseManager
@@ -91,35 +92,57 @@ async def delete_file(file_id: int):
 
 
 @router.get("/{file_id}/thumbnail")
-async def get_file_thumbnail(file_id: int, request: Request = None):
-    """获取文件缩略图路径信息。"""
+async def get_file_thumbnail(file_id: int, request: Request):
+    """返回缩略图图片二进制（供手机端直接显示）。"""
     try:
         with DatabaseManager.session() as session:
             f = q.get_file_by_id(session, file_id)
             if not f:
                 raise HTTPException(status_code=404, detail=f"文件不存在: {file_id}")
+
             # 优先集中缓存，其次旧版 per-unit 缓存
-            if request is not None:
-                cfg = getattr(request.app.state, "config", None)
-                if cfg and cfg.thumbnail_cache_dir:
-                    central = Path(cfg.thumbnail_cache_dir) / f"{file_id}_thumb.jpg"
-                    if central.exists():
-                        return {
-                            "file_id": file_id,
-                            "thumbnail_path": str(central),
-                            "size": central.stat().st_size,
-                        }
+            cfg = getattr(request.app.state, "config", None)
+            if cfg and cfg.thumbnail_cache_dir:
+                central = Path(cfg.thumbnail_cache_dir) / f"{file_id}_thumb.jpg"
+                if central.exists():
+                    return FileResponse(str(central), media_type="image/jpeg")
+
             unit = q.get_unit_by_id(session, f.resource_unit_id)
             if unit:
                 thumb_file = Path(unit.path) / ".thumbnails" / f"{file_id}_thumb.jpg"
                 if thumb_file.exists():
-                    return {
-                        "file_id": file_id,
-                        "thumbnail_path": str(thumb_file),
-                        "size": thumb_file.stat().st_size,
-                    }
-            return {"file_id": file_id, "thumbnail_path": None, "message": "缩略图未生成"}
+                    return FileResponse(str(thumb_file), media_type="image/jpeg")
+
+        raise HTTPException(status_code=404, detail="缩略图未生成")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+MIME_MAP = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".gif": "image/gif",
+    ".webp": "image/webp", ".bmp": "image/bmp",
+    ".mp4": "video/mp4", ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo", ".mov": "video/quicktime",
+    ".webm": "video/webm", ".flv": "video/x-flv",
+    ".ts": "video/mp2t", ".m4v": "video/mp4",
+    ".heic": "image/heic", ".heif": "image/heif",
+}
+
+
+@router.get("/{file_id}/stream")
+async def stream_file(file_id: int):
+    """流式传输原始媒体文件（支持 Range 请求头）。"""
+    with DatabaseManager.session() as session:
+        f = q.get_file_by_id(session, file_id)
+        if not f:
+            raise HTTPException(status_code=404, detail="文件不存在")
+
+    path = Path(f.path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="文件已在磁盘上移除")
+
+    media_type = MIME_MAP.get(f.extension.lower(), "application/octet-stream")
+    return FileResponse(str(path), media_type=media_type, filename=f.filename)
