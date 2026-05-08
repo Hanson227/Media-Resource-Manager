@@ -322,6 +322,7 @@ class MainWindow(QMainWindow):
 
         # ---- 网格文件夹卡片 → 进入单元 ----
         self._grid_view.folder_entered.connect(self._on_unit_double_clicked)
+        self._grid_view.back_requested.connect(self._on_breadcrumb_back)
 
         # ---- 空格键预览 ----
         self._grid_view.preview_requested.connect(self._on_show_preview)
@@ -334,6 +335,8 @@ class MainWindow(QMainWindow):
         self._tree_view.star_requested.connect(self._on_star_unit)
         self._tree_view.unstar_requested.connect(self._on_unstar_unit)
         self._tree_view.exclude_requested.connect(self._on_exclude_unit)
+        self._tree_view.cover_requested.connect(self._on_set_cover)
+        self._tree_view.clear_cover_requested.connect(self._on_clear_cover)
         self._tree_view.remove_root_requested.connect(self._on_remove_root)
 
         # ---- F2 重命名 / Ctrl+C 复制路径 ----
@@ -638,6 +641,35 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "排除失败", str(e))
 
     @Slot(int)
+    def _on_set_cover(self, unit_id: int) -> None:
+        """为资源单元设置封面图片。"""
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择封面图片", "",
+            "图片文件 (*.jpg *.jpeg *.png *.bmp *.webp);;所有文件 (*)",
+        )
+        if not path:
+            return
+        try:
+            with DatabaseManager.session() as session:
+                q.set_unit_cover(session, unit_id, path)
+            self._tree_view.refresh_model()
+            self._status_bar.set_status(f"封面已设置")
+        except Exception as e:
+            QMessageBox.critical(self, "设置封面失败", str(e))
+
+    @Slot(int)
+    def _on_clear_cover(self, unit_id: int) -> None:
+        """清除资源单元的手动封面。"""
+        try:
+            with DatabaseManager.session() as session:
+                q.clear_unit_cover(session, unit_id)
+            self._tree_view.refresh_model()
+            self._status_bar.set_status("封面已清除")
+        except Exception as e:
+            QMessageBox.critical(self, "清除封面失败", str(e))
+
+    @Slot(int)
     def _on_remove_root(self, root_id: int) -> None:
         """删除媒体库根目录及其所有数据。"""
         reply = QMessageBox.warning(
@@ -894,12 +926,17 @@ class MainWindow(QMainWindow):
                     u = q.get_unit_by_id(session, uid)
                     if not u:
                         continue
-                    files = q.get_files_by_unit(session, uid)
-                    preview_path = files[0].path if files else ""
+                    # 优先使用手动设置的封面
+                    if u.cover_path:
+                        preview_path = u.cover_path
+                    else:
+                        files = q.get_files_by_unit(session, uid)
+                        preview_path = files[0].path if files else ""
                     unit_data.append({
                         "unit_id": u.id,
                         "name": u.name,
                         "path": u.path,
+                        "cover_path": u.cover_path or "",
                         "file_count": u.file_count or 0,
                         "total_size": u.total_size or 0,
                         "preview_path": preview_path,
@@ -981,6 +1018,28 @@ class MainWindow(QMainWindow):
                     w.terminate()
                     w.wait()
         self._grid_view._cancel_all_workers()
+
+    # ============================================================
+    # 键盘快捷键
+    # ============================================================
+
+    def keyPressEvent(self, event) -> None:
+        """全局键盘快捷键。"""
+        mod = event.modifiers()
+        key = event.key()
+
+        # Alt+↑ / Backspace → 返回上一级
+        if key == Qt.Key.Key_Backspace or (key == Qt.Key.Key_Up and mod & Qt.KeyboardModifier.AltModifier):
+            if self._breadcrumb.isVisible():
+                self._on_breadcrumb_back()
+                event.accept()
+                return
+        # F5 → 刷新
+        elif key == Qt.Key.Key_F5:
+            self._on_refresh_all()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     # ============================================================
     # 通知

@@ -256,6 +256,7 @@ class ThumbnailGridView(QListView):
     file_double_clicked = Signal(int)
     file_selected = Signal(int)
     folder_entered = Signal(int)  # 双击文件夹卡片 → 进入该单元
+    back_requested = Signal()     # 空白区域双击 → 返回上一级
     preview_requested = Signal(int, str, str)  # file_id, file_path, media_type
 
     def __init__(self, model: ThumbnailGridModel, config: AppConfig,
@@ -402,3 +403,12 @@ class ThumbnailGridView(QListView):
                     event.accept()
                     return
         super().keyPressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        """双击空白区域 → 返回上一级。"""
+        idx = self.indexAt(event.pos())
+        if not idx.isValid() or not idx.internalPointer():
+            self.back_requested.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
