@@ -126,6 +126,11 @@ class MainWindow(QMainWindow):
         excluded_action.triggered.connect(self._on_manage_excluded)
         tools_menu.addAction(excluded_action)
 
+        smb_action = QAction("SMB 共享(&S)...", self)
+        smb_action.setStatusTip("设置局域网 SMB 文件共享，供手机访问媒体库")
+        smb_action.triggered.connect(self._on_open_smb)
+        tools_menu.addAction(smb_action)
+
         reset_db_action = QAction("重置数据库(&Z)...", self)
         reset_db_action.setStatusTip("删除所有扫描数据并重新初始化数据库")
         reset_db_action.triggered.connect(self._on_reset_db)
@@ -839,6 +844,13 @@ class MainWindow(QMainWindow):
         from app.ui.dialogs.settings import SettingsDialog
         dlg = SettingsDialog(self._config, self)
         dlg.settings_saved.connect(self._on_settings_saved)
+        dlg.exec()
+
+    @Slot()
+    def _on_open_smb(self) -> None:
+        """打开 SMB 共享管理对话框。"""
+        from app.ui.dialogs.smb_share import SMBDialog
+        dlg = SMBDialog(self._config, self)
         dlg.exec()
 
     @Slot()
