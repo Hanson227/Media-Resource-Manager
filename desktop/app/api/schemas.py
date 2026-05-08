@@ -85,6 +85,9 @@ class UnitItem(BaseModel):
     is_manual: bool = False
     is_starred: bool = False
     status: str = "active"
+    library_root_id: Optional[int] = None
+    library_root_name: Optional[str] = None
+    cover_file_id: Optional[int] = None
 
 
 class UnitListResponse(BaseModel):

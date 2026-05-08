@@ -8,11 +8,14 @@ API 服务器 —— FastAPI 应用创建和 uvicorn 线程管理。
 
 import logging
 import threading
+from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from config import AppConfig
 from app.api.routes import files, units, dedup, messages, events
@@ -59,20 +62,41 @@ def create_app(config: AppConfig) -> FastAPI:
     app.include_router(messages.router)
     app.include_router(events.router)
 
-    # 根端点
-    @app.get("/")
-    async def root():
-        return {
-            "name": "影视资源管理器 API",
-            "version": "0.1.0",
-            "status": "running",
-            "docs": "/docs",
-        }
-
     # 健康检查
     @app.get("/api/health")
     async def health():
         return {"status": "ok"}
+
+    # ============================================================
+    # 静态文件（Web 前端 SPA）
+    # ============================================================
+    web_dir = Path(__file__).resolve().parent.parent.parent / "web"
+    if web_dir.is_dir():
+        # 根端点：浏览器返回 index.html，API 客户端返回 JSON
+        @app.get("/")
+        async def root(request: Request):
+            accept = request.headers.get("accept", "")
+            if "text/html" in accept:
+                return FileResponse(str(web_dir / "index.html"), media_type="text/html")
+            return {
+                "name": "影视资源管理器 API",
+                "version": "0.1.0",
+                "status": "running",
+                "docs": "/docs",
+            }
+
+        # SPA 路由兜底：所有非 API 路径返回 index.html
+        app.mount("/", StaticFiles(directory=str(web_dir), html=True), name="web")
+    else:
+        # 没有 web 目录时回退
+        @app.get("/")
+        async def root():
+            return {
+                "name": "影视资源管理器 API",
+                "version": "0.1.0",
+                "status": "running",
+                "docs": "/docs",
+            }
 
     return app
 

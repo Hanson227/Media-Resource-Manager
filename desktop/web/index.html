@@ -1,0 +1,1086 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0f0f0f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>影视资源管理器</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="https://unpkg.com/@mdi/font@7/css/materialdesignicons.min.css">
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js"></script>
+<style>
+/* ========== Reset & Variables ========== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg-primary: #0f0f0f;
+  --bg-secondary: #161616;
+  --bg-card: #1c1c1e;
+  --bg-card-hover: #252527;
+  --bg-tab: #1a1a1c;
+  --border: #2c2c2e;
+  --text-primary: #f0f0f0;
+  --text-secondary: #8e8e93;
+  --text-tertiary: #636366;
+  --accent: #ff9f0a;
+  --accent-dim: rgba(255, 159, 10, 0.15);
+  --blue: #0a84ff;
+  --green: #30d158;
+  --red: #ff453a;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --tab-height: 56px;
+}
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ========== Scrollbar ========== */
+::-webkit-scrollbar { width: 0; height: 0; }
+
+/* ========== Layout ========== */
+#app { height: 100%; display: flex; flex-direction: column; }
+.app-main { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+.page { padding: 12px 16px; padding-bottom: calc(var(--tab-height) + var(--safe-bottom) + 12px); animation: fadeIn .2s ease; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ========== Top Bar ========== */
+.top-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; padding-top: calc(12px + env(safe-area-inset-top, 0px));
+  background: var(--bg-primary); border-bottom: 1px solid var(--border);
+  min-height: 48px; flex-shrink: 0;
+}
+.top-bar h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+.top-bar .badge {
+  background: var(--red); color: #fff; font-size: 11px; font-weight: 600;
+  padding: 2px 6px; border-radius: 10px; margin-left: 4px;
+}
+.top-actions { display: flex; gap: 8px; align-items: center; }
+.top-btn {
+  background: none; border: none; color: var(--text-secondary);
+  font-size: 22px; padding: 6px; cursor: pointer; border-radius: 50%;
+  width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
+}
+.top-btn:active { background: var(--bg-card); }
+
+/* ========== Bottom Tab ========== */
+.bottom-tabs {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  display: flex; background: var(--bg-tab);
+  border-top: 1px solid var(--border);
+  padding-bottom: var(--safe-bottom);
+  z-index: 100;
+}
+.tab-item {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; padding: 6px 0; height: var(--tab-height);
+  background: none; border: none; color: var(--text-tertiary); cursor: pointer;
+  font-size: 10px; font-weight: 500; position: relative;
+  transition: color .15s;
+}
+.tab-item .mdi { font-size: 24px; margin-bottom: 1px; }
+.tab-item.active { color: var(--accent); }
+.tab-item .badge-dot {
+  position: absolute; top: 6px; right: 50%; transform: translateX(18px);
+  width: 8px; height: 8px; background: var(--red); border-radius: 50%;
+  border: 2px solid var(--bg-tab);
+}
+.tab-item .badge-num {
+  position: absolute; top: 4px; right: 50%; transform: translateX(16px);
+  background: var(--red); color: #fff; font-size: 10px; font-weight: 600;
+  padding: 1px 5px; border-radius: 10px; border: 2px solid var(--bg-tab);
+  min-width: 18px; text-align: center;
+}
+
+/* ========== Root Group Accordion ========== */
+.root-group { margin-bottom: 12px; }
+.root-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; background: var(--bg-secondary);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  cursor: pointer; position: sticky; top: 0; z-index: 2;
+  border-bottom: 1px solid var(--border);
+}
+.root-header:active { background: var(--bg-card); }
+.root-header .mdi-folder { font-size: 20px; color: var(--accent); }
+.root-header h3 { font-size: 15px; font-weight: 600; flex: 1; }
+.root-header .count { font-size: 12px; color: var(--text-tertiary); margin-right: 8px; }
+.root-header .mdi-chevron { font-size: 20px; color: var(--text-tertiary); transition: transform .2s; }
+.root-header .mdi-chevron.open { transform: rotate(180deg); }
+.root-units { padding: 4px 0 8px; background: var(--bg-secondary); border-radius: 0 0 var(--radius-md) var(--radius-md); }
+
+/* ========== Cards ========== */
+.card {
+  background: var(--bg-card); border-radius: var(--radius-md);
+  padding: 14px 16px; margin-bottom: 10px;
+  cursor: pointer; transition: background .15s;
+}
+.card:active { background: var(--bg-card-hover); }
+.card-row { display: flex; align-items: center; gap: 12px; }
+.card-icon {
+  width: 44px; height: 44px; border-radius: var(--radius-sm);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; font-size: 22px; color: #fff;
+}
+.card-icon.amber { background: linear-gradient(135deg, #ff9f0a, #ff8000); }
+.card-icon.blue { background: linear-gradient(135deg, #0a84ff, #0066cc); }
+.card-icon.green { background: linear-gradient(135deg, #30d158, #248a3d); }
+.card-icon.purple { background: linear-gradient(135deg, #bf5af2, #8944ab); }
+.card-icon.gray { background: var(--border); }
+.card-body { flex: 1; min-width: 0; }
+.card-title { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
+.card-sub { font-size: 12px; color: var(--text-secondary); }
+.card-meta { text-align: right; flex-shrink: 0; }
+.card-meta .count { font-size: 18px; font-weight: 700; color: var(--text-primary); }
+.card-meta .label { font-size: 11px; color: var(--text-tertiary); }
+
+/* ========== File Feed (2-column waterfall) ========== */
+.feed-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1px; margin: 0;
+}
+.feed-item {
+  position: relative; overflow: hidden;
+  background: var(--bg-card); cursor: pointer;
+  display: flex; flex-direction: column;
+}
+.feed-item .thumb-wrap {
+  position: relative; width: 100%; aspect-ratio: 4/3;
+  overflow: hidden; background: var(--bg-card);
+  display: flex; align-items: center; justify-content: center;
+}
+.feed-item .thumb-wrap img {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; opacity: 0; transition: opacity .3s, transform .2s;
+}
+.feed-item .thumb-wrap img.loaded { opacity: 1; }
+.feed-item:active .thumb-wrap img.loaded { transform: scale(1.03); }
+.feed-item .fallback-icon {
+  font-size: 36px; color: var(--text-tertiary);
+}
+.feed-item .vid-badge {
+  position: absolute; bottom: 6px; right: 6px;
+  background: rgba(0,0,0,.7); color: #fff;
+  font-size: 16px; width: 28px; height: 28px; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+}
+.feed-item .file-info {
+  padding: 8px 10px; min-width: 0;
+}
+.feed-item .file-info .name {
+  font-size: 13px; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.feed-item .file-info .meta {
+  font-size: 11px; color: var(--text-tertiary); margin-top: 2px;
+}
+.feed-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 16px 8px;
+}
+.feed-header h2 { font-size: 17px; font-weight: 600; }
+.feed-header .count { font-size: 13px; color: var(--text-secondary); }
+
+/* ========== Empty State ========== */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; padding: 60px 24px; color: var(--text-tertiary);
+}
+.empty-state .mdi { font-size: 56px; margin-bottom: 12px; }
+.empty-state p { font-size: 14px; text-align: center; line-height: 1.5; }
+
+/* ========== Unit Card with Cover Thumb ========== */
+.card-cover {
+  width: 60px; height: 45px; border-radius: 6px; overflow: hidden;
+  flex-shrink: 0; background: var(--bg-card); position: relative;
+  display: flex; align-items: center; justify-content: center;
+}
+.card-cover img { width: 100%; height: 100%; object-fit: cover; }
+.card-cover .mdi { font-size: 20px; color: var(--text-tertiary); }
+
+/* ========== Preview ========== */
+.preview-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: #000; display: flex; flex-direction: column;
+}
+.preview-top {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 10;
+  display: flex; align-items: center; padding: 12px;
+  padding-top: calc(12px + env(safe-area-inset-top, 0px));
+  background: linear-gradient(to bottom, rgba(0,0,0,.6), transparent);
+}
+.preview-back {
+  background: none; border: none; color: #fff; font-size: 24px;
+  padding: 8px; cursor: pointer; border-radius: 50%;
+  width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;
+}
+.preview-content {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  overflow: hidden; position: relative;
+}
+.preview-content img {
+  max-width: 100%; max-height: 100%; object-fit: contain;
+}
+.preview-content video {
+  width: 100%; height: 100%; object-fit: contain;
+}
+
+/* ========== Gesture Zones ========== */
+.gesture-zone {
+  position: absolute; top: 0; bottom: 80px; width: 33.33%;
+  z-index: 5; cursor: pointer;
+}
+.gesture-zone.left { left: 0; }
+.gesture-zone.right { right: 0; }
+.gesture-zone.active { background: rgba(255,255,255,.05); }
+
+/* ========== Gesture Feedback ========== */
+.gesture-feedback {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  z-index: 6; display: flex; flex-direction: column;
+  align-items: center; gap: 8px; pointer-events: none;
+  opacity: 0; transition: opacity .1s;
+}
+.gesture-feedback.show { opacity: 1; }
+.gesture-feedback .icon {
+  font-size: 48px; color: rgba(255,255,255,.9);
+  text-shadow: 0 2px 8px rgba(0,0,0,.5);
+}
+.gesture-feedback .label {
+  font-size: 14px; color: rgba(255,255,255,.8);
+  font-weight: 600;
+}
+
+/* ========== Custom Controls Bar ========== */
+.controls-bar {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  z-index: 8; padding: 12px 12px;
+  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(to top, rgba(0,0,0,.8), transparent);
+  display: flex; align-items: center; gap: 10px;
+  transition: opacity .3s;
+}
+.controls-bar.hidden { opacity: 0; pointer-events: none; }
+.ctrl-btn {
+  background: none; border: none; color: #fff; font-size: 22px;
+  padding: 6px; cursor: pointer; border-radius: 50%;
+  width: 36px; height: 36px; display: flex;
+  align-items: center; justify-content: center; flex-shrink: 0;
+}
+.ctrl-btn:active { background: rgba(255,255,255,.15); }
+.ctrl-btn .speed-text {
+  font-size: 12px; font-weight: 700; padding: 2px 4px;
+  background: rgba(255,255,255,.15); border-radius: 4px;
+}
+.controls-bar .time {
+  font-size: 12px; color: rgba(255,255,255,.8);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  min-width: 40px;
+}
+.controls-bar .time.dur { text-align: right; }
+
+/* ========== Progress Bar ========== */
+.progress-wrap {
+  flex: 1; height: 32px; display: flex; align-items: center;
+  cursor: pointer; position: relative; min-width: 0;
+}
+.progress-track {
+  width: 100%; height: 3px; background: rgba(255,255,255,.25);
+  border-radius: 2px; position: relative; overflow: visible;
+}
+.progress-fill {
+  height: 100%; background: var(--accent); border-radius: 2px;
+  position: relative; transition: width .1s linear;
+}
+.progress-thumb {
+  position: absolute; right: -6px; top: 50%;
+  transform: translateY(-50%);
+  width: 12px; height: 12px; background: var(--accent);
+  border-radius: 50%; opacity: 0; transition: opacity .15s;
+}
+.progress-wrap:hover .progress-thumb,
+.progress-wrap.dragging .progress-thumb { opacity: 1; }
+.progress-wrap:hover .progress-track,
+.progress-wrap.dragging .progress-track { height: 5px; }
+.progress-seek-hint {
+  position: absolute; bottom: 28px; transform: translateX(-50%);
+  background: rgba(0,0,0,.8); color: #fff; font-size: 12px;
+  padding: 4px 8px; border-radius: 4px; white-space: nowrap;
+  display: none; pointer-events: none;
+}
+.progress-wrap.dragging .progress-seek-hint { display: block; }
+
+/* ========== Speed Menu ========== */
+.speed-menu {
+  position: absolute; bottom: 70px; right: 12px; z-index: 9;
+  background: rgba(30,30,30,.95); border-radius: 12px;
+  padding: 4px; display: flex; gap: 2px;
+  backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,.1);
+}
+.speed-menu button {
+  background: none; border: none; color: rgba(255,255,255,.6);
+  padding: 8px 14px; font-size: 13px; font-weight: 600;
+  cursor: pointer; border-radius: 8px; transition: all .15s;
+}
+.speed-menu button.active { background: var(--accent); color: #000; }
+.speed-menu button:active { background: rgba(255,255,255,.1); }
+
+/* ========== Connection Page ========== */
+.connect-box {
+  max-width: 400px; margin: 0 auto; padding: 40px 16px;
+  text-align: center;
+}
+.connect-box .logo { font-size: 64px; color: var(--accent); margin-bottom: 16px; }
+.connect-box h2 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+.connect-box p { font-size: 14px; color: var(--text-secondary); margin-bottom: 24px; line-height: 1.5; }
+.input-group { margin-bottom: 12px; text-align: left; }
+.input-group label { font-size: 13px; font-weight: 500; color: var(--text-secondary); margin-bottom: 4px; display: block; }
+.input-group input {
+  width: 100%; padding: 12px 14px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--bg-card);
+  color: var(--text-primary); font-size: 16px; outline: none;
+  transition: border-color .2s;
+}
+.input-group input:focus { border-color: var(--accent); }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 12px 24px; border-radius: var(--radius-sm); border: none;
+  font-size: 15px; font-weight: 600; cursor: pointer;
+  transition: opacity .15s, transform .1s;
+  width: 100%;
+}
+.btn:active { transform: scale(0.98); }
+.btn-primary { background: var(--accent); color: #000; }
+.btn-secondary { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border); }
+.btn-success { background: var(--green); color: #000; }
+.btn-danger { background: var(--red); color: #fff; }
+.btn:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+.connect-status { font-size: 13px; margin-top: 8px; padding: 8px; border-radius: var(--radius-sm); }
+.connect-status.ok { color: var(--green); background: rgba(48, 209, 88, .1); }
+.connect-status.err { color: var(--red); background: rgba(255, 69, 58, .1); }
+
+/* ========== Messages ========== */
+.msg-item {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 14px 16px; border-bottom: 1px solid var(--border); cursor: pointer;
+}
+.msg-item:active { background: var(--bg-card); }
+.msg-item .mdi { font-size: 22px; margin-top: 1px; }
+.msg-item.unread { background: rgba(10, 132, 255, .05); }
+.msg-body { flex: 1; min-width: 0; }
+.msg-body h4 { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.msg-body p { font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg-time { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; }
+
+/* ========== Dedup Detail ========== */
+.dedup-header {
+  text-align: center; padding: 20px; margin-bottom: 16px;
+  background: var(--bg-card); border-radius: var(--radius-md);
+}
+.dedup-header .score { font-size: 36px; font-weight: 800; color: var(--accent); }
+.dedup-header .units { font-size: 14px; color: var(--text-secondary); margin: 4px 0; }
+.dedup-header .match-info { font-size: 12px; color: var(--text-tertiary); }
+.dedup-header .resolve-actions { display: flex; gap: 8px; margin-top: 16px; }
+.dedup-header .resolve-actions .btn { flex: 1; font-size: 13px; padding: 10px; }
+.match-pair {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.match-pair .filename { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.match-pair .tag {
+  padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
+  flex-shrink: 0;
+}
+.tag.md5 { background: rgba(48, 209, 88, .15); color: var(--green); }
+.tag.phash { background: rgba(10, 132, 255, .15); color: var(--blue); }
+.tag.dhash { background: rgba(255, 159, 10, .15); color: var(--accent); }
+
+/* ========== Loading ========== */
+.loading-dots {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 40px 0;
+}
+.loading-dots span {
+  width: 8px; height: 8px; background: var(--text-tertiary); border-radius: 50%;
+  animation: bounce 1.2s ease-in-out infinite;
+}
+.loading-dots span:nth-child(2) { animation-delay: .2s; }
+.loading-dots span:nth-child(3) { animation-delay: .4s; }
+@keyframes bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: .4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+.loading-bar {
+  height: 2px; background: var(--border); overflow: hidden; position: relative;
+}
+.loading-bar::after {
+  content: ''; position: absolute; left: -50%; width: 50%; height: 100%;
+  background: var(--accent); animation: bar 1.5s ease-in-out infinite;
+}
+@keyframes bar { 0% { left: -50%; } 100% { left: 150%; } }
+
+/* ========== Skeleton Loader ========== */
+.skeleton { background: var(--bg-card); border-radius: var(--radius-md); padding: 16px; margin-bottom: 10px; }
+.skeleton-line { height: 14px; border-radius: 4px; background: var(--border); margin-bottom: 8px; }
+.skeleton-line:last-child { width: 60%; margin-bottom: 0; }
+
+/* ========== Settings ========== */
+.setting-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--border); cursor: pointer;
+}
+.setting-item:active { background: var(--bg-card); }
+.setting-item .label { font-size: 14px; }
+.setting-item .value { font-size: 13px; color: var(--text-secondary); }
+.setting-item .mdi-chevron-right { color: var(--text-tertiary); font-size: 20px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Loading indicator -->
+  <div v-if="loading" class="loading-bar"></div>
+
+  <!-- Top Bar -->
+  <template v-if="!isConnectPage && serverUrl">
+    <div class="top-bar">
+      <h1>{{ pageTitle }}</h1>
+      <div class="top-actions">
+        <button v-if="showRefresh" class="top-btn" @click="refresh" :title="'刷新'">
+          <span class="mdi mdi-refresh"></span>
+        </button>
+      </div>
+    </div>
+  </template>
+
+  <!-- Main Content -->
+  <div class="app-main">
+    <router-view :server-url="serverUrl" @connected="onConnected" @disconnected="onDisconnected"
+      @loading="onLoading" @error="onError" @unread="onUnread"></router-view>
+  </div>
+
+  <!-- Bottom Tab Bar -->
+  <template v-if="serverUrl && !isPreviewPage && !isConnectPage">
+    <nav class="bottom-tabs">
+      <button class="tab-item" :class="{ active: currentTab === 'units' }" @click="goTab('/units')">
+        <span class="mdi mdi-folder-multiple-image"></span>
+        <span>单元</span>
+      </button>
+      <button class="tab-item" :class="{ active: currentTab === 'dedup' }" @click="goTab('/dedup')">
+        <span class="mdi mdi-compare"></span>
+        <span>查重</span>
+      </button>
+      <button class="tab-item" :class="{ active: currentTab === 'messages' }" @click="goTab('/messages')">
+        <span class="mdi mdi-message-badge-outline"></span>
+        <span>消息</span>
+        <span v-if="unreadCount > 0" class="badge-num">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
+      </button>
+      <button class="tab-item" :class="{ active: currentTab === 'settings' }" @click="goTab('/settings')">
+        <span class="mdi mdi-cog-outline"></span>
+        <span>设置</span>
+      </button>
+    </nav>
+  </template>
+</div>
+
+<script>
+const { createApp, ref, computed, watch, onMounted, onUnmounted, nextTick } = Vue;
+const { createRouter, createWebHashHistory } = VueRouter;
+
+/* ========== API Helper ========== */
+function api(server, path, opts = {}) {
+  const url = `${server}${path}`;
+  return fetch(url, {
+    headers: { 'Accept': 'application/json', ...opts.headers },
+    ...opts,
+  }).then(r => {
+    if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+    return r.json();
+  });
+}
+
+/* ========== Connect Page ========== */
+const ConnectPage = {
+  template: `
+    <div class="connect-box">
+      <div class="logo"><span class="mdi mdi-movie-open-star"></span></div>
+      <h2>影视资源管理器</h2>
+      <p v-if="!autoFailed">正在自动检测服务器…</p>
+      <p v-else>未能自动连接到服务器，<br>请手动输入地址后重试。</p>
+      <div v-if="autoFailed" class="input-group">
+        <label>服务器地址</label>
+        <input v-model="inputUrl" placeholder="例如 192.168.1.100:19527"
+          @keyup.enter="test" autocomplete="off" autocorrect="off" spellcheck="false">
+      </div>
+      <button v-if="autoFailed" class="btn btn-primary" @click="test" :disabled="testing || !inputUrl.trim()">
+        <span v-if="testing" class="mdi mdi-loading mdi-spin"></span>
+        <span v-else class="mdi mdi-wifi"></span>
+        {{ testing ? '连接中...' : '连接' }}
+      </button>
+      <div v-if="statusMsg" class="connect-status" :class="statusOk ? 'ok' : 'err'">
+        <span v-if="statusOk" class="mdi mdi-check-circle"></span>
+        <span v-else class="mdi mdi-alert-circle"></span>
+        {{ statusMsg }}
+      </div>
+    </div>
+  `,
+  props: ['serverUrl'],
+  emits: ['connected'],
+  data() { return {
+    inputUrl: this.serverUrl ? this.serverUrl.replace(/^https?:\/\//, '') : '',
+    testing: false, statusMsg: '', statusOk: false,
+    autoFailed: false,
+  };},
+  methods: {
+    async autoDetect() {
+      const origin = window.location.origin;
+      if (!origin || origin === 'null') { this.autoFailed = true; return; }
+      try {
+        await api(origin, '/api/health');
+        this.$emit('connected', origin);
+      } catch(e) {
+        this.inputUrl = origin.replace(/^https?:\/\//, '');
+        this.autoFailed = true;
+      }
+    },
+    async test() {
+      let url = this.inputUrl.trim();
+      if (!url) return;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'http://' + url;
+      this.testing = true; this.statusMsg = ''; this.statusOk = false;
+      try {
+        await api(url, '/api/health');
+        this.statusOk = true;
+        this.statusMsg = '连接成功！';
+        setTimeout(() => this.$emit('connected', url), 600);
+      } catch (e) {
+        this.statusMsg = '连接失败：' + e.message;
+      } finally { this.testing = false; }
+    }
+  },
+  mounted() { this.autoDetect(); }
+};
+
+/* ========== Units Page ========== */
+const UnitsPage = {
+  template: `
+    <div class="page">
+      <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
+      <template v-else-if="roots.length === 0">
+        <div class="empty-state">
+          <span class="mdi mdi-folder-open-outline"></span>
+          <p>暂无资源单元<br>请在桌面端添加媒体库目录并扫描</p>
+        </div>
+      </template>
+      <template v-else>
+        <div v-for="(group, ri) in roots" :key="ri" class="root-group">
+          <div class="root-header" @click="toggleRoot(ri)">
+            <span class="mdi mdi-folder"></span>
+            <h3>{{ group.name }}</h3>
+            <span class="count">{{ group.units.length }} 个单元</span>
+            <span class="mdi mdi-chevron-down mdi-chevron" :class="{ open: group.open }"></span>
+          </div>
+          <div v-if="group.open" class="root-units">
+            <div v-for="u in group.units" :key="u.id" class="card" @click="$router.push('/units/' + u.id)">
+              <div class="card-row">
+                <div class="card-icon amber"><span class="mdi" :class="u.file_count > 0 ? 'mdi-folder-image' : 'mdi-folder-outline'"></span></div>
+                <div class="card-body">
+                  <div class="card-title">{{ u.name }}</div>
+                  <div class="card-sub">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}</div>
+                </div>
+                <div class="card-meta">
+                  <div class="count">{{ u.file_count }}</div>
+                  <div class="label">文件</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  `,
+  props: ['serverUrl'],
+  emits: ['loading'],
+  data() { return { loading: true, roots: [] };},
+  methods: {
+    toggleRoot(ri) { this.roots[ri].open = !this.roots[ri].open; },
+    formatSize(bytes) {
+      if (!bytes) return '';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let i = 0; let size = bytes;
+      while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+      return size.toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+    }
+  },
+  async mounted() {
+    this.$emit('loading', true);
+    try {
+      const data = await api(this.serverUrl, '/api/units');
+      const units = data.units || [];
+      // Group by library_root_name
+      const map = {};
+      for (const u of units) {
+        const key = u.library_root_name || '其他';
+        if (!map[key]) map[key] = { name: key, units: [], open: true };
+        map[key].units.push(u);
+      }
+      this.roots = Object.values(map);
+    } catch(e) {
+      this.roots = [];
+    } finally { this.loading = false; this.$emit('loading', false); }
+  }
+};
+
+/* ========== Unit Files Page ========== */
+const UnitFilesPage = {
+  template: `
+    <div class="page" style="padding:0">
+      <div v-if="loading" class="loading-dots" style="padding-top:40px"><span></span><span></span><span></span></div>
+      <template v-else-if="files.length === 0">
+        <div class="empty-state">
+          <span class="mdi mdi-file-image-outline"></span>
+          <p>该单元暂无媒体文件</p>
+        </div>
+      </template>
+      <template v-else>
+        <div class="feed-header">
+          <h2>{{ unitName }}</h2>
+          <span class="count">{{ files.length }} 个文件</span>
+        </div>
+        <div class="feed-grid">
+          <div v-for="f in files" :key="f.id" class="feed-item" @click="preview(f)">
+            <div class="thumb-wrap">
+              <img :src="thumbUrl(f.id)" loading="lazy"
+                @load="onImgLoad(f.id)" @error="onImgError($event, f.id)"
+                :alt="f.filename"
+                :class="{ loaded: loaded.has(f.id) }">
+              <span v-if="!loaded.has(f.id) && !errored.has(f.id)" class="fallback-icon">
+                <span class="mdi" :class="f.media_type === 'video' ? 'mdi-filmstrip-box-multiple' : 'mdi-file-image-outline'"></span>
+              </span>
+              <span v-if="f.media_type === 'video'" class="vid-badge"><span class="mdi mdi-play"></span></span>
+            </div>
+            <div class="file-info">
+              <div class="name">{{ f.filename }}</div>
+              <div class="meta">{{ formatSize(f.size_bytes) }}</div>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  `,
+  props: ['serverUrl'],
+  emits: ['loading'],
+  data() { return { loading: true, unitName: '', files: [], loaded: new Set(), errored: new Set() };},
+  methods: {
+    thumbUrl(id) { return this.serverUrl + '/api/files/' + id + '/thumbnail'; },
+    onImgLoad(id) { this.loaded.add(id); },
+    onImgError(e, id) { this.errored.add(id); },
+    formatSize(bytes) {
+      if (!bytes) return '';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let i = 0; let size = bytes;
+      while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+      return size.toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+    },
+    preview(file) { this.$router.push('/preview/' + file.id); }
+  },
+  async mounted() {
+    this.$emit('loading', true);
+    try {
+      const id = this.$route.params.id;
+      const data = await api(this.serverUrl, '/api/units/' + id + '/files');
+      this.unitName = data.unit_name || '';
+      this.files = data.files || [];
+    } catch(e) {
+      this.files = [];
+    } finally { this.loading = false; this.$emit('loading', false); }
+  }
+};
+
+/* ========== Preview Page ========== */
+const PreviewPage = {
+  template: `
+    <div class="preview-overlay">
+      <div class="preview-top">
+        <button class="preview-back" @click="goBack"><span class="mdi mdi-arrow-left"></span></button>
+        <span style="font-size:14px;color:rgba(255,255,255,.7);margin-left:8px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ filename }}</span>
+      </div>
+      <div class="preview-content" @click="toggleControls">
+        <img v-if="mediaType === 'image'" :src="streamUrl" :alt="filename">
+        <video v-else-if="mediaType === 'video'" ref="videoEl" controls preload="metadata" width="100%">
+          <source :src="streamUrl">
+        </video>
+      </div>
+    </div>
+  `,
+  props: ['serverUrl'],
+  emits: ['loading'],
+  data() { return { filename: '', mediaType: 'image', streamUrl: '', showCtrl: true };},
+  methods: {
+    goBack() { this.$router.back(); },
+    toggleControls() { this.showCtrl = !this.showCtrl; }
+  },
+  async mounted() {
+    this.$emit('loading', true);
+    try {
+      const id = this.$route.params.id;
+      const data = await api(this.serverUrl, `/api/files/${id}`);
+      this.filename = data.filename || '';
+      this.mediaType = data.media_type || 'image';
+      this.streamUrl = this.serverUrl + '/api/files/' + id + '/stream';
+    } catch(e) {
+      this.filename = '加载失败';
+    } finally { this.$emit('loading', false); }
+  }
+};
+
+/* ========== Dedup Page ========== */
+const DedupPage = {
+  template: `
+    <div class="page">
+      <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
+      <template v-else-if="results.length === 0">
+        <div class="empty-state">
+          <span class="mdi mdi-check-circle-outline" style="color:var(--green)"></span>
+          <p>暂无查重结果</p>
+        </div>
+      </template>
+      <template v-else>
+        <div v-for="r in results" :key="r.id" class="card" @click="$router.push('/dedup/' + r.id)">
+          <div class="card-row">
+            <div class="card-icon" :class="scoreColor(r.similarity_score)"><span class="mdi mdi-compare-arrows"></span></div>
+            <div class="card-body">
+              <div class="card-title">{{ r.unit_a_name }} ↔ {{ r.unit_b_name }}</div>
+              <div class="card-sub">匹配 {{ r.match_count }} 个文件 · {{ r.match_types }}</div>
+            </div>
+            <div class="card-meta">
+              <div class="count" :style="{color: scoreHex(r.similarity_score)}">{{ (r.similarity_score * 100).toFixed(0) }}%</div>
+              <div class="label">相似</div>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  `,
+  props: ['serverUrl'],
+  emits: ['loading'],
+  data() { return { loading: true, results: [] };},
+  methods: {
+    scoreColor(s) {
+      if (s >= 0.9) return 'red';
+      if (s >= 0.8) return 'amber';
+      return 'blue';
+    },
+    scoreHex(s) {
+      if (s >= 0.9) return 'var(--red)';
+      if (s >= 0.8) return 'var(--accent)';
+      return 'var(--blue)';
+    }
+  },
+  async mounted() {
+    this.$emit('loading', true);
+    try {
+      const data = await api(this.serverUrl, '/api/dedup/results?unresolved_only=true');
+      this.results = data.results || [];
+    } catch(e) {
+      this.results = [];
+    } finally { this.loading = false; this.$emit('loading', false); }
+  }
+};
+
+/* ========== Dedup Detail Page ========== */
+const DedupDetailPage = {
+  template: `
+    <div class="page">
+      <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
+      <template v-else-if="detail">
+        <div class="dedup-header">
+          <div class="score">{{ (detail.similarity_score * 100).toFixed(0) }}%</div>
+          <div class="units">{{ detail.unit_a.name }} ↔ {{ detail.unit_b.name }}</div>
+          <div class="match-info">匹配 {{ detail.match_count }} 个文件</div>
+          <div v-if="!detail.is_resolved" class="resolve-actions">
+            <button class="btn btn-success" @click="resolve('keep_a')">保留 A</button>
+            <button class="btn btn-primary" @click="resolve('keep_b')">保留 B</button>
+            <button class="btn btn-secondary" @click="resolve('whitelist')">白名单</button>
+          </div>
+          <div v-else style="margin-top:12px;font-size:13px;color:var(--text-secondary)">
+            已处理：{{ detail.resolution }}
+          </div>
+        </div>
+        <h3 style="font-size:14px;padding:8px 4px;color:var(--text-secondary)">匹配文件</h3>
+        <div v-for="m in detail.file_matches || []" :key="m.id" class="match-pair">
+          <span class="mdi mdi-file-document-outline" style="color:var(--text-tertiary)"></span>
+          <span class="filename">#{{ m.file_a_id }} ↔ #{{ m.file_b_id }}</span>
+          <span class="tag" :class="m.match_type">{{ m.match_type }}</span>
+        </div>
+        <div v-if="!detail.file_matches || detail.file_matches.length === 0" class="empty-state" style="padding:20px">
+          <p>无匹配文件详情</p>
+        </div>
+      </template>
+      <template v-else>
+        <div class="empty-state"><p>查重结果不存在</p></div>
+      </template>
+    </div>
+  `,
+  props: ['serverUrl'],
+  emits: ['loading'],
+  data() { return { loading: true, detail: null };},
+  methods: {
+    async resolve(action) {
+      try {
+        await api(this.serverUrl, `/api/dedup/results/${this.$route.params.id}/resolve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ resolution: action }),
+        });
+        this.detail.is_resolved = true;
+        this.detail.resolution = action;
+      } catch(e) { alert('操作失败：' + e.message); }
+    }
+  },
+  async mounted() {
+    this.$emit('loading', true);
+    try {
+      this.detail = await api(this.serverUrl, `/api/dedup/results/${this.$route.params.id}`);
+    } catch(e) { this.detail = null; }
+    finally { this.loading = false; this.$emit('loading', false); }
+  }
+};
+
+/* ========== Messages Page ========== */
+const MessagesPage = {
+  template: `
+    <div class="page" style="padding:0">
+      <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
+      <template v-else-if="messages.length === 0">
+        <div class="empty-state">
+          <span class="mdi mdi-inbox-outline"></span>
+          <p>暂无消息</p>
+        </div>
+      </template>
+      <template v-else>
+        <div v-for="m in messages" :key="m.id"
+          class="msg-item" :class="{ unread: !m.is_read }"
+          @click="markRead(m)">
+          <span class="mdi" :class="iconFor(m.msg_type)" :style="{color: colorFor(m.msg_type)}"></span>
+          <div class="msg-body">
+            <h4>{{ m.title }}</h4>
+            <p>{{ m.body }}</p>
+          </div>
+          <div class="msg-time">{{ timeAgo(m.created_at) }}</div>
+        </div>
+      </template>
+    </div>
+  `,
+  props: ['serverUrl'],
+  emits: ['loading', 'unread'],
+  data() { return { loading: true, messages: [] };},
+  methods: {
+    iconFor(t) {
+      if (t === 'dedup_alert') return 'mdi-alert-circle-outline';
+      if (t === 'warning') return 'mdi-alert-outline';
+      if (t === 'error') return 'mdi-close-circle-outline';
+      return 'mdi-information-outline';
+    },
+    colorFor(t) {
+      if (t === 'dedup_alert') return 'var(--accent)';
+      if (t === 'warning') return 'var(--accent)';
+      if (t === 'error') return 'var(--red)';
+      return 'var(--blue)';
+    },
+    timeAgo(ts) {
+      if (!ts) return '';
+      const d = new Date(ts);
+      const now = new Date();
+      const diff = now - d;
+      if (diff < 60000) return '刚刚';
+      if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前';
+      if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前';
+      return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+    },
+    async markRead(m) {
+      if (!m.is_read) {
+        try {
+          await api(this.serverUrl, `/api/messages/${m.id}/read`, { method: 'POST' });
+          m.is_read = true;
+          this.$emit('unread');
+        } catch(e) {}
+      }
+    }
+  },
+  async mounted() {
+    this.$emit('loading', true);
+    try {
+      const data = await api(this.serverUrl, '/api/messages');
+      this.messages = data.messages || [];
+      this.$emit('unread', data.unread_count || 0);
+    } catch(e) {
+      this.messages = [];
+    } finally { this.loading = false; this.$emit('loading', false); }
+  }
+};
+
+/* ========== Settings Page ========== */
+const SettingsPage = {
+  template: `
+    <div class="page">
+      <div class="card" style="cursor:default">
+        <div class="card-row">
+          <div class="card-icon blue"><span class="mdi mdi-server"></span></div>
+          <div class="card-body">
+            <div class="card-title">服务器地址</div>
+            <div class="card-sub">{{ serverUrl }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="setting-item" @click="disconnect">
+        <span class="label">断开连接</span>
+        <span class="mdi mdi-logout" style="color:var(--red);font-size:20px"></span>
+      </div>
+      <div class="setting-item" @click="showAbout = !showAbout">
+        <span class="label">关于</span>
+        <span class="mdi mdi-chevron-right"></span>
+      </div>
+      <div v-if="showAbout" style="padding:16px;font-size:13px;color:var(--text-secondary);line-height:1.6">
+        影视资源管理器 Web 端 v0.1.0<br>
+        通过浏览器访问桌面端媒体库<br>
+        支持浏览、预览、查重和消息通知
+      </div>
+    </div>
+  `,
+  props: ['serverUrl'],
+  emits: ['disconnected'],
+  data() { return { showAbout: false };},
+  methods: {
+    disconnect() {
+      if (confirm('确定断开连接？')) this.$emit('disconnected');
+    }
+  }
+};
+
+/* ========== Router ========== */
+const routes = [
+  { path: '/connect', component: ConnectPage },
+  { path: '/units', component: UnitsPage },
+  { path: '/units/:id', component: UnitFilesPage },
+  { path: '/preview/:id', component: PreviewPage },
+  { path: '/dedup', component: DedupPage },
+  { path: '/dedup/:id', component: DedupDetailPage },
+  { path: '/messages', component: MessagesPage },
+  { path: '/settings', component: SettingsPage },
+  { path: '/', redirect: '/units' },
+];
+
+const router = createRouter({ history: createWebHashHistory(), routes });
+
+/* ========== Root App ========== */
+const App = {
+  data() {
+    const saved = localStorage.getItem('media_server_url') || '';
+    return {
+      serverUrl: saved,
+      loading: false,
+      unreadCount: 0,
+    };
+  },
+  computed: {
+    isConnectPage() { return this.$route.path === '/connect'; },
+    isPreviewPage() { return this.$route.path.startsWith('/preview/'); },
+    currentTab() {
+      const p = this.$route.path;
+      if (p.startsWith('/units')) return 'units';
+      if (p.startsWith('/dedup')) return 'dedup';
+      if (p.startsWith('/messages')) return 'messages';
+      if (p.startsWith('/settings') || p.startsWith('/connect')) return 'settings';
+      return 'units';
+    },
+    pageTitle() {
+      const p = this.$route.path;
+      if (p.startsWith('/units/')) return '文件';
+      if (p.startsWith('/units')) return '资源单元';
+      if (p.startsWith('/dedup/')) return '查重详情';
+      if (p.startsWith('/dedup')) return '查重结果';
+      if (p.startsWith('/messages')) return '消息中心';
+      if (p.startsWith('/settings')) return '设置';
+      if (p.startsWith('/connect')) return '连接';
+      return '影视资源管理器';
+    },
+    showRefresh() {
+      const p = this.$route.path;
+      return p === '/units' || p === '/dedup' || p === '/messages';
+    }
+  },
+  watch: {
+    serverUrl(val) {
+      if (val) localStorage.setItem('media_server_url', val);
+      else localStorage.removeItem('media_server_url');
+    }
+  },
+  methods: {
+    onConnected(url) {
+      this.serverUrl = url;
+      this.$router.push('/units');
+    },
+    onDisconnected() {
+      this.serverUrl = '';
+      this.$router.push('/connect');
+    },
+    onLoading(v) { this.loading = v; },
+    onError(e) { console.error(e); },
+    onUnread(count) {
+      if (typeof count === 'number') this.unreadCount = count;
+      else this.fetchUnread();
+    },
+    async fetchUnread() {
+      if (!this.serverUrl) return;
+      try {
+        const data = await api(this.serverUrl, '/api/messages/unread-count');
+        this.unreadCount = data.unread_count || 0;
+      } catch(e) { this.unreadCount = 0; }
+    },
+    refresh() {
+      const p = this.$route.path;
+      if (p === '/units') this.$router.go(0);
+      else { this.$router.go(0); }
+    },
+    goTab(path) {
+      if (this.$route.path === path) return;
+      this.$router.push(path);
+    }
+  },
+  created() {
+    // Redirect to connect if no server configured
+    if (!this.serverUrl && this.$route.path !== '/connect') {
+      this.$router.replace('/connect');
+    }
+  },
+  mounted() {
+    // Poll unread count
+    this.fetchUnread();
+    this._interval = setInterval(() => this.fetchUnread(), 30000);
+  },
+  beforeUnmount() {
+    if (this._interval) clearInterval(this._interval);
+  }
+};
+
+const app = createApp(App);
+app.use(router);
+app.mount('#app');
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+</script>
+</body>
+</html>
