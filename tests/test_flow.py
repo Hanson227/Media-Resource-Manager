@@ -4,6 +4,10 @@
 # -*- coding: utf-8 -*-
 # -*- coding: utf-8 -*-
 # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 自动化端到端测试 —— 模拟完整使用流程。
 
@@ -261,6 +265,97 @@ def test_save_to_db(scan_result: ScanResult, root: Path):
         check(f"数据库中有 4 个活跃单元 (实际: {len(units)})", len(units) == 4)
         total_files = sum(u.file_count for u in units)
         check(f"数据库中有 8 个文件 (实际: {total_files})", total_files == 8)
+
+
+def test_scanner_nested_promotion():
+    """测试 3.5: 扫描器嵌套单子目录提升 + .thumbnails 清理。"""
+    section("测试 3.5: 扫描器嵌套优化")
+
+    import tempfile
+    from app.core.scanner import MediaScanner
+
+    config = AppConfig()
+    scanner = MediaScanner(
+        extensions=config.media_extensions,
+        exclude_patterns=config.exclude_patterns,
+    )
+
+    tmp = Path(tempfile.mkdtemp(prefix="scanner_test_"))
+    try:
+        # 模拟「04年.../VID」嵌套结构
+        parent = tmp / "有个意义的名称"
+        child = parent / "VID"
+        child.mkdir(parents=True, exist_ok=True)
+        (child / "video.mp4").write_text("fake video")
+        (child / "photo.jpg").write_text("fake photo")
+
+        # 模拟零散根文件
+        (tmp / "root_file.mp4").write_text("fake root video")
+
+        # 模拟 .thumbnails 文件夹（应被排除）
+        thumb = tmp / "正常单元" / ".thumbnails"
+        thumb.mkdir(parents=True, exist_ok=True)
+        (thumb / "thumb.jpg").write_text("fake thumb")
+
+        # 正常单元的媒体文件（2个文件，模拟有意义的内容文件夹）
+        normal = tmp / "正常单元"
+        (normal / "内容1.mp4").write_text("fake content 1")
+        (normal / "内容2.mp4").write_text("fake content 2")
+
+        # 模拟单文件叶子文件夹（类似 Guofu/4.25/xxx.png）
+        single_file_dir = tmp / "散落文件夹"
+        single_file_dir.mkdir(parents=True, exist_ok=True)
+        (single_file_dir / "截图.png").write_text("fake screenshot")
+
+        # 模拟日期容器（4.10等）：几张截图 + 多个场景子文件夹
+        container = tmp / "4.10"
+        container.mkdir(parents=True, exist_ok=True)
+        (container / "截图1.png").write_text("scattered 1")
+        (container / "截图2.png").write_text("scattered 2")
+        scene_a = container / "江苏嫩妹"
+        scene_a.mkdir(parents=True, exist_ok=True)
+        (scene_a / "内容1.mp4").write_text("scene content 1")
+        (scene_a / "内容2.mp4").write_text("scene content 2")
+        scene_b = container / "粉红骚货"
+        scene_b.mkdir(parents=True, exist_ok=True)
+        (scene_b / "视频1.mp4").write_text("scene video 1")
+        (scene_b / "视频2.mp4").write_text("scene video 2")
+
+        result = scanner.scan_root(tmp)
+        unit_names = {u.name for u in result.units}
+
+        check("嵌套提升：父文件夹名替代无意义子文件夹名",
+              "有个意义的名称" in unit_names)
+        check("嵌套提升：无意义的子文件夹名被移除",
+              "VID" not in unit_names)
+        check("正常单元独立存在",
+              "正常单元" in unit_names)
+        check(".thumbnails 不被创建为单元",
+              ".thumbnails" not in unit_names)
+        check("零散根文件归入根单元",
+              any(u.name == str(tmp.name) for u in result.units))
+        check("单文件叶子单元被跳过",
+              "散落文件夹" not in unit_names)
+        check("日期容器被跳过（仅有零散文件+子场景）",
+              "4.10" not in unit_names)
+        check("容器内的场景文件夹独立存在",
+              "江苏嫩妹" in unit_names and "粉红骚货" in unit_names)
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_refresh_workflow():
+    """测试 3.7: 刷新流程方法名一致性。
+
+    验证 _cancel_all_workers 链不因改名而崩溃。
+    """
+    section("测试 3.7: 刷新流程方法名一致性")
+    from app.ui.right_panel.thumbnail_grid import ThumbnailGridView
+
+    # 验证方法存在（不实例化，只检查类有该方法）
+    has_method = hasattr(ThumbnailGridView, '_cancel_all_workers')
+    check("GridView._cancel_all_workers 存在", has_method)
 
 
 def test_hash_engine(root: Path):
@@ -725,6 +820,8 @@ def main():
         test_db()
         result = test_scanner(temp_root)
         test_save_to_db(result, temp_root)
+        test_scanner_nested_promotion()
+        test_refresh_workflow()
         test_hash_engine(temp_root)
         test_hash_batch(temp_root)
         test_thumbnails(temp_root)
