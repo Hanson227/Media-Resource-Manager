@@ -611,20 +611,22 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_exclude_unit(self, unit_id: int) -> None:
         """排除资源单元：标记为 excluded。"""
+        if unit_id <= 0:
+            logger.error(f"排除失败：无效的单元 ID {unit_id}")
+            QMessageBox.critical(self, "排除失败", f"无效的单元 ID：{unit_id}")
+            return
         try:
             with DatabaseManager.session() as session:
                 unit = q.get_unit_by_id(session, unit_id)
                 if unit is None:
                     logger.error(f"排除失败：找不到单元 {unit_id}")
+                    QMessageBox.critical(self, "排除失败", f"找不到资源单元 (ID={unit_id})")
                     return
                 name = unit.name
-                # 直接修改 ORM 属性，确保 session 追踪变更
                 unit.status = "excluded"
                 unit.updated_at = datetime.now()
                 session.flush()
-                # 验证变更已持久化
                 logger.info(f"已标记排除: {name} (id={unit_id}, status={unit.status})")
-            # 刷新模型后选中第一个根目录
             self._grid_view.clear()
             self._tree_view.refresh_model()
             root_idx = self._tree_view.model().index(0, 0)

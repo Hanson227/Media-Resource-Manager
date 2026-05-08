@@ -138,9 +138,9 @@ class FolderTreeModel(QAbstractItemModel):
         if node is None:
             return []
         if node.node_type == "unit":
-            return [node.node_id]
+            return [node.node_id] if node.node_id > 0 else []
         if node.node_type in ("root", "favorites"):
-            return [c.node_id for c in node.children if c.status == "active"]
+            return [c.node_id for c in node.children if c.status == "active" and c.node_id > 0]
         return []
 
     def get_node_by_unit_id(self, unit_id: int) -> Optional[TreeNode]:
