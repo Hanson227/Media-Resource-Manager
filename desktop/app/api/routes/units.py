@@ -3,11 +3,15 @@
 单元路由 —— /api/units 真实数据库查询端点。
 """
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
+from sqlalchemy import func
 
 from app.api.schemas import UnitItem, UnitListResponse
 from app.db.engine import DatabaseManager
 from app.db import queries as q
+from app.db.models import MediaFile
 
 router = APIRouter(prefix="/api/units", tags=["资源单元"])
 
@@ -18,12 +22,29 @@ async def list_units():
     try:
         with DatabaseManager.session() as session:
             units = q.get_all_active_units(session)
+
+            # 批量查询每个单元第一个文件的 ID（封面缩略图用）
+            unit_ids = [u.id for u in units]
+            cover_rows = (
+                session.query(
+                    MediaFile.resource_unit_id,
+                    func.min(MediaFile.id).label("first_id"),
+                )
+                .filter(MediaFile.resource_unit_id.in_(unit_ids))
+                .group_by(MediaFile.resource_unit_id)
+                .all()
+            )
+            cover_map = {row.resource_unit_id: row.first_id for row in cover_rows}
+
             items = [
                 UnitItem(
                     id=u.id, name=u.name, path=u.path,
                     file_count=u.file_count, total_size=u.total_size,
                     is_manual=u.is_manual, is_starred=u.is_starred,
                     status=u.status,
+                    library_root_id=u.library_root_id,
+                    library_root_name=Path(u.library_root.path).name if u.library_root else None,
+                    cover_file_id=cover_map.get(u.id),
                 )
                 for u in units
             ]
@@ -40,11 +61,21 @@ async def get_unit(unit_id: int):
             u = q.get_unit_by_id(session, unit_id)
             if not u:
                 raise HTTPException(status_code=404, detail=f"单元不存在: {unit_id}")
+            # 单个单元也查封面
+            first_file = (
+                session.query(MediaFile.id)
+                .filter(MediaFile.resource_unit_id == unit_id)
+                .order_by(MediaFile.id)
+                .first()
+            )
             return UnitItem(
                 id=u.id, name=u.name, path=u.path,
                 file_count=u.file_count, total_size=u.total_size,
                 is_manual=u.is_manual, is_starred=u.is_starred,
                 status=u.status,
+                library_root_id=u.library_root_id,
+                library_root_name=Path(u.library_root.path).name if u.library_root else None,
+                cover_file_id=first_file[0] if first_file else None,
             )
     except HTTPException:
         raise

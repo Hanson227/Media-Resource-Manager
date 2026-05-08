@@ -887,8 +887,39 @@ def test_unread_events_endpoint():
     check("has_dedup_alerts 为 bool", isinstance(data["has_dedup_alerts"], bool))
 
 
+def test_web_static_files():
+    section("测试 14: Web 静态文件服务")
+    from app.api.server import create_app
+    config = AppConfig()
+    app = create_app(config)
+    client = TestClient(app)
+
+    web_dir = Path(__file__).parent.parent / "web"
+    check("web 目录存在", web_dir.is_dir())
+    check("index.html 存在", (web_dir / "index.html").is_file())
+    check("manifest.json 存在", (web_dir / "manifest.json").is_file())
+    check("sw.js 存在", (web_dir / "sw.js").is_file())
+
+    # 浏览器访问根 → 返回 index.html
+    resp = client.get("/", headers={"Accept": "text/html,application/xhtml+xml"})
+    check("浏览器根请求返回 200", resp.status_code == 200)
+    check("响应为 HTML", resp.headers.get("content-type", "").startswith("text/html"))
+    check("响应含 Vue 标记", b"vue" in resp.content.lower())
+
+    # API 客户端访问根 → 返回 JSON
+    resp2 = client.get("/", headers={"Accept": "application/json"})
+    check("API 根请求返回 200", resp2.status_code == 200)
+    data2 = resp2.json()
+    check("API 根为 JSON", "name" in data2 and "version" in data2)
+
+    # 静态文件可访问
+    resp3 = client.get("/manifest.json")
+    check("manifest.json 可访问", resp3.status_code == 200)
+    check("manifest.json 为 JSON", resp3.headers.get("content-type", "").startswith("application/json"))
+
+
 def test_dedup_run_api():
-    section("测试 14: 触发查重 API")
+    section("测试 15: 触发查重 API")
     from app.api.server import create_app
     config = AppConfig()
     app = create_app(config)
@@ -978,6 +1009,7 @@ def main():
         test_thumbnail_binary()
         test_file_stream()
         test_unread_events_endpoint()
+        test_web_static_files()
         test_dedup_run_api()
 
     finally:
