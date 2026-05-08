@@ -3,11 +3,25 @@
 查重路由 —— /api/dedup 真实数据库查询端点。
 """
 
-from fastapi import APIRouter, Query, HTTPException
+import threading
+
+from fastapi import APIRouter, Query, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from app.api.schemas import DedupResultItem, DedupListResponse, DedupResolveRequest, StatusResponse
+from app.core.dedup_engine import DedupEngine
 from app.db.engine import DatabaseManager
 from app.db import queries as q
+from app.services.message_center import MessageCenter
+
+_dedup_lock = threading.Lock()
+_dedup_running = False
+
+
+class DedupRunRequest(BaseModel):
+    unit_ids: list[int] = Field(..., min_length=2)
+    threshold: float = Field(default=0.80, ge=0.0, le=1.0)
+
 
 router = APIRouter(prefix="/api/dedup", tags=["查重"])
 
@@ -96,3 +110,91 @@ async def resolve_dedup(result_id: int, body: DedupResolveRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/run")
+async def run_dedup(body: DedupRunRequest, request: Request):
+    """触发查重任务。"""
+    global _dedup_running
+
+    if not _dedup_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="查重任务正在运行中")
+    if _dedup_running:
+        _dedup_lock.release()
+        raise HTTPException(status_code=409, detail="查重任务正在运行中")
+
+    _dedup_running = True
+    _dedup_lock.release()
+
+    try:
+        cfg = request.app.state.config
+
+        unit_files_map = {}
+        unit_names = {}
+        with DatabaseManager.session() as session:
+            for uid in body.unit_ids:
+                unit = q.get_unit_by_id(session, uid)
+                if not unit:
+                    continue
+                unit_names[uid] = unit.name
+                files = q.get_files_by_unit(session, uid)
+                unit_files_map[uid] = [
+                    {"id": f.id, "path": f.path,
+                     "md5_hash": f.md5_hash, "phash": f.phash, "dhash": f.dhash}
+                    for f in files
+                ]
+
+        if len(unit_files_map) < 2:
+            return {"status": "error", "message": "至少需要 2 个有效资源单元"}
+
+        engine = DedupEngine(
+            jaccard_threshold=body.threshold,
+            phash_hamming_threshold=cfg.phash_hamming_threshold,
+            dhash_hamming_threshold=cfg.dhash_hamming_threshold,
+            face_enabled=cfg.face_detection_enabled,
+            face_distance_threshold=cfg.face_distance_threshold,
+        )
+
+        result = engine.run_dedup(unit_files_map, unit_names)
+
+        saved_results = []
+        with DatabaseManager.session() as session:
+            for dup in result.duplicates_found:
+                dr = q.upsert_dedup_result(
+                    session, dup.unit_a_id, dup.unit_b_id,
+                    dup.jaccard_similarity, len(dup.file_matches),
+                    dup.total_files_a, dup.total_files_b,
+                    dup.match_types_str,
+                )
+                # 清除旧匹配对，避免 UNIQUE 约束冲突
+                q.delete_file_matches_for_result(session, dr.id)
+                for fm in dup.file_matches:
+                    q.insert_file_match(
+                        session, dr.id, fm.file_a_id, fm.file_b_id,
+                        fm.score, fm.match_type,
+                    )
+                saved_results.append((dup, dr.id))
+            # session 在此提交，释放锁
+
+        # 在独立 session 中创建消息，避免 SQLite 锁冲突
+        for dup, dr_id in saved_results:
+            MessageCenter.create_dedup_alert(
+                unit_a_name=dup.unit_a_name,
+                unit_b_name=dup.unit_b_name,
+                similarity=dup.jaccard_similarity,
+                match_count=len(dup.file_matches),
+                dedup_result_id=dr_id,
+            )
+
+        return {
+            "status": "completed",
+            "total_compared": result.total_units_compared,
+            "duplicates_found": len(result.duplicates_found),
+            "elapsed_seconds": result.elapsed_seconds,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _dedup_running = False
