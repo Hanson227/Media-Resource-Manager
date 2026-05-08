@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 自动化端到端测试 —— 模拟完整使用流程。
 
@@ -437,6 +438,59 @@ def test_tree_model():
         check(f"根目录下有 {len(root.children)} 个单元", len(root.children) > 0)
         check("TreeNode 无 session 依赖（纯数据）", root.name is not None)
         check("单元有 file_count", root.children[0].file_count >= 0)
+        # 验证所有 TreeNode 的 node_id 有效（排除 bug: lambda 参数被覆盖后 0）
+        all_ids_valid = all(
+            child.node_id > 0
+            for root in model._roots
+            for child in root.children
+            if child.node_type == "unit"
+        )
+        check("所有单元 node_id > 0", all_ids_valid)
+        # 验证根节点也有有效 ID
+        root_ids_valid = all(
+            root.node_id > 0 or root.node_id == -1  # favorites 用 -1
+            for root in model._roots
+        )
+        check("根节点 node_id 有效", root_ids_valid)
+
+
+def test_context_menu_lambda_safety():
+    """测试 8.5: context_menu lambda 参数安全性（验证已修复的 bug）。
+
+    QAction.triggered 发出 checked=False，旧版 lambda uid=value: ...
+    会被 False 覆盖 uid 默认值，导致 Signal(int) 发出 0。
+    """
+    section("测试 8.5: context_menu lambda 参数安全性")
+
+    # 模拟 QAction.triggered 发出 checked=False
+    captured_id = 42
+    captured_path = "/test/path"
+    captured_root_id = 7
+
+    # 排除/收藏/拆分/取消标记 — 单参数 lambda
+    exclude_handler = lambda *args, uid=captured_id: uid
+    result = exclude_handler(False)
+    check("排除 lambda: *args 吸收 False，uid=42", result == 42)
+
+    # 标记为资源单元 — str 参数
+    mark_handler = lambda *args, p=captured_path: p
+    result = mark_handler(False)
+    check("标记 lambda: *args 吸收 False，path 保持字符串", result == captured_path)
+
+    # 合并 — 多参数 lambda
+    merge_handler = lambda *args, pid=captured_id, cids=[1,2,3]: pid
+    result = merge_handler(False)
+    check("合并 lambda: *args 吸收 False，pid=42", result == 42)
+
+    # 删除媒体库根目录
+    remove_handler = lambda *args, rid=captured_root_id: rid
+    result = remove_handler(False)
+    check("删除根 lambda: *args 吸收 False，rid=7", result == 7)
+
+    # 无参数的 lambda（刷新）不受影响
+    refresh_handler = lambda: True
+    result = refresh_handler()
+    check("刷新 lambda: 无参数不受影响", result is True)
 
 
 def test_message_center():

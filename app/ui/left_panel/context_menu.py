@@ -78,7 +78,7 @@ class FolderTreeContextMenu(QMenu):
                     merge_action = QAction("合并为单个资源单元", self)
                     merge_action.setToolTip(f"将 {len(children)} 个子单元合并到「{node.name}」下")
                     merge_action.triggered.connect(
-                        lambda pid=unit_id, cids=child_ids: self.merge_requested.emit(pid, cids)
+                        lambda *args, pid=unit_id, cids=child_ids: self.merge_requested.emit(pid, cids)
                     )
                     self.addAction(merge_action)
         except Exception as e:
@@ -88,17 +88,17 @@ class FolderTreeContextMenu(QMenu):
         if node.status == "merged":
             split_action = QAction("拆分资源单元", self)
             split_action.setToolTip("取消合并，恢复各子单元的独立状态")
-            split_action.triggered.connect(lambda uid=unit_id: self.split_requested.emit(uid))
+            split_action.triggered.connect(lambda *args, uid=unit_id: self.split_requested.emit(uid))
             self.addAction(split_action)
 
         # 标记/取消标记
         if node.is_manual or node.is_starred:
             unmark_action = QAction("取消标记", self)
-            unmark_action.triggered.connect(lambda uid=unit_id: self.unmark_requested.emit(uid))
+            unmark_action.triggered.connect(lambda *args, uid=unit_id: self.unmark_requested.emit(uid))
             self.addAction(unmark_action)
         else:
             mark_action = QAction("标记为资源单元", self)
-            mark_action.triggered.connect(lambda p=node.path: self.mark_requested.emit(p))
+            mark_action.triggered.connect(lambda *args, p=node.path: self.mark_requested.emit(p))
             self.addAction(mark_action)
 
         # 收藏 / 取消收藏
@@ -106,14 +106,14 @@ class FolderTreeContextMenu(QMenu):
             unstar_action = QAction("取消收藏", self)
             unstar_action.setToolTip("将此文件夹从收藏中移除")
             unstar_action.triggered.connect(
-                lambda uid=unit_id: self.unstar_requested.emit(uid)
+                lambda *args, uid=unit_id: self.unstar_requested.emit(uid)
             )
             self.addAction(unstar_action)
         else:
             star_action = QAction("添加到收藏", self)
             star_action.setToolTip("收藏此文件夹以便快速访问")
             star_action.triggered.connect(
-                lambda uid=unit_id: self.star_requested.emit(uid)
+                lambda *args, uid=unit_id: self.star_requested.emit(uid)
             )
             self.addAction(star_action)
 
@@ -122,7 +122,7 @@ class FolderTreeContextMenu(QMenu):
         # 排除
         exclude_action = QAction("排除此文件夹", self)
         exclude_action.setToolTip(f"将「{node.name}」标记为已排除，不再参与扫描和查重")
-        exclude_action.triggered.connect(lambda uid=unit_id: self.exclude_requested.emit(uid))
+        exclude_action.triggered.connect(lambda *args, uid=unit_id: self.exclude_requested.emit(uid))
         self.addAction(exclude_action)
 
     def _build_root_menu(self) -> None:
@@ -130,7 +130,7 @@ class FolderTreeContextMenu(QMenu):
         remove_action = QAction("删除此媒体库", self)
         remove_action.setToolTip("删除此媒体库根目录及其所有数据（资源单元和文件记录）")
         remove_action.triggered.connect(
-            lambda rid=self._root_id: self.remove_root_requested.emit(rid)
+            lambda *args, rid=self._root_id: self.remove_root_requested.emit(rid)
         )
         self.addAction(remove_action)
 
