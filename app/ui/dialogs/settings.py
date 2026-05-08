@@ -57,6 +57,8 @@ class SettingsDialog(QDialog):
         palette.setColor(QPalette.ColorRole.ButtonText, QColor(TEXT))
         palette.setColor(QPalette.ColorRole.Text, QColor(TEXT))
         palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(OVERLAY_0))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(INDIGO))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor(TEXT))
         self.setPalette(palette)
 
         layout = QVBoxLayout(self)
