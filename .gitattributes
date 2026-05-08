@@ -1,0 +1,41 @@
+# Auto-detect text files and normalize line endings
+* text=auto
+
+# Python source files
+*.py text diff=python
+
+# Markdown and documentation
+*.md text
+*.txt text
+
+# Config files
+*.cfg text
+*.ini text
+*.json text
+*.yaml text
+*.yml text
+*.toml text
+*.gitignore text
+.gitattributes text
+
+# Shell scripts (must keep LF on Windows too)
+*.sh text eol=lf
+
+# Batch scripts (must keep CRLF on Windows)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files - do not modify
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+*.bmp binary
+*.webp binary
+*.ico binary
+*.mp4 binary
+*.avi binary
+*.mkv binary
+*.mov binary
+*.db binary
+*.pyc binary
