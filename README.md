@@ -1,6 +1,6 @@
 # 影视资源管理器 (Media Resource Manager)
 
-> 纯本地运行的 Windows 桌面应用，用于管理电脑上的本地影视/图片资源文件夹。
+> 纯本地运行的 Windows 桌面应用 + Android 手机客户端，用于管理电脑上的本地影视/图片资源文件夹。
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-41CD52?logo=qt&logoColor=white)
@@ -9,6 +9,20 @@
 
 ---
 
+## 仓库结构
+
+```
+Media/
+├── desktop/             # Windows 桌面应用（Python/PySide6）
+│   ├── main.py
+│   ├── app/
+│   └── tests/
+├── android/             # Android 手机客户端（Kotlin）
+├── API.md               # HTTP API 契约（两个平台共享）
+├── README.md
+└── .gitignore
+```
+
 ## 功能
 
 - **文件夹级资源管理** — 自动扫描本地文件夹，将包含媒体文件的目录识别为"资源单元"，支持嵌套场景
@@ -16,14 +30,15 @@
 - **缩略图预览** — 图像/视频自动生成缩略图，支持网格浏览、空格键快速预览
 - **实时文件监控** — watchdog 监测文件变更，支持去抖合并
 - **局域网 API** — 内置 FastAPI 服务（默认 `0.0.0.0:19527`），可通过 HTTP 查询媒体库数据
+- **手机 APP** — 通过 API + SMB 协议在手机上浏览、播放电脑中的媒体文件
 - **深色主题** — Catppuccin Mocha 配色，全局 QSS + QPalette 统一渲染
 
-## 架构
+## 桌面应用架构
 
 ```
-main.py                  # 入口：配置 → 数据库 → API → GUI → 文件监控
-config.py                # frozen dataclass，从 config.json 加载
-app/
+desktop/main.py          # 入口：配置 → 数据库 → API → GUI → 文件监控
+desktop/config.py        # frozen dataclass，从 config.json 加载
+desktop/app/
   core/                  # 纯业务逻辑（无 UI/DB 依赖）
     scanner.py           #   递归扫描，自动识别资源单元
     hash_engine.py       #   协调 MD5/pHash/dHash 计算
@@ -50,8 +65,8 @@ app/
   registry/              # 注册器 + HashAlgorithm 抽象
   services/              # 消息中心、清理服务、SMB 共享
   utils/                 # 枚举常量、文件辅助函数
-tests/
-  test_flow.py           # 端到端测试（93 项，覆盖导入/DB/扫描/哈希/查重/UI/API）
+desktop/tests/
+  test_flow.py           # 端到端测试（93 项）
 ```
 
 ### 数据库
@@ -99,6 +114,7 @@ python -m venv .venv
 .venv\Scripts\activate
 
 # 安装依赖
+cd desktop
 pip install -r requirements.txt
 
 # 运行
@@ -107,7 +123,7 @@ python main.py
 
 ### 配置
 
-首次运行会在项目根目录自动生成 `config.json`，可手动编辑：
+首次运行会在 `desktop/` 下自动生成 `config.json`，可手动编辑：
 
 ```json
 {
@@ -125,7 +141,7 @@ python main.py
 ### 测试
 
 ```bash
-python tests/test_flow.py
+cd desktop && python tests/test_flow.py
 ```
 
 ## API 端点
@@ -146,17 +162,21 @@ python tests/test_flow.py
 | POST | `/api/messages/read-all` | 全部标记已读 |
 
 完整文档在应用运行后访问 `http://localhost:19527/docs`。
+手机 APP 集成指南详见 [API.md](API.md)。
 
 ## 已知限制
 
 - **人脸检测** — 模型文件（OpenCV DNN）需要用户自行下载，目前返回空列表
 - **搜索/筛选** — 网格视图中的搜索和媒体类型筛选为基础实现，接口已预留
 - **无用户认证** — API 在局域网内完全开放
-- **非视频类型** — RAW 格式依赖 `rawpy`、HEIC 格式依赖 `pillow-heif`，需确认相关库已安装
+- **非视频类型** — RAW 格式依赖 `rawpy`、HEIC 格式依赖 `pillow-heif`
 
 ## 开发
 
 ```bash
+# 桌面端
+cd desktop
+
 # 代码风格
 ruff check .
 

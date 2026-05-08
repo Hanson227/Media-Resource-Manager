@@ -1,20 +1,35 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-代码修改后请运行 `python tests/test_flow.py` 验证确认无误。请使用中文进行回答，代码、文件名、API 名等保持英文。
+代码修改后请运行 `python desktop/tests/test_flow.py` 验证确认无误。请使用中文进行回答，代码、文件名、API 名等保持英文。
+
+## Repo Structure
+
+```
+Media/                          # Git root — monorepo
+├── desktop/                    # Windows 桌面应用 (PySide6)
+│   ├── main.py                 # Entry point
+│   ├── app/                    # Python source
+│   ├── tests/
+│   └── ...
+├── android/                    # 手机端 Android 应用
+├── API.md                      # HTTP API 契约（两个平台共享）
+├── README.md
+└── CLAUDE.md
+```
 
 ## Testing Policy
 
-所有新增功能必须附带对应的测试用例，合并到 `tests/test_flow.py` 中。
+所有新增功能必须附带对应的测试用例，合并到 `desktop/tests/test_flow.py` 中。
 
 ### 覆盖层级
 
 | 层级 | 测试内容 | 示例 |
 |------|---------|------|
-| **后端逻辑** | core/*, services/*, registry/* | 扫描、哈希、查重、消息中心 |
-| **数据库查询** | db/queries.py | 新增查询函数、状态变更 |
-| **UI 控件信号** | left_panel/, dialogs/, main_window | 右键菜单 emit、弹窗、按钮 |
-| **API 路由** | api/routes/* | 新增 endpoint 的响应 |
+| **后端逻辑** | desktop/app/core/*, services/*, registry/* | 扫描、哈希、查重、消息中心 |
+| **数据库查询** | desktop/app/db/queries.py | 新增查询函数、状态变更 |
+| **UI 控件信号** | desktop/app/ui/left_panel/, dialogs/, main_window | 右键菜单 emit、弹窗、按钮 |
+| **API 路由** | desktop/app/api/routes/* | 新增 endpoint 的响应 |
 
 ### 测试方式
 
@@ -24,12 +39,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### 执行
 
-- 新增功能实现后，运行 `python tests/test_flow.py` 确认全部通过
+- 新增功能实现后，运行 `python desktop/tests/test_flow.py` 确认全部通过
 - 所有测试按 `test_TAG()` 函数组织，在 `main()` 中按顺序调用
-
-## Project Overview
-
-影视资源管理器 (Media Resource Manager) — a Windows desktop app for managing local media collections (movies/TV). Built with PySide6 + SQLAlchemy + FastAPI. v0.1.0, Chinese UI.
 
 ## Commands
 
@@ -37,22 +48,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Activate conda environment
 conda activate media-manager
 
-# Run the application (Python 3.10)
-python main.py
+# Run the desktop application
+cd desktop && python main.py
 
-# Run the test suite (single file with 10 test sections)
-python tests/test_flow.py
+# Run the test suite
+cd desktop && python tests/test_flow.py
+
+# Or run from repo root (main.py auto-switches CWD)
+python desktop/main.py
+python desktop/tests/test_flow.py
 
 # Install dependencies
-pip install -r requirements.txt
+cd desktop && pip install -r requirements.txt
 ```
 
-## Architecture
+## Architecture (desktop/)
 
 ```
-main.py                  # Entry point: config → db init → API server → GUI → watcher
-config.py                # Frozen dataclass AppConfig, loaded from config.json
-app/
+desktop/main.py          # Entry point: config → db init → API server → GUI → watcher
+desktop/config.py        # Frozen dataclass AppConfig, loaded from config.json
+desktop/app/
   core/                  # Business logic (no UI/db dependencies)
     scanner.py           #   Recursive folder scanner, auto-detects "resource units"
     hash_engine.py       #   Coordinates MD5/pHash/dHash computation, video frame extraction
@@ -95,7 +110,7 @@ app/
 
 ## Resource Unit Auto-Detection
 
-The scanner (`app/core/scanner.py`) walks bottom-up: a folder is a "resource unit" if it directly contains media files. If a parent also contains media files directly, both become units. Sub-folders without media files don't create separate units.
+The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "resource unit" if it directly contains media files. If a parent also contains media files directly, both become units. Sub-folders without media files don't create separate units.
 
 ## Dedup Pipeline
 
@@ -107,14 +122,13 @@ The scanner (`app/core/scanner.py`) walks bottom-up: a folder is a "resource uni
 
 ## Database
 
-SQLite with WAL mode + foreign keys enabled. Single-file at `data/media_manager.db` (configurable via `config.json`). 10 tables with CHECK constraints enforcing enum values. `expire_on_commit=False` so ORM objects survive session close.
+SQLite with WAL mode + foreign keys enabled. Single-file at `desktop/data/media_manager.db` (configurable via `config.json`). 10 tables with CHECK constraints enforcing enum values. `expire_on_commit=False` so ORM objects survive session close.
 
-Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `config.json`, loaded into a frozen `AppConfig` dataclass at startup.
+Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desktop/config.json`, loaded into a frozen `AppConfig` dataclass at startup.
 
 ## Limitations / Work-in-Progress
 
-- Face detection (`app/core/hash_engine.py:detect_faces`) is stubbed out — returns `[]`, waiting for OpenCV DNN model files
+- Face detection (`desktop/app/core/hash_engine.py:detect_faces`) is stubbed out — returns `[]`, waiting for OpenCV DNN model files
 - Search and media-type filtering in the grid are placeholder slots
 - No user authentication (API is open on LAN)
-- Database migration framework exists but only v1 (no incremental migrations yet)
 - Config is mutable at runtime via settings dialog but frozen everywhere else

@@ -72,6 +72,9 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     """程序主入口。"""
+    # 切换到脚本所在目录，确保相对路径（config.json, data/ 等）正确
+    os.chdir(Path(__file__).parent)
+
     logger.info("=" * 50)
     logger.info("影视资源管理器 v0.1.0 启动中...")
     logger.info("=" * 50)
