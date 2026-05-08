@@ -10,6 +10,7 @@
 """
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -613,30 +614,25 @@ class MainWindow(QMainWindow):
         try:
             with DatabaseManager.session() as session:
                 unit = q.get_unit_by_id(session, unit_id)
-                name = unit.name if unit else str(unit_id)
-                q.mark_unit_excluded(session, unit_id)
+                if unit is None:
+                    logger.error(f"排除失败：找不到单元 {unit_id}")
+                    return
+                name = unit.name
+                # 直接修改 ORM 属性，确保 session 追踪变更
+                unit.status = "excluded"
+                unit.updated_at = datetime.now()
+                session.flush()
+                # 验证变更已持久化
+                logger.info(f"已标记排除: {name} (id={unit_id}, status={unit.status})")
+            # 刷新模型后选中第一个根目录
             self._grid_view.clear()
-            # 记录当前展开状态和选中项，避免刷新后跳转到顶部
-            current_idx = self._tree_view.currentIndex()
             self._tree_view.refresh_model()
-            if current_idx.isValid():
-                # 尝试恢复到同级位置（父节点下的第一个子节点）
-                parent_idx = self._tree_view.model().parent(current_idx)
-                if parent_idx.isValid():
-                    sibling = self._tree_view.model().index(0, 0, parent_idx)
-                    if sibling.isValid():
-                        self._tree_view.setCurrentIndex(sibling)
-                else:
-                    # 无父节点 → 选中第一个根目录
-                    root_idx = self._tree_view.model().index(0, 0)
-                    if root_idx.isValid():
-                        self._tree_view.setCurrentIndex(root_idx)
-            else:
-                root_idx = self._tree_view.model().index(0, 0)
-                if root_idx.isValid():
-                    self._tree_view.setCurrentIndex(root_idx)
+            root_idx = self._tree_view.model().index(0, 0)
+            if root_idx.isValid():
+                self._tree_view.setCurrentIndex(root_idx)
             self._status_bar.set_status(f"已排除: {name}")
         except Exception as e:
+            logger.error(f"排除失败: {e}")
             QMessageBox.critical(self, "排除失败", str(e))
 
     @Slot(int)

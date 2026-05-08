@@ -157,10 +157,11 @@ def get_starred_units(session: Session) -> list[ResourceUnit]:
 
 def mark_unit_excluded(session: Session, unit_id: int) -> None:
     """将资源单元标记为排除状态。"""
-    session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
-        "status": "excluded",
-        "updated_at": datetime.now(),
-    })
+    unit = session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).first()
+    if unit:
+        unit.status = "excluded"
+        unit.updated_at = datetime.now()
+        session.flush()
 
 
 def get_excluded_units(session: Session) -> list[ResourceUnit]:

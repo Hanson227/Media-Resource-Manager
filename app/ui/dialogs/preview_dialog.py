@@ -17,7 +17,7 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QPixmap, QKeyEvent, QPainter
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QHBoxLayout,
-    QApplication,
+    QApplication, QSlider,
 )
 
 from app.ui.theme import BASE, TEXT, SUBTEXT_0, OVERLAY_0
@@ -84,6 +84,28 @@ class QuickLookPreviewDialog(QDialog):
         self._media_label.setStyleSheet("background: transparent;")
         layout.addWidget(self._media_label, 1)
 
+        # 视频进度条
+        seek_layout = QHBoxLayout()
+        seek_layout.setContentsMargins(0, 0, 0, 0)
+        self._time_label = QLabel("00:00 / 00:00")
+        self._time_label.setStyleSheet(
+            f"color: {SUBTEXT_0}; font-size: 11px; background: transparent;"
+        )
+        self._time_label.setFixedWidth(100)
+        seek_layout.addWidget(self._time_label)
+        self._seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self._seek_slider.setRange(0, 1000)
+        self._seek_slider.setStyleSheet(
+            f"QSlider::groove:horizontal {{ background: {OVERLAY_0}; height: 4px; border-radius: 2px; }}"
+            f"QSlider::handle:horizontal {{ background: #c6a0f6; width: 12px; margin: -5px 0; border-radius: 6px; }}"
+            f"QSlider::sub-page:horizontal {{ background: #c6a0f6; border-radius: 2px; }}"
+        )
+        self._seek_slider.sliderMoved.connect(self._on_slider_seek)
+        self._seek_slider.hide()
+        seek_layout.addWidget(self._seek_slider, 1)
+        self._seek_layout = seek_layout
+        layout.addLayout(seek_layout)
+
         # 底部信息栏
         bottom_layout = QHBoxLayout()
         self._info_label = QLabel()
@@ -120,6 +142,8 @@ class QuickLookPreviewDialog(QDialog):
 
     def _show_image(self, path_str: str) -> None:
         """显示图片。"""
+        self._seek_slider.hide()
+        self._time_label.setText("")
         pixmap = QPixmap(path_str)
         if pixmap.isNull():
             self._media_label.setText("无法加载图片")
@@ -140,7 +164,6 @@ class QuickLookPreviewDialog(QDialog):
             self._media_label.setText("OpenCV 不可用，无法预览视频")
             return
         try:
-            # 处理中文路径
             from app.utils.image_helpers import VideoCapture_unicode
             self._cap = VideoCapture_unicode(Path(path_str))
             if not self._cap.isOpened():
@@ -148,6 +171,8 @@ class QuickLookPreviewDialog(QDialog):
                 return
             self._total_frames = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
             self._fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
+            self._seek_slider.show()
+            self._update_seek_bar()
             self._video_timer.start(33)  # ~30 fps
         except Exception as e:
             logger.error(f"打开视频失败: {path_str} - {e}")
@@ -160,14 +185,12 @@ class QuickLookPreviewDialog(QDialog):
             return
         ret, frame = self._cap.read()
         if not ret:
-            # 循环回开头
             self._cap.set(self._cv2.CAP_PROP_POS_FRAMES, 0)
             ret, frame = self._cap.read()
             if not ret:
                 self._video_timer.stop()
                 return
         rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
-        from PIL import Image
         h, w, ch = rgb.shape
         qimg = self._cv2_to_qpixmap(rgb)
         available = self._media_label.size()
@@ -177,6 +200,7 @@ class QuickLookPreviewDialog(QDialog):
             Qt.TransformationMode.SmoothTransformation,
         )
         self._media_label.setPixmap(scaled)
+        self._update_seek_bar()
 
     @staticmethod
     def _cv2_to_qpixmap(rgb):
@@ -198,12 +222,38 @@ class QuickLookPreviewDialog(QDialog):
 
     def _stop_video(self) -> None:
         self._video_timer.stop()
+        self._seek_slider.hide()
+        self._time_label.setText("")
         if self._cap is not None:
             try:
                 self._cap.release()
             except Exception:
                 pass
             self._cap = None
+
+    def _update_seek_bar(self) -> None:
+        """更新进度条位置和时间标签。"""
+        if self._cap is None or not self._cap.isOpened() or self._total_frames <= 0:
+            return
+        current_frame = self._cap.get(self._cv2.CAP_PROP_POS_FRAMES)
+        pos = int(1000 * current_frame / self._total_frames)
+        self._seek_slider.blockSignals(True)
+        self._seek_slider.setValue(pos)
+        self._seek_slider.blockSignals(False)
+        current_sec = int(current_frame / self._fps) if self._fps > 0 else 0
+        total_sec = int(self._total_frames / self._fps) if self._fps > 0 else 0
+        self._time_label.setText(
+            f"{current_sec // 60:02d}:{current_sec % 60:02d} / "
+            f"{total_sec // 60:02d}:{total_sec % 60:02d}"
+        )
+
+    def _on_slider_seek(self, pos: int) -> None:
+        """通过拖动进度条跳转视频。"""
+        if self._cap is None or not self._cap.isOpened() or self._total_frames <= 0:
+            return
+        target_frame = int(pos * self._total_frames / 1000)
+        target_frame = max(0, min(target_frame, self._total_frames - 1))
+        self._cap.set(self._cv2.CAP_PROP_POS_FRAMES, target_frame)
 
     def _navigate(self, delta: int) -> None:
         """切换文件。"""
@@ -237,7 +287,7 @@ class QuickLookPreviewDialog(QDialog):
         target_frame = current_frame + int(delta_sec * self._fps)
         target_frame = max(0, min(target_frame, self._total_frames - 1))
         self._cap.set(self._cv2.CAP_PROP_POS_FRAMES, target_frame)
-        # 立即显示一帧
+        # 立即显示一帧并更新进度条
         self._next_video_frame()
 
     def resizeEvent(self, event) -> None:
