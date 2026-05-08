@@ -165,7 +165,8 @@ def test_preflight():
 
 def test_db():
     section("测试 1: 数据库初始化 + 完整性检查")
-    db_path = Path("data/test_flow.db")
+    _BASE = Path(__file__).parent.parent
+    db_path = _BASE / "data" / "test_flow.db"
     init_db(db_path)
     migrate_db()
     engine = DatabaseManager.get_engine()
@@ -821,7 +822,8 @@ def main():
 
     # 初始化
     config = AppConfig()
-    db_path = Path("data/test_flow.db")
+    _BASE = Path(__file__).parent.parent
+    db_path = _BASE / "data" / "test_flow.db"
     init_db(db_path)
 
     # 创建测试媒体库

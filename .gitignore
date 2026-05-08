@@ -1,34 +1,36 @@
-# Python 字节码
+# ============ Python (desktop) ============
+
+# Bytecode
 __pycache__/
 *.py[cod]
 *$py.class
 *.pyo
 
-# 虚拟环境
+# Virtual env
 .venv/
 venv/
 env/
 ENV/
 
-# 环境变量 & 密钥
+# Environment & secrets
 .env
 .env.*
 settings.json
 
-# 打包构建
+# Build artifacts
 dist/
 build/
 *.egg-info/
 *.egg
 *.spec
 
-# 缩略图缓存
+# Thumbnail cache
 .thumbnails/
 
-# 数据库 & 运行时数据
-data/
+# Runtime data
+desktop/data/
 
-# 日志
+# Logs
 *.log
 .claude/logs/
 
@@ -38,7 +40,45 @@ data/
 *.swp
 *.swo
 
-# 操作系统
+# OS
 Thumbs.db
 .DS_Store
 $RECYCLE.BIN/
+
+# ============ Android (android/) ============
+
+# Built application files
+*.apk
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+build/
+.navigation/
+*.log
+
+# Gradle files
+.gradle/
+local.properties
+*.iml
+
+# Android Studio
+*.apk
+*.aab
+output.json
+
+# Keystore
+*.jks
+*.keystore
+
+# Google Services
+google-services.json
