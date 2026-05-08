@@ -812,7 +812,7 @@ def test_api_app():
 
 
 def test_thumbnail_binary():
-    section("测试 11: 缩略图返回二进制")
+    section("测试 16: 缩略图返回二进制")
     from app.api.server import create_app
     config = AppConfig()
     app = create_app(config)
@@ -840,6 +840,27 @@ def test_thumbnail_binary():
     resp2 = client.get("/api/files/99999/thumbnail")
     check("不存在的缩略图返回 404", resp2.status_code == 404)
 
+
+
+def test_unit_response_fields():
+    section("测试 11.5: 单元响应字段完整性")
+    from app.api.server import create_app
+    from fastapi.testclient import TestClient
+    config = AppConfig()
+    app = create_app(config)
+    client = TestClient(app)
+    resp = client.get("/api/units")
+    if resp.status_code == 200:
+        data = resp.json()
+        if data.get("units"):
+            u = data["units"][0]
+            check("包含 cover_file_id", "cover_file_id" in u)
+            check("包含 library_root_id", "library_root_id" in u)
+            check("包含 library_root_name", "library_root_name" in u)
+        else:
+            check("无单元可验证（跳过）", True)
+    else:
+        check(f"单元接口异常 {resp.status_code}", False)
 
 def test_file_stream():
     section("测试 12: 文件流式传输")
@@ -1006,6 +1027,7 @@ def main():
         test_ui_signal_integration()
         test_message_center()
         test_api_app()
+        test_unit_response_fields()
         test_thumbnail_binary()
         test_file_stream()
         test_unread_events_endpoint()
