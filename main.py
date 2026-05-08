@@ -125,6 +125,10 @@ def main() -> None:
     app.setApplicationName(config.window_title)
     app.setApplicationVersion("0.1.0")
 
+    # 应用主题调色板
+    from app.ui.theme import apply_theme
+    apply_theme(app)
+
     # 设置应用图标
     icon_path = Path(__file__).parent / "app" / "resources" / "icon.png"
     if icon_path.exists():

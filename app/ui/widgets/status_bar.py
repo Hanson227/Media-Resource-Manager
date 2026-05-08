@@ -15,7 +15,7 @@ from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
-    QStatusBar, QLabel, QProgressBar, QWidget, QHBoxLayout,
+    QStatusBar, QLabel, QProgressBar, QHBoxLayout,
 )
 
 from config import AppConfig
@@ -54,9 +54,6 @@ class MainStatusBar(QStatusBar):
         self._progress_bar.setValue(0)
         self._progress_bar.hide()
         self.addWidget(self._progress_bar)
-
-        # ==== 伸展占位 ====
-        self.addPermanentWidget(QWidget())  # 占用剩余空间
 
         # ==== 上次扫描时间 ====
         self._last_scan_label = QLabel("尚未扫描")
