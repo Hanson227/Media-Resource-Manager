@@ -2,8 +2,7 @@
 """
 Catppuccin Mocha 主题色板 —— 集中管理所有颜色常量。
 
-避免硬编码十六进制颜色值分散在多个 Python 文件中。
-QSS 文件（style.qss）不受此模块影响，CSS 变量在 Qt 6.8 之前不可用。
+QSS 样式表位于 style.qss，Python 层颜色用于动态/程序化设置。
 """
 
 # ---- 底色 ----
@@ -31,3 +30,34 @@ BLUE = "#89b4fa"
 GREEN = "#a6e3a1"
 PEACH = "#fab387"
 RED = "#f38ba8"
+
+
+def apply_theme(app) -> None:
+    """对 QApplication 应用全局主题。
+
+    设置深色调色板，适用于 Catppuccin Mocha + style.qss。
+    """
+    from PySide6.QtGui import QPalette, QColor
+
+    palette = QPalette()
+    for role, color_str in (
+        (QPalette.ColorRole.Window, BASE),
+        (QPalette.ColorRole.WindowText, TEXT),
+        (QPalette.ColorRole.Base, SURFACE_0),
+        (QPalette.ColorRole.AlternateBase, SURFACE_1),
+        (QPalette.ColorRole.Button, SURFACE_0),
+        (QPalette.ColorRole.ButtonText, TEXT),
+        (QPalette.ColorRole.Text, TEXT),
+        (QPalette.ColorRole.BrightText, TEXT),
+        (QPalette.ColorRole.ToolTipBase, SURFACE_1),
+        (QPalette.ColorRole.ToolTipText, TEXT),
+        (QPalette.ColorRole.Highlight, INDIGO),
+        (QPalette.ColorRole.HighlightedText, TEXT),
+    ):
+        palette.setColor(role, QColor(color_str))
+    # 禁用态颜色
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(OVERLAY_0))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(OVERLAY_0))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(OVERLAY_0))
+
+    app.setPalette(palette)

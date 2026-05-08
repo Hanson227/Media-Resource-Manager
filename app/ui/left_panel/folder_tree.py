@@ -83,7 +83,7 @@ class FolderTreeModel(QAbstractItemModel):
                     fav_node = TreeNode(
                         node_type="favorites",
                         node_id=-1,
-                        name=f"⭐ 收藏  ({len(starred_units)} 个片段)",
+                        name=f"★ 收藏  ({len(starred_units)} 个片段)",
                         path="",
                     )
                     for unit in starred_units:
@@ -206,9 +206,9 @@ class FolderTreeModel(QAbstractItemModel):
                 prefix = ""
                 if node.node_type == "unit":
                     if node.is_starred or node.is_manual:
-                        prefix = "⭐ "
+                        prefix = "★ "
                     elif node.status == "merged":
-                        prefix = "🔗 "
+                        prefix = "▷ "
                 return f"{prefix}{node.name}"
             elif col == self.COL_META:
                 if node.node_type == "unit":
@@ -251,11 +251,11 @@ class FolderTreeModel(QAbstractItemModel):
             f"总大小: {format_size(node.total_size)}",
         ]
         if node.is_manual:
-            lines.append("⭐ 手动标记")
+            lines.append("手动标记")
         if node.is_starred:
-            lines.append("⭐ 已收藏")
+            lines.append("已收藏")
         if node.status == "merged":
-            lines.append("🔗 已合并到父单元")
+            lines.append("已合并到父单元")
         return "\n".join(lines)
 
 

@@ -227,15 +227,28 @@ QLabel {
 }
 
 /* ---- 页头标签 ---- */
-QWidget#leftHeader, QWidget#rightHeader {
+QLabel#rightHeader {
     font-weight: bold;
     font-size: 14px;
     padding: 6px 8px;
     color: #818cf8;
 }
 
+/* ---- 面包屑返回按钮 ---- */
+QPushButton#breadcrumb {
+    background: transparent;
+    color: #818cf8;
+    border: none;
+    font-size: 11px;
+    padding: 2px 8px;
+    text-align: left;
+}
+QPushButton#breadcrumb:hover {
+    color: #cdd6f4;
+}
+
 /* ---- 底部信息标签 ---- */
-QWidget#rightFooter, QWidget#statusLabel {
+QLabel#rightFooter {
     color: #a6adc8;
     font-size: 11px;
 }

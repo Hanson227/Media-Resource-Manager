@@ -19,14 +19,13 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow, QMenu, QToolBar, QSplitter, QWidget, QVBoxLayout,
     QLabel, QMessageBox, QSystemTrayIcon, QApplication,
-    QFileDialog, QHBoxLayout, QPushButton, QLineEdit, QComboBox,
+    QFileDialog, QPushButton, QLineEdit, QComboBox,
     QInputDialog,
 )
 
 from config import AppConfig
 from app.db.engine import DatabaseManager
 from app.db import queries as q
-from app.ui.theme import SUBTEXT_0, TEXT, INDIGO
 from app.ui.widgets.status_bar import MainStatusBar
 from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView
 from app.ui.right_panel.thumbnail_grid import (
@@ -209,31 +208,11 @@ class MainWindow(QMainWindow):
 
         # ---- 左侧：文件夹树 ----
         left_panel = QWidget()
+        left_panel.setObjectName("leftPanel")
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(4, 4, 2, 4)
+        left_layout.setSpacing(4)
 
-        left_header = QLabel("媒体库")
-        left_header.setStyleSheet(
-            f"font-weight: bold; font-size: 13px; padding: 4px; color: {INDIGO};"
-        )
-        left_layout.addWidget(left_header)
-
-        # 小工具栏
-        lt = QHBoxLayout()
-        add_small = QPushButton("+")
-        add_small.setFixedWidth(28)
-        add_small.clicked.connect(self._on_add_root)
-        add_small.setToolTip("添加媒体库根目录")
-        lt.addWidget(add_small)
-        refresh_small = QPushButton("↻")
-        refresh_small.setFixedWidth(28)
-        refresh_small.clicked.connect(self._on_refresh_all)
-        refresh_small.setToolTip("重新扫描")
-        lt.addWidget(refresh_small)
-        lt.addStretch()
-        left_layout.addLayout(lt)
-
-        # 真正的文件夹树
         self._tree_model = FolderTreeModel(self._config)
         self._tree_view = FolderTreeView(self._tree_model)
         left_layout.addWidget(self._tree_view)
@@ -242,22 +221,18 @@ class MainWindow(QMainWindow):
 
         # ---- 右侧：缩略图网格 ----
         right_panel = QWidget()
+        right_panel.setObjectName("rightPanel")
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(2, 4, 4, 4)
+        right_layout.setSpacing(4)
 
         self._right_header = QLabel("资源单元视图")
-        self._right_header.setStyleSheet(
-            f"font-weight: bold; font-size: 13px; padding: 4px; color: {INDIGO};"
-        )
+        self._right_header.setObjectName("rightHeader")
         right_layout.addWidget(self._right_header)
 
         # 面包屑导航栏（返回按钮）
         self._breadcrumb = QPushButton("← 返回文件夹列表")
-        self._breadcrumb.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {INDIGO}; border: none; "
-            f"font-size: 11px; padding: 2px 8px; text-align: left; }}"
-            f"QPushButton:hover {{ color: {TEXT}; }}"
-        )
+        self._breadcrumb.setObjectName("breadcrumb")
         self._breadcrumb.clicked.connect(self._on_breadcrumb_back)
         self._breadcrumb.hide()
         right_layout.addWidget(self._breadcrumb)
@@ -267,9 +242,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self._grid_view)
 
         self._right_footer = QLabel("0 个项目 | 共 0 B")
-        self._right_footer.setStyleSheet(
-            f"color: {SUBTEXT_0}; padding: 4px; font-size: 11px;"
-        )
+        self._right_footer.setObjectName("rightFooter")
         right_layout.addWidget(self._right_footer)
 
         splitter.addWidget(right_panel)
