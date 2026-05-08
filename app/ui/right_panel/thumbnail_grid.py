@@ -40,7 +40,6 @@ class ThumbLoadWorker(QThread):
         self._cache_dir = Path(cache_dir)
         self._generator = ThumbnailGenerator(
             max_size=config.thumbnail_max_size,
-            cache_subdir=".thumbnails",
         )
 
     def run(self) -> None:
@@ -75,15 +74,17 @@ class ThumbLoadWorker(QThread):
 class FolderPreviewWorker(QThread):
     preview_ready = Signal(int, str)
 
-    def __init__(self, unit_data: list[dict], config: AppConfig, parent=None) -> None:
+    def __init__(self, unit_data: list[dict], cache_dir: Path,
+                 config: AppConfig, parent=None) -> None:
         super().__init__(parent)
         self._data = unit_data
+        self._cache_dir = Path(cache_dir)
         self._gen = ThumbnailGenerator(
             max_size=config.thumbnail_max_size,
-            cache_subdir=".thumbnails",
         )
 
     def run(self) -> None:
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
         for row, d in enumerate(self._data):
             if self.isInterruptionRequested():
                 break
@@ -91,9 +92,7 @@ class FolderPreviewWorker(QThread):
             if not src.is_file():
                 continue
             try:
-                cache_dir = Path(d["path"]) / ".thumbnails"
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                info = self._gen.generate(src, cache_dir, file_id=hash(str(src)))
+                info = self._gen.generate(src, self._cache_dir, file_id=hash(str(src)))
                 if info.thumbnail_path.exists():
                     self.preview_ready.emit(row, str(info.thumbnail_path))
             except Exception:
@@ -316,7 +315,8 @@ class ThumbnailGridView(QListView):
         self.setIconSize(QSize(ts, ts))
         self.setGridSize(QSize(ts + 24, ts + 60))
 
-        self._folder_worker = FolderPreviewWorker(unit_data, config)
+        cache_dir = config.thumbnail_cache_dir
+        self._folder_worker = FolderPreviewWorker(unit_data, cache_dir, config)
         self._folder_worker.preview_ready.connect(
             lambda row, path: folder_model.add_thumb(row, QPixmap(path))
         )
@@ -338,7 +338,9 @@ class ThumbnailGridView(QListView):
         files = self._file_model.file_list
         if not files:
             return
-        cache_dir = Path(unit_path) / ".thumbnails" if unit_path else Path(".thumbnails")
+        cache_dir = self._config.thumbnail_cache_dir
+        if not cache_dir:
+            cache_dir = Path(unit_path) / ".thumbnails" if unit_path else Path(".thumbnails")
         self._thumb_worker = ThumbLoadWorker(files, cache_dir, self._config)
         self._thumb_worker.thumb_ready.connect(self._file_model.on_thumb_ready)
         self._thumb_worker.start()

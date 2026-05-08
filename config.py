@@ -84,7 +84,10 @@ class AppConfig:
     """缩略图最大边长（像素），等比缩放后不超过此值。"""
 
     thumbnail_cache_subdir: str = ".thumbnails"
-    """缩略图缓存子目录名，各资源单元下自动创建。"""
+    """缩略图缓存子目录名，各资源单元下自动创建（旧模式）。"""
+
+    thumbnail_cache_dir: Path = Path("data/.thumbnails")
+    """缩略图集中缓存目录，默认存放在软件 data 目录下。"""
 
     thumbnail_format: str = "jpg"
     """缩略图输出格式（jpg/png）。"""
@@ -161,6 +164,8 @@ class AppConfig:
             data["db_path"] = Path(data["db_path"])
         if "face_model_dir" in data:
             data["face_model_dir"] = Path(data["face_model_dir"])
+        if "thumbnail_cache_dir" in data:
+            data["thumbnail_cache_dir"] = Path(data["thumbnail_cache_dir"])
 
         # 将列表转为 frozenset
         if "media_extensions" in data:
@@ -198,6 +203,7 @@ class AppConfig:
             "face_confidence_threshold": self.face_confidence_threshold,
             "thumbnail_max_size": self.thumbnail_max_size,
             "thumbnail_cache_subdir": self.thumbnail_cache_subdir,
+            "thumbnail_cache_dir": str(self.thumbnail_cache_dir),
             "thumbnail_format": self.thumbnail_format,
             "thumbnail_quality": self.thumbnail_quality,
             "window_title": self.window_title,

@@ -49,6 +49,9 @@ def create_app(config: AppConfig) -> FastAPI:
         allow_headers=["*"],
     )
 
+    # 将配置存入 app.state，路由可通过 request.app.state.config 访问
+    app.state.config = config
+
     # 注册路由
     app.include_router(files.router)
     app.include_router(units.router)
