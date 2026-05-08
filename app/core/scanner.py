@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 文件夹扫描器 —— 递归遍历媒体库根目录，自动识别资源单元。
 
@@ -151,10 +154,6 @@ class MediaScanner:
         if not root_path.is_dir():
             raise ScanError(f"路径不是目录: {root_path}")
 
-        errors: list[str] = []
-        all_files: list[DiscoveredFile] = []
-        unit_paths: list[Path] = []
-
         # 第一步：自底向上遍历，找出所有包含媒体文件的文件夹
         try:
             unit_paths = self._find_resource_units(root_path)
@@ -162,6 +161,8 @@ class MediaScanner:
             raise AccessDeniedError(str(root_path)) from e
 
         # 第二步：收集每个单元的媒体文件
+        errors: list[str] = []
+        all_files: list[DiscoveredFile] = []
         total_files = 0
         total_size = 0
         units: list[ResourceUnit] = []
@@ -251,9 +252,10 @@ class MediaScanner:
         candidates: set[Path] = set()
 
         for dirpath, dirnames, filenames in os.walk(str(root), topdown=False):
-            dirnames[:] = self._filter_dirnames(dirnames)
-
             current = Path(dirpath)
+            # 排除隐藏目录和排除列表中的目录
+            if current.name in self._exclude_patterns or current.name.startswith('.'):
+                continue
             media_files_in_this_dir = [
                 f for f in filenames
                 if is_media_file(current / f, self._extensions)
@@ -264,6 +266,49 @@ class MediaScanner:
 
         if not candidates:
             return []
+
+        # ---- 嵌套单子目录提升 ----
+        # 如果一个非候选父文件夹内有且仅有一个候选子文件夹，
+        # 将父文件夹提升为候选（解决 "父无媒体/子有媒体" 时子文件夹名无意义的问题）
+        promoted: set[Path] = set()
+        for c in list(candidates):
+            if c == root:
+                continue  # 根本身不参与提升
+            parent = c.parent
+            if parent == root or parent in candidates or parent in promoted:
+                continue
+            # 检查 parent 下有几个直接候选子目录
+            direct_child_candidates = [
+                x for x in candidates if x != c and x.parent == parent
+            ]
+            if len(direct_child_candidates) == 0:
+                # 唯一候选子 → 提升父
+                candidates.remove(c)
+                candidates.add(parent)
+                promoted.add(parent)
+
+        # ---- 跳过单文件叶子单元 ----
+        # 文件夹内只有零散文件（无子目录、少于最少文件数），跳过避免产生无意义单元
+        MIN_FILES_FOR_LEAF_UNIT = 2
+        for c in list(candidates):
+            if c == root or c in promoted:
+                continue
+            try:
+                entries = list(c.iterdir())
+                has_subdirs = any(
+                    e.is_dir() and not e.name.startswith('.')
+                    for e in entries
+                )
+                if has_subdirs:
+                    continue  # 有子目录的不是叶子单元
+                file_count = sum(
+                    1 for e in entries
+                    if e.is_file() and is_media_file(e, self._extensions)
+                )
+                if file_count < MIN_FILES_FOR_LEAF_UNIT:
+                    candidates.remove(c)
+            except OSError:
+                continue
 
         # 计算每个候选有多少个子候选
         def count_child_candidates(parent: Path) -> int:
@@ -297,6 +342,33 @@ class MediaScanner:
                     continue
 
         top_level = [p for p in candidates if p not in removed]
+
+        # ---- 跳过仅有零散文件的容器单元 ----
+        # 如果候选文件夹里只有少量文件（≤2），而所有子目录都是独立场景单元，
+        # 跳过容器（它的零散文件由上级单元收集）
+        for c in list(top_level):
+            if c == root:
+                continue
+            try:
+                entries = list(c.iterdir())
+                direct_media = [
+                    e for e in entries
+                    if e.is_file() and is_media_file(e, self._extensions)
+                ]
+                if len(direct_media) > 2:
+                    continue  # 文件足够多，保留
+                # 检查子目录中是否有独立单元
+                child_candidates = [
+                    e for e in entries
+                    if e.is_dir() and e in candidates
+                ]
+                if not child_candidates:
+                    continue  # 没有子单元 → 不用跳过
+                # 所有含媒体的子目录都是独立单元 → 本文件夹只是容器
+                top_level.remove(c)
+            except OSError:
+                continue
+
         return sorted(top_level, key=lambda p: str(p))
 
     def _collect_files_in_dir(self, directory: Path, root: Path,
@@ -325,6 +397,10 @@ class MediaScanner:
                     entry = current / fname
                     if is_media_file(entry, self._extensions):
                         try:
+                            relative = entry.relative_to(root)
+                        except ValueError:
+                            continue
+                        try:
                             stat = entry.stat()
                             mt = get_media_type(entry.suffix)
                             media_type = mt.value if mt else "unknown"
@@ -334,7 +410,7 @@ class MediaScanner:
                                 extension=entry.suffix.lower(),
                                 media_type=media_type,
                                 size_bytes=stat.st_size,
-                                relative_to_root=entry.relative_to(root),
+                                relative_to_root=relative,
                             )
                             discovered.append(df)
                         except OSError:
