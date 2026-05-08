@@ -2,6 +2,31 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 代码修改后请运行 `python tests/test_flow.py` 验证确认无误。请使用中文进行回答，代码、文件名、API 名等保持英文。
+
+## Testing Policy
+
+所有新增功能必须附带对应的测试用例，合并到 `tests/test_flow.py` 中。
+
+### 覆盖层级
+
+| 层级 | 测试内容 | 示例 |
+|------|---------|------|
+| **后端逻辑** | core/*, services/*, registry/* | 扫描、哈希、查重、消息中心 |
+| **数据库查询** | db/queries.py | 新增查询函数、状态变更 |
+| **UI 控件信号** | left_panel/, dialogs/, main_window | 右键菜单 emit、弹窗、按钮 |
+| **API 路由** | api/routes/* | 新增 endpoint 的响应 |
+
+### 测试方式
+
+- **后端/DB/API**: 直接调用函数，验证返回值
+- **UI 信号**: 创建无窗口 `QApplication([])`，程序化触发 `action.trigger()`，capture 信号验证参数正确性
+- **不要求**: 截图对比、视觉回归、全链路 GUI 点击流
+
+### 执行
+
+- 新增功能实现后，运行 `python tests/test_flow.py` 确认全部通过
+- 所有测试按 `test_TAG()` 函数组织，在 `main()` 中按顺序调用
+
 ## Project Overview
 
 影视资源管理器 (Media Resource Manager) — a Windows desktop app for managing local media collections (movies/TV). Built with PySide6 + SQLAlchemy + FastAPI. v0.1.0, Chinese UI.
