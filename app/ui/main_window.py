@@ -1,0 +1,867 @@
+# -*- coding: utf-8 -*-
+"""
+主窗口 —— 应用主界面框架，GUI 信号总中枢。
+
+连接所有组件：
+- 左侧：FolderTreeView（文件夹树 + 右键菜单）
+- 右侧：ThumbnailGridView（缩略图网格）
+- 状态栏：进度、API 状态、扫描时间
+- 工作线程：扫描、哈希、查重
+"""
+
+import logging
+from pathlib import Path
+from typing import Optional
+
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, Slot
+from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtWidgets import (
+    QMainWindow, QMenu, QToolBar, QSplitter, QWidget, QVBoxLayout,
+    QLabel, QMessageBox, QSystemTrayIcon, QApplication,
+    QFileDialog, QHBoxLayout, QPushButton, QLineEdit, QComboBox,
+)
+
+from config import AppConfig
+from app.db.engine import DatabaseManager
+from app.db import queries as q
+from app.ui.theme import SUBTEXT_0, TEXT, INDIGO
+from app.ui.widgets.status_bar import MainStatusBar
+from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView
+from app.ui.right_panel.thumbnail_grid import (
+    ThumbnailGridModel, ThumbnailGridView,
+)
+from app.ui.right_panel.thumbnail_delegate import ThumbnailDelegate
+from app.ui.widgets.progress_panel import ProgressPanel
+from app.ui.workers.scan_worker import ScanWorker
+from app.ui.workers.hash_worker import HashWorker
+from app.ui.workers.dedup_worker import DedupWorker
+from app.utils.constants import MediaType
+from app.utils.file_helpers import format_size
+
+logger = logging.getLogger(__name__)
+
+
+class MainWindow(QMainWindow):
+    """应用主窗口 —— GUI 信号总中枢。"""
+
+    # ---- 信号 ----
+    scan_requested = Signal(str)
+    root_added = Signal(str)
+    dedup_requested = Signal()
+    refresh_requested = Signal()
+
+    def __init__(self, config: AppConfig) -> None:
+        super().__init__()
+        self._config = config
+        self._current_unit_id: Optional[int] = None
+        self._scan_worker: Optional[ScanWorker] = None
+        self._hash_worker: Optional[HashWorker] = None
+        self._dedup_worker: Optional[DedupWorker] = None
+
+        # 搜索防抖定时器 — 每次按键重置，150ms 空闲后触发放行
+        self._filter_timer = QTimer()
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(150)
+        self._filter_timer.timeout.connect(self._apply_current_filter)
+
+        # 窗口基本属性
+        self.setWindowTitle(config.window_title)
+        self.resize(config.window_width, config.window_height)
+
+        # 构建 UI 组件
+        self._setup_menu_bar()
+        self._setup_tool_bar()
+        self._setup_central_area()
+        self._setup_status_bar()
+        self._setup_system_tray()
+
+        # 核心：信号连线
+        self._connect_signals()
+
+        # 初始加载文件夹树
+        self._tree_view.refresh_model()
+
+        logger.info("主窗口初始化完成")
+
+    # ============================================================
+    # 菜单栏
+    # ============================================================
+
+    def _setup_menu_bar(self) -> None:
+        menubar = self.menuBar()
+
+        # 文件
+        file_menu = menubar.addMenu("文件(&F)")
+        add_root_action = QAction("添加媒体库(&A)...", self)
+        add_root_action.setShortcut(QKeySequence("Ctrl+O"))
+        add_root_action.setStatusTip("选择一个文件夹作为媒体库根目录")
+        add_root_action.triggered.connect(self._on_add_root)
+        file_menu.addAction(add_root_action)
+
+        rescan_action = QAction("重新扫描(&R)", self)
+        rescan_action.setShortcut(QKeySequence("F5"))
+        rescan_action.setStatusTip("重新扫描所有媒体库")
+        rescan_action.triggered.connect(self._on_refresh_all)
+        file_menu.addAction(rescan_action)
+        file_menu.addSeparator()
+
+        exit_action = QAction("退出(&X)", self)
+        exit_action.setShortcut(QKeySequence("Alt+F4"))
+        exit_action.triggered.connect(self._on_exit)
+        file_menu.addAction(exit_action)
+
+        # 工具
+        tools_menu = menubar.addMenu("工具(&T)")
+        dedup_action = QAction("查重(&D)...", self)
+        dedup_action.setShortcut(QKeySequence("Ctrl+D"))
+        dedup_action.setStatusTip("对选中的资源单元执行查重比对")
+        dedup_action.triggered.connect(self._on_start_dedup)
+        tools_menu.addAction(dedup_action)
+
+        reset_db_action = QAction("重置数据库(&Z)...", self)
+        reset_db_action.setStatusTip("删除所有扫描数据并重新初始化数据库")
+        reset_db_action.triggered.connect(self._on_reset_db)
+        tools_menu.addAction(reset_db_action)
+
+        tools_menu.addSeparator()
+        settings_action = QAction("设置(&E)...", self)
+        settings_action.setShortcut(QKeySequence("Ctrl+,"))
+        settings_action.triggered.connect(self._on_open_settings)
+        tools_menu.addAction(settings_action)
+
+        # 帮助
+        help_menu = menubar.addMenu("帮助(&H)")
+        messages_action = QAction("消息中心(&M)", self)
+        messages_action.setShortcut(QKeySequence("Ctrl+M"))
+        messages_action.triggered.connect(self._on_open_messages)
+        help_menu.addAction(messages_action)
+        help_menu.addSeparator()
+        about_action = QAction("关于(&A)", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+
+    # ============================================================
+    # 工具栏
+    # ============================================================
+
+    def _setup_tool_bar(self) -> None:
+        toolbar = QToolBar("主工具栏")
+        toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(24, 24))
+        self.addToolBar(toolbar)
+
+        add_btn = QPushButton("添加根目录")
+        add_btn.clicked.connect(self._on_add_root)
+        add_btn.setToolTip("添加媒体库根目录 (Ctrl+O)")
+        toolbar.addWidget(add_btn)
+
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.clicked.connect(self._on_refresh_all)
+        refresh_btn.setToolTip("重新扫描所有媒体库 (F5)")
+        toolbar.addWidget(refresh_btn)
+
+        dedup_btn = QPushButton("查重")
+        dedup_btn.clicked.connect(self._on_start_dedup)
+        dedup_btn.setToolTip("对选中的资源单元执行查重 (Ctrl+D)")
+        toolbar.addWidget(dedup_btn)
+
+        toolbar.addSeparator()
+
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("搜索文件名...")
+        self._search_input.setMaximumWidth(180)
+        self._search_input.textChanged.connect(self._on_search)
+        toolbar.addWidget(self._search_input)
+
+        self._filter_combo = QComboBox()
+        self._filter_combo.addItem("全部", None)
+        self._filter_combo.addItem("仅图片", MediaType.IMAGE.value)
+        self._filter_combo.addItem("仅视频", MediaType.VIDEO.value)
+        self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
+        self._filter_combo.setMaximumWidth(80)
+        toolbar.addWidget(self._filter_combo)
+
+        toolbar.addSeparator()
+
+        self._msg_btn = QPushButton("消息")
+        self._msg_btn.setToolTip("打开消息中心 (Ctrl+M)")
+        self._msg_btn.clicked.connect(self._on_open_messages)
+        toolbar.addWidget(self._msg_btn)
+
+    # ============================================================
+    # 中央区域：左树 + 右网格
+    # ============================================================
+
+    def _setup_central_area(self) -> None:
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        left_pct = self._config.splitter_ratio_left
+        total_w = self._config.window_width
+        splitter.setSizes([int(total_w * left_pct / 100), int(total_w * (100 - left_pct) / 100)])
+
+        # ---- 左侧：文件夹树 ----
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(4, 4, 2, 4)
+
+        left_header = QLabel("媒体库")
+        left_header.setStyleSheet(
+            f"font-weight: bold; font-size: 13px; padding: 4px; color: {INDIGO};"
+        )
+        left_layout.addWidget(left_header)
+
+        # 小工具栏
+        lt = QHBoxLayout()
+        add_small = QPushButton("+")
+        add_small.setFixedWidth(28)
+        add_small.clicked.connect(self._on_add_root)
+        add_small.setToolTip("添加媒体库根目录")
+        lt.addWidget(add_small)
+        refresh_small = QPushButton("↻")
+        refresh_small.setFixedWidth(28)
+        refresh_small.clicked.connect(self._on_refresh_all)
+        refresh_small.setToolTip("重新扫描")
+        lt.addWidget(refresh_small)
+        lt.addStretch()
+        left_layout.addLayout(lt)
+
+        # 真正的文件夹树
+        self._tree_model = FolderTreeModel(self._config)
+        self._tree_view = FolderTreeView(self._tree_model)
+        left_layout.addWidget(self._tree_view)
+
+        splitter.addWidget(left_panel)
+
+        # ---- 右侧：缩略图网格 ----
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(2, 4, 4, 4)
+
+        self._right_header = QLabel("资源单元视图")
+        self._right_header.setStyleSheet(
+            f"font-weight: bold; font-size: 13px; padding: 4px; color: {INDIGO};"
+        )
+        right_layout.addWidget(self._right_header)
+
+        # 面包屑导航栏（返回按钮）
+        self._breadcrumb = QPushButton("← 返回文件夹列表")
+        self._breadcrumb.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {INDIGO}; border: none; "
+            f"font-size: 11px; padding: 2px 8px; text-align: left; }}"
+            f"QPushButton:hover {{ color: {TEXT}; }}"
+        )
+        self._breadcrumb.clicked.connect(self._on_breadcrumb_back)
+        self._breadcrumb.hide()
+        right_layout.addWidget(self._breadcrumb)
+
+        self._grid_model = ThumbnailGridModel(self._config)
+        self._grid_view = ThumbnailGridView(self._grid_model, self._config)
+        right_layout.addWidget(self._grid_view)
+
+        self._right_footer = QLabel("0 个项目 | 共 0 B")
+        self._right_footer.setStyleSheet(
+            f"color: {SUBTEXT_0}; padding: 4px; font-size: 11px;"
+        )
+        right_layout.addWidget(self._right_footer)
+
+        splitter.addWidget(right_panel)
+
+        self._splitter = splitter
+        self.setCentralWidget(splitter)
+
+    # ============================================================
+    # 状态栏
+    # ============================================================
+
+    def _setup_status_bar(self) -> None:
+        self._status_bar = MainStatusBar(self._config)
+        self.setStatusBar(self._status_bar)
+        self._status_bar.set_api_status(True)
+
+    # ============================================================
+    # 系统托盘
+    # ============================================================
+
+    def _setup_system_tray(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self._tray_icon = QSystemTrayIcon(self)
+        self._tray_icon.setToolTip(self._config.window_title)
+        tray_menu = QMenu()
+        show_a = QAction("显示主窗口", tray_menu)
+        show_a.triggered.connect(self._on_tray_show)
+        tray_menu.addAction(show_a)
+        tray_menu.addSeparator()
+        quit_a = QAction("退出", tray_menu)
+        quit_a.triggered.connect(self._on_exit)
+        tray_menu.addAction(quit_a)
+        self._tray_icon.setContextMenu(tray_menu)
+        self._tray_icon.activated.connect(self._on_tray_activated)
+        self._tray_icon.show()
+
+    # ============================================================
+    # 信号连线（核心）
+    # ============================================================
+
+    def _connect_signals(self) -> None:
+        """连接所有组件之间的信号。"""
+        # ---- 主窗口信号 → 扫描 ----
+        self.root_added.connect(self._start_scan)
+
+        # ---- 文件树 → 缩略图网格 ----
+        self._tree_view.unit_selected.connect(self._on_unit_selected)
+        self._tree_view.unit_double_clicked.connect(self._on_unit_double_clicked)
+
+        # ---- 网格文件夹卡片 → 进入单元 ----
+        self._grid_view.folder_entered.connect(self._on_unit_double_clicked)
+
+        # ---- 右键菜单：合并/拆分 ----
+        self._tree_view.merge_requested.connect(self._on_merge_units)
+        self._tree_view.split_requested.connect(self._on_split_unit)
+        self._tree_view.mark_requested.connect(self._on_mark_unit)
+        self._tree_view.unmark_requested.connect(self._on_unmark_unit)
+        self._tree_view.exclude_requested.connect(self._on_exclude_unit)
+        self._tree_view.remove_root_requested.connect(self._on_remove_root)
+
+        # ---- 刷新 ----
+        self.refresh_requested.connect(self._on_refresh_all)
+
+    # ============================================================
+    # 扫描流程
+    # ============================================================
+
+    @Slot(str)
+    def _start_scan(self, folder: str) -> None:
+        """启动后台扫描线程。"""
+        root_path = Path(folder)
+        if not root_path.is_dir():
+            QMessageBox.warning(self, "错误", f"目录不存在: {folder}")
+            return
+
+        self._status_bar.set_status(f"正在扫描: {root_path.name}...")
+        self._status_bar.set_progress(0, 0)
+
+        self._scan_worker = ScanWorker(self._config, root_path)
+        self._scan_worker.progress.connect(self._status_bar.set_progress)
+        self._scan_worker.unit_found.connect(
+            lambda name, cnt: self._status_bar.set_status(f"发现: {name} ({cnt} 个文件)")
+        )
+        self._scan_worker.finished.connect(self._on_scan_finished)
+        self._scan_worker.error_occurred.connect(self._on_scan_error)
+        self._scan_worker.start()
+
+    @Slot(object)
+    def _on_scan_finished(self, result) -> None:
+        """扫描完成：刷新树，立即显示内容，后台启动哈希索引。"""
+        self._status_bar.set_status(f"扫描完成: {result.total_files} 个文件")
+        self._status_bar.hide_progress()
+        self._status_bar.record_scan_time()
+
+        # 刷新文件夹树
+        self._tree_view.refresh_model()
+
+        # 自动选中第一个根目录，使内容立即可见
+        root_idx = self._tree_view.model().index(0, 0)
+        if root_idx.isValid():
+            self._tree_view.setCurrentIndex(root_idx)
+
+        # 后台启动哈希索引（不阻塞 UI）
+        self._status_bar.set_status("正在后台计算文件哈希与人脸索引...")
+        self._status_bar.set_progress(0, 0)
+
+        self._hash_worker = HashWorker(self._config)
+        self._hash_worker.progress.connect(self._status_bar.set_progress)
+        self._hash_worker.finished.connect(self._on_hash_finished)
+        self._hash_worker.error_occurred.connect(
+            lambda e: self._status_bar.set_status(f"哈希错误: {e}")
+        )
+        self._hash_worker.start()
+
+    @Slot(int)
+    def _on_hash_finished(self, count: int) -> None:
+        """哈希索引完成。"""
+        self._status_bar.set_status(f"索引完成: {count} 个文件")
+        self._status_bar.hide_progress()
+        self._tree_view.refresh_model()
+
+    @Slot(str)
+    def _on_scan_error(self, msg: str) -> None:
+        QMessageBox.critical(self, "扫描错误", msg)
+        self._status_bar.set_status("扫描失败")
+        self._status_bar.hide_progress()
+
+    # ============================================================
+    # 文件夹树交互
+    # ============================================================
+
+    @Slot(int)
+    def _on_unit_double_clicked(self, unit_id: int) -> None:
+        """双击单元 → 直接加载文件列表。"""
+        self._grid_view.load_unit(unit_id)
+        self._breadcrumb.show()
+        try:
+            with DatabaseManager.session() as session:
+                unit = q.get_unit_by_id(session, unit_id)
+                if unit:
+                    self._right_header.setText(f"资源单元: {unit.name}")
+                    self._right_footer.setText(
+                        f"{unit.file_count} 个项目 | 共 {format_size(unit.total_size)}"
+                    )
+        except Exception as e:
+            logger.error(f"加载单元详情失败: {e}")
+
+    @Slot()
+    def _on_breadcrumb_back(self) -> None:
+        """点击面包屑返回文件夹卡片视图。"""
+        self._breadcrumb.hide()
+        # 选中根节点，触发根→文件夹卡片
+        root_idx = self._tree_view.model().index(0, 0)
+        if root_idx.isValid():
+            self._tree_view.setCurrentIndex(root_idx)
+
+    @Slot(list)
+    def _on_unit_selected(self, unit_ids: list[int]) -> None:
+        """树选择变化 → 右侧面板更新。
+
+        - 选中根目录（多个 unit_id）→ 显示文件夹卡片
+        - 选中单个单元 → 显示该单元的文件列表
+        """
+        if not unit_ids:
+            return
+
+        if len(unit_ids) > 1:
+            self._breadcrumb.hide()
+            self._show_folder_cards(unit_ids)
+            return
+
+        # 单个单元：显示文件
+        unit_id = unit_ids[0]
+        self._current_unit_id = unit_id
+        self._breadcrumb.show()
+        self._grid_view.load_unit(unit_id)
+
+        try:
+            with DatabaseManager.session() as session:
+                unit = q.get_unit_by_id(session, unit_id)
+                if unit:
+                    self._right_header.setText(f"资源单元: {unit.name}")
+                    self._right_footer.setText(
+                        f"{unit.file_count} 个项目 | 共 {format_size(unit.total_size)}"
+                    )
+        except Exception as e:
+            logger.error(f"加载单元详情失败: {e}")
+
+    @Slot(int, list)
+    def _on_merge_units(self, parent_id: int, child_ids: list[int]) -> None:
+        """合并资源单元。"""
+        try:
+            with DatabaseManager.session() as session:
+                parent = q.get_unit_by_id(session, parent_id)
+                for cid in child_ids:
+                    q.mark_unit_merged(session, cid, parent_id)
+                # 重新统计父单元
+                total_files = 0
+                total_size = 0
+                all_units = [parent_id] + child_ids
+                for uid in all_units:
+                    files = q.get_files_by_unit(session, uid)
+                    total_files += len(files)
+                    total_size += sum(f.size_bytes for f in files)
+                q.update_unit_stats(session, parent_id, total_files, total_size)
+            self._tree_view.refresh_model()
+            self._status_bar.set_status(f"已合并 {len(child_ids)} 个单元")
+        except Exception as e:
+            QMessageBox.critical(self, "合并失败", str(e))
+
+    @Slot(int)
+    def _on_split_unit(self, unit_id: int) -> None:
+        """拆分资源单元。"""
+        try:
+            with DatabaseManager.session() as session:
+                children = q.get_child_units(session, unit_id)
+                for child in children:
+                    q.unmerge_unit(session, child.id)
+                q.unmerge_unit(session, unit_id)
+            self._tree_view.refresh_model()
+            self._status_bar.set_status("已拆分")
+        except Exception as e:
+            QMessageBox.critical(self, "拆分失败", str(e))
+
+    @Slot(str)
+    def _on_mark_unit(self, folder_path: str) -> None:
+        """标记为资源单元。"""
+        try:
+            with DatabaseManager.session() as session:
+                unit = q.get_unit_by_path(session, folder_path)
+                if unit:
+                    q.mark_unit_manual(session, unit.id, True)
+                    q.set_unit_starred(session, unit.id, True)
+                else:
+                    # 创建新的手动单元
+                    p = Path(folder_path)
+                    roots = q.get_all_roots(session)
+                    root_id = roots[0].id if roots else None
+                    if root_id:
+                        q.create_unit(session, str(p), p.name, root_id,
+                                     is_manual=True, file_count=0, total_size=0)
+            self._tree_view.refresh_model()
+            self._status_bar.set_status(f"已标记: {Path(folder_path).name}")
+        except Exception as e:
+            QMessageBox.critical(self, "标记失败", str(e))
+
+    @Slot(int)
+    def _on_unmark_unit(self, unit_id: int) -> None:
+        """取消标记。"""
+        try:
+            with DatabaseManager.session() as session:
+                q.mark_unit_manual(session, unit_id, False)
+                q.set_unit_starred(session, unit_id, False)
+            self._tree_view.refresh_model()
+            self._status_bar.set_status("已取消标记")
+        except Exception as e:
+            QMessageBox.critical(self, "取消标记失败", str(e))
+
+    @Slot(int)
+    def _on_exclude_unit(self, unit_id: int) -> None:
+        """排除资源单元：标记为 excluded。"""
+        try:
+            with DatabaseManager.session() as session:
+                unit = q.get_unit_by_id(session, unit_id)
+                name = unit.name if unit else str(unit_id)
+                q.mark_unit_excluded(session, unit_id)
+            self._grid_view.clear()
+            self._tree_view.refresh_model()
+            root_idx = self._tree_view.model().index(0, 0)
+            if root_idx.isValid():
+                self._tree_view.setCurrentIndex(root_idx)
+            self._status_bar.set_status(f"已排除: {name}")
+        except Exception as e:
+            QMessageBox.critical(self, "排除失败", str(e))
+
+    @Slot(int)
+    def _on_remove_root(self, root_id: int) -> None:
+        """删除媒体库根目录及其所有数据。"""
+        reply = QMessageBox.warning(
+            self, "确认删除",
+            "此操作将删除该媒体库根目录下的所有资源单元和文件记录。\n\n确定继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self._grid_view.clear()
+            with DatabaseManager.session() as session:
+                q.remove_library_root(session, root_id)
+            self._tree_view.refresh_model()
+            self._right_header.setText("资源单元视图")
+            self._right_footer.setText("0 个项目 | 共 0 B")
+            self._status_bar.set_status("媒体库已删除")
+        except Exception as e:
+            QMessageBox.critical(self, "删除失败", str(e))
+
+    # ============================================================
+    # 查重流程
+    # ============================================================
+
+    @Slot()
+    def _on_start_dedup(self) -> None:
+        """启动查重。先检查哈希是否已完成。"""
+        try:
+            with DatabaseManager.session() as session:
+                units = q.get_all_active_units(session)
+                unit_ids = [u.id for u in units]
+                # 检查未索引文件数量
+                unindexed = q.get_unindexed_files(session, limit=1)
+                pending_count = len(unindexed)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"无法获取资源单元: {e}")
+            return
+
+        if len(unit_ids) < 2:
+            QMessageBox.information(self, "提示", "至少需要 2 个资源单元才能执行查重，请先扫描媒体库。")
+            return
+
+        if pending_count > 0:
+            reply = QMessageBox.question(
+                self, "哈希未完成",
+                f"还有文件的哈希值未计算（至少 {pending_count} 个），这会导致查重漏检。\n\n"
+                "建议等后台哈希索引完成后（状态栏不再显示进度）再查重。\n\n"
+                "是否仍要继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        reply = QMessageBox.question(
+            self, "确认查重",
+            f"将对 {len(unit_ids)} 个资源单元执行全量比对。\n"
+            f"策略：人脸识别 → MD5 → pHash → dHash\n\n"
+            f"确定继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._status_bar.set_status("正在查重...")
+        self._status_bar.set_progress(0, 0)
+
+        self._dedup_worker = DedupWorker(self._config, unit_ids)
+        self._dedup_worker.progress.connect(self._status_bar.set_progress)
+        self._dedup_worker.duplicate_found.connect(self._on_duplicate_found)
+        self._dedup_worker.finished.connect(self._on_dedup_finished)
+        self._dedup_worker.error_occurred.connect(
+            lambda e: self._status_bar.set_status(f"查重错误: {e}")
+        )
+        self._dedup_worker.start()
+
+    @Slot(object)
+    def _on_duplicate_found(self, dup) -> None:
+        """发现重复单元时弹出系统通知。"""
+        self.show_notification(
+            "发现重复单元",
+            f"{dup.unit_a_name} ⟷ {dup.unit_b_name}\n"
+            f"相似度: {dup.jaccard_similarity * 100:.1f}%"
+        )
+
+    @Slot(object)
+    def _on_dedup_finished(self, session) -> None:
+        """查重完成。"""
+        dup_count = len(session.duplicates_found)
+        self._status_bar.set_status(
+            f"查重完成: {session.total_units_compared} 个单元, 发现 {dup_count} 组重复"
+        )
+        self._status_bar.hide_progress()
+
+        if dup_count > 0:
+            # 打开第一个重复结果的对比对话框
+            from app.ui.dialogs.dedup_compare import DedupCompareDialog
+            first_dup = session.duplicates_found[0]
+            dialog = DedupCompareDialog(first_dup, self._config, self)
+            dialog.keep_a_requested.connect(
+                lambda rid: self._resolve_dedup(rid, "keep_a")
+            )
+            dialog.keep_b_requested.connect(
+                lambda rid: self._resolve_dedup(rid, "keep_b")
+            )
+            dialog.whitelist_requested.connect(
+                lambda rid: self._resolve_dedup(rid, "whitelist")
+            )
+            dialog.ignore_requested.connect(
+                lambda rid: self._resolve_dedup(rid, "ignore")
+            )
+            dialog.exec()
+        else:
+            QMessageBox.information(self, "查重完成", "未发现重复的资源单元。")
+
+    def _resolve_dedup(self, result_id: int, resolution: str) -> None:
+        """处理查重结果。"""
+        try:
+            with DatabaseManager.session() as session:
+                q.resolve_dedup(session, result_id, resolution)
+            self._status_bar.set_status(f"已处理: {resolution}")
+        except Exception as e:
+            logger.error(f"处理查重结果失败: {e}")
+
+    # ============================================================
+    # 对话框
+    # ============================================================
+
+    @Slot()
+    def _on_open_messages(self) -> None:
+        from app.ui.dialogs.message_center import MessageCenterDialog
+        dlg = MessageCenterDialog(self)
+        dlg.messages_updated.connect(self._update_message_badge)
+        dlg.exec()
+
+    @Slot()
+    def _on_open_settings(self) -> None:
+        from app.ui.dialogs.settings import SettingsDialog
+        dlg = SettingsDialog(self._config, self)
+        dlg.settings_saved.connect(self._on_settings_saved)
+        dlg.exec()
+
+    @Slot()
+    def _on_reset_db(self) -> None:
+        """重置数据库：确认后删除所有数据并重建。"""
+        reply = QMessageBox.warning(
+            self, "确认重置数据库",
+            "此操作将删除所有扫描数据、查重结果和消息记录。\n\n"
+            "重置后需要重新添加媒体库并扫描。\n\n"
+            "确定继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            from app.db.migrations import reset_db
+            # 先停止后台 worker
+            if self._scan_worker and self._scan_worker.isRunning():
+                self._scan_worker.cancel()
+                self._scan_worker.wait(3000)
+            if self._hash_worker and self._hash_worker.isRunning():
+                self._hash_worker.cancel()
+                self._hash_worker.wait(3000)
+
+            reset_db(self._config.db_path)
+            self._tree_view.refresh_model()
+            self._grid_view.load_unit(0)  # 清空网格
+            self._right_header.setText("资源单元视图")
+            self._right_footer.setText("0 个项目 | 共 0 B")
+            self._status_bar.set_status("数据库已重置，请重新添加媒体库并扫描")
+            QMessageBox.information(self, "完成", "数据库已重置。\n请重新添加媒体库根目录并执行扫描。")
+        except Exception as e:
+            QMessageBox.critical(self, "重置失败", f"数据库重置失败:\n{e}")
+            logger.error(f"重置数据库失败: {e}")
+
+    @Slot(object)
+    def _on_settings_saved(self, new_config: AppConfig) -> None:
+        self._config = new_config
+        self._status_bar.set_status("设置已保存")
+
+    def _update_message_badge(self) -> None:
+        from app.services.message_center import MessageCenter
+        count = MessageCenter.get_unread_count()
+        self._msg_btn.setText(f"消息 ({count})" if count > 0 else "消息")
+
+    # ============================================================
+    # 搜索与筛选
+    # ============================================================
+
+    def _show_folder_cards(self, unit_ids: list[int]) -> None:
+        """显示文件夹卡片：将指定 unit_ids 的文件夹显示为缩略图卡片。"""
+        try:
+            with DatabaseManager.session() as session:
+                unit_data = []
+                total_files = 0
+                total_size = 0
+                for uid in unit_ids:
+                    u = q.get_unit_by_id(session, uid)
+                    if not u:
+                        continue
+                    files = q.get_files_by_unit(session, uid)
+                    preview_path = files[0].path if files else ""
+                    unit_data.append({
+                        "unit_id": u.id,
+                        "name": u.name,
+                        "path": u.path,
+                        "file_count": u.file_count or 0,
+                        "total_size": u.total_size or 0,
+                        "preview_path": preview_path,
+                    })
+                    total_files += u.file_count or 0
+                    total_size += u.total_size or 0
+            if unit_data:
+                self._grid_view.load_folder_cards(unit_data, self._config)
+                self._right_header.setText(f"文件夹 ({len(unit_data)} 个片段)")
+                self._right_footer.setText(
+                    f"{total_files} 个项目 | 共 {format_size(total_size)}"
+                )
+        except Exception as e:
+            logger.error(f"加载文件夹卡片失败: {e}")
+
+    @Slot(str)
+    def _on_search(self, text: str) -> None:
+        self._filter_timer.start()
+
+    @Slot(int)
+    def _on_filter_changed(self, index: int) -> None:
+        self._apply_current_filter()
+
+    def _apply_current_filter(self) -> None:
+        """读取搜索框和筛选下拉的当前值，合并应用到网格模型。"""
+        media_data = self._filter_combo.currentData()
+        self._grid_model.apply_filter(
+            search_text=self._search_input.text(),
+            media_filter=media_data if media_data else "",
+        )
+
+    # ============================================================
+    # 刷新
+    # ============================================================
+
+    @Slot()
+    def _on_refresh_all(self) -> None:
+        """刷新全部：重新扫描所有媒体库根目录。"""
+        # 先停止所有后台线程
+        self._cancel_all_workers()
+
+        try:
+            with DatabaseManager.session() as session:
+                roots = q.get_all_roots(session)
+                paths = [r.path for r in roots]
+        except Exception as e:
+            logger.error(f"获取根目录失败: {e}")
+            return
+
+        if not paths:
+            QMessageBox.information(self, "提示", "请先添加媒体库根目录。")
+            return
+
+        for path in paths:
+            self._start_scan(path)
+
+    def _cancel_all_workers(self) -> None:
+        """安全停止所有后台工作线程。"""
+        for w in (self._scan_worker, self._hash_worker, self._dedup_worker):
+            if w and w.isRunning():
+                if hasattr(w, 'cancel'):
+                    w.cancel()
+                w.wait(3000)
+        self._grid_view._cancel_worker()
+
+    # ============================================================
+    # 通知
+    # ============================================================
+
+    def show_notification(self, title: str, message: str) -> None:
+        if hasattr(self, '_tray_icon') and self._tray_icon.supportsMessages():
+            self._tray_icon.showMessage(
+                title, message,
+                QSystemTrayIcon.MessageIcon.Information, 5000,
+            )
+
+    # ============================================================
+    # 插槽
+    # ============================================================
+
+    @Slot()
+    def _on_add_root(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "选择媒体库根目录", str(Path.home()))
+        if folder:
+            self.root_added.emit(folder)
+            self._status_bar.set_status(f"已添加: {folder}")
+
+    @Slot()
+    def _on_exit(self) -> None:
+        if hasattr(self, '_tray_icon'):
+            self._tray_icon.hide()
+        QApplication.quit()
+
+    @Slot()
+    def _on_tray_show(self) -> None:
+        self.show()
+        self.activateWindow()
+
+    @Slot()
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._on_tray_show()
+
+    @Slot()
+    def _show_about(self) -> None:
+        QMessageBox.about(
+            self, "关于 影视资源管理器",
+            "影视资源管理器 v0.1.0\n\n"
+            "纯本地运行的 Windows 桌面应用，"
+            "用于管理电脑上的影视资源文件夹。\n\n"
+            "核心功能：\n"
+            "• 资源单元自动识别与管理\n"
+            "• 智能文件查重（MD5 / 感知哈希 / 人脸识别）\n"
+            "• 实时文件监控\n"
+            "• 局域网 SMB 共享\n"
+            "• 安卓端 API 预留",
+        )
