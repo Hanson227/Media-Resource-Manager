@@ -34,20 +34,24 @@ class QuickLookPreviewDialog(QDialog):
     """
 
     def __init__(self, file_list: list[dict], current_index: int = 0,
-                 parent=None) -> None:
+                 seek_step_sec: int = 5, parent=None) -> None:
         """初始化预览对话框。
 
         参数:
             file_list: [{"path": str, "filename": str, "media_type": str, ...}]
             current_index: 当前显示文件在列表中的索引。
+            seek_step_sec: 左右方向键跳转视频的步长（秒）。
         """
         super().__init__(parent)
         self._file_list = file_list
         self._current_index = current_index
+        self._seek_step_sec = seek_step_sec
         self._cv2 = None
         self._video_timer = QTimer(self)
         self._video_timer.timeout.connect(self._next_video_frame)
         self._cap = None
+        self._total_frames = 0
+        self._fps = 0.0
 
         self.setWindowTitle("预览")
         self.setWindowFlags(
@@ -88,7 +92,7 @@ class QuickLookPreviewDialog(QDialog):
         )
         bottom_layout.addWidget(self._info_label)
         bottom_layout.addStretch()
-        hint_label = QLabel("← → 切换 | Space/Esc 关闭")
+        hint_label = QLabel("← → 视频进度 | ↑ ↓ 切换文件 | Space/Esc 关闭")
         hint_label.setStyleSheet(
             f"color: {OVERLAY_0}; font-size: 11px; background: transparent;"
         )
@@ -142,6 +146,8 @@ class QuickLookPreviewDialog(QDialog):
             if not self._cap.isOpened():
                 self._media_label.setText("无法打开视频")
                 return
+            self._total_frames = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self._fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
             self._video_timer.start(33)  # ~30 fps
         except Exception as e:
             logger.error(f"打开视频失败: {path_str} - {e}")
@@ -210,12 +216,29 @@ class QuickLookPreviewDialog(QDialog):
         if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Escape):
             self._stop_video()
             self.close()
-        elif event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Up):
+        elif event.key() == Qt.Key.Key_Up:
             self._navigate(-1)
-        elif event.key() in (Qt.Key.Key_Right, Qt.Key.Key_Down):
+        elif event.key() == Qt.Key.Key_Down:
             self._navigate(1)
+        elif event.key() == Qt.Key.Key_Left:
+            self._seek_video(-self._seek_step_sec)
+        elif event.key() == Qt.Key.Key_Right:
+            self._seek_video(self._seek_step_sec)
         else:
             super().keyPressEvent(event)
+
+    def _seek_video(self, delta_sec: int) -> None:
+        """按指定秒数跳转视频进度。"""
+        if self._cap is None or not self._cap.isOpened() or self._fps <= 0:
+            # 非视频模式：切换文件
+            self._navigate(-1 if delta_sec < 0 else 1)
+            return
+        current_frame = self._cap.get(self._cv2.CAP_PROP_POS_FRAMES)
+        target_frame = current_frame + int(delta_sec * self._fps)
+        target_frame = max(0, min(target_frame, self._total_frames - 1))
+        self._cap.set(self._cv2.CAP_PROP_POS_FRAMES, target_frame)
+        # 立即显示一帧
+        self._next_video_frame()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
