@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 数据库迁移与初始化。
 
@@ -9,13 +11,15 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from sqlalchemy import inspect, text
+
 from app.db.engine import DatabaseManager
 from app.db.models import Base
 
 logger = logging.getLogger(__name__)
 
 # 当前数据库 Schema 版本号
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 def init_db(db_path: Optional[Path] = None) -> None:
@@ -43,15 +47,51 @@ def init_db(db_path: Optional[Path] = None) -> None:
     logger.info("数据库表创建/验证完成")
 
 
-def migrate_db() -> None:
-    """执行数据库迁移（当 Schema 版本变更时）。
+def _get_schema_version(engine) -> int:
+    """读取当前数据库的 Schema 版本。"""
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("PRAGMA user_version;")).scalar()
+            return result or 0
+    except Exception:
+        return 0
 
-    当前为初始版本，无需迁移。未来版本在此实现增量更新逻辑。
-    """
+
+def _set_schema_version(engine, version: int) -> None:
+    """设置数据库 Schema 版本。"""
+    with engine.connect() as conn:
+        conn.execute(text(f"PRAGMA user_version = {version};"))
+        conn.commit()
+
+
+def migrate_db() -> None:
+    """执行数据库迁移（当 Schema 版本变更时）。"""
     engine = DatabaseManager.get_engine()
-    # TODO: 读取当前数据库版本号，与 CURRENT_SCHEMA_VERSION 比对
-    # 若需迁移，按版本号依次执行 ALTER TABLE 等操作
-    logger.info(f"数据库 Schema 版本: v{CURRENT_SCHEMA_VERSION}，无需迁移")
+    current = _get_schema_version(engine)
+    logger.info(f"数据库当前版本: v{current}，目标版本: v{CURRENT_SCHEMA_VERSION}")
+
+    if current >= CURRENT_SCHEMA_VERSION:
+        return
+
+    # 逐版本迁移
+    if current < 1:
+        _set_schema_version(engine, 1)
+        current = 1
+
+    if current < 2:
+        inspector = inspect(engine)
+        columns = [c["name"] for c in inspector.get_columns("resource_units")]
+        if "cover_path" not in columns:
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "ALTER TABLE resource_units ADD COLUMN cover_path VARCHAR(2048);"
+                ))
+                conn.commit()
+                logger.info("迁移 v1→v2: 添加 resource_units.cover_path 列")
+        _set_schema_version(engine, 2)
+        current = 2
+
+    logger.info(f"数据库迁移完成，当前版本: v{current}")
 
 
 def drop_all_tables() -> None:

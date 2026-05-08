@@ -9,6 +9,7 @@
 # -*- coding: utf-8 -*-
 # -*- coding: utf-8 -*-
 # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 自动化端到端测试 —— 模拟完整使用流程。
 
@@ -51,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from PIL import Image
 from config import AppConfig
 from app.db.engine import DatabaseManager
-from app.db.migrations import init_db
+from app.db.migrations import init_db, migrate_db
 from app.core.scanner import MediaScanner, ScanResult
 from app.core.hash_engine import HashEngine, FileHashes
 from app.core.thumbnail_generator import ThumbnailGenerator, ThumbnailInfo
@@ -176,6 +177,7 @@ def test_db():
     section("测试 1: 数据库初始化 + 完整性检查")
     db_path = Path("data/test_flow.db")
     init_db(db_path)
+    migrate_db()
     engine = DatabaseManager.get_engine()
     tables = [t for t in engine.dialect.get_table_names(engine.connect())]
     check("至少创建 9 张表", len(tables) >= 9)
@@ -188,6 +190,12 @@ def test_db():
     # 完整性检查
     integrity = DatabaseManager.check_integrity()
     check("数据库完整性检查通过", integrity is None)
+
+    # 验证 cover_path 列存在
+    from sqlalchemy import inspect
+    inspector = inspect(engine)
+    cols = [c["name"] for c in inspector.get_columns("resource_units")]
+    check("cover_path 列已迁移", "cover_path" in cols)
     return db_path
 
 

@@ -405,9 +405,9 @@ class ThumbnailGridView(QListView):
         super().keyPressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        """双击空白区域 → 返回上一级。"""
+        """双击空白区域 → 返回上一级；双击有效项目 → 正常处理。"""
         idx = self.indexAt(event.pos())
-        if not idx.isValid() or not idx.internalPointer():
+        if not idx.isValid():
             self.back_requested.emit()
             event.accept()
             return
