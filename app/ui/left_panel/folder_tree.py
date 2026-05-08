@@ -75,7 +75,32 @@ class FolderTreeModel(QAbstractItemModel):
         try:
             with DatabaseManager.session() as session:
                 roots = q.get_all_roots(session)
+                starred_units = q.get_starred_units(session)
                 self._roots = []
+
+                # 收藏虚拟根节点（仅在有收藏时显示）
+                if starred_units:
+                    fav_node = TreeNode(
+                        node_type="favorites",
+                        node_id=-1,
+                        name=f"⭐ 收藏  ({len(starred_units)} 个片段)",
+                        path="",
+                    )
+                    for unit in starred_units:
+                        fav_node.children.append(TreeNode(
+                            node_type="unit",
+                            node_id=unit.id,
+                            name=unit.name,
+                            path=unit.path,
+                            file_count=unit.file_count or 0,
+                            total_size=unit.total_size or 0,
+                            is_manual=unit.is_manual or False,
+                            is_starred=True,
+                            status=unit.status or "active",
+                            library_root_id=-1,
+                        ))
+                    self._roots.append(fav_node)
+
                 for root in roots:
                     units = q.get_units_by_root(session, root.id)
                     root_name = Path(root.path).name or root.path
@@ -114,7 +139,7 @@ class FolderTreeModel(QAbstractItemModel):
             return []
         if node.node_type == "unit":
             return [node.node_id]
-        if node.node_type == "root":
+        if node.node_type in ("root", "favorites"):
             return [c.node_id for c in node.children if c.status == "active"]
         return []
 
@@ -138,7 +163,7 @@ class FolderTreeModel(QAbstractItemModel):
                 return self.createIndex(row, column, self._roots[row])
         else:
             pnode = parent.internalPointer()
-            if pnode and pnode.node_type == "root" and row < len(pnode.children):
+            if pnode and pnode.node_type in ("root", "favorites") and row < len(pnode.children):
                 return self.createIndex(row, column, pnode.children[row])
         return QModelIndex()
 
@@ -150,6 +175,9 @@ class FolderTreeModel(QAbstractItemModel):
             return QModelIndex()
         if node.node_type == "unit":
             for r_idx, root in enumerate(self._roots):
+                # 收藏节点下的单元：library_root_id == -1
+                if node.library_root_id == -1 and root.node_type == "favorites":
+                    return self.createIndex(r_idx, 0, root)
                 if root.node_id == node.library_root_id:
                     return self.createIndex(r_idx, 0, root)
         return QModelIndex()
@@ -158,7 +186,7 @@ class FolderTreeModel(QAbstractItemModel):
         if not parent.isValid():
             return len(self._roots)
         node = parent.internalPointer()
-        if node and node.node_type == "root":
+        if node and node.node_type in ("root", "favorites"):
             return len(node.children)
         return 0
 
@@ -213,6 +241,8 @@ class FolderTreeModel(QAbstractItemModel):
     def _build_tooltip_text(node: TreeNode) -> str:
         if node.node_type == "root":
             return f"媒体库根目录: {node.path}"
+        if node.node_type == "favorites":
+            return "收藏的文件夹，可快速访问常用位置"
         from app.utils.file_helpers import format_size
         lines = [
             f"名称: {node.name}",
@@ -252,6 +282,8 @@ class FolderTreeView(QTreeView):
     split_requested = Signal(int)
     mark_requested = Signal(str)
     unmark_requested = Signal(int)
+    star_requested = Signal(int)
+    unstar_requested = Signal(int)
     exclude_requested = Signal(int)
     remove_root_requested = Signal(int)
 
@@ -333,6 +365,8 @@ class FolderTreeView(QTreeView):
         menu.split_requested.connect(self.split_requested.emit)
         menu.mark_requested.connect(self.mark_requested.emit)
         menu.unmark_requested.connect(self.unmark_requested.emit)
+        menu.star_requested.connect(self.star_requested.emit)
+        menu.unstar_requested.connect(self.unstar_requested.emit)
         menu.exclude_requested.connect(self.exclude_requested.emit)
         menu.remove_root_requested.connect(self.remove_root_requested.emit)
         menu.refresh_requested.connect(self.refresh_model)

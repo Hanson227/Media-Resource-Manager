@@ -29,5 +29,11 @@ win10toast>=0.9.0
 # FFmpeg Python 包装（可选——调用系统 ffmpeg）
 ffmpeg-python>=0.2.0
 
-# 回收站操作（可选）
-# send2trash>=1.8.0
+# 回收站操作
+send2trash>=1.8.0
+
+# HEIC/HEIF 图片支持
+pillow-heif>=0.15.0
+
+# RAW 图片格式支持
+rawpy>=0.21.0

@@ -132,9 +132,16 @@ class ThumbnailGenerator:
                 pass  # 缓存损坏，重新生成
 
         ext = source_path.suffix.lower()
-        if ext in {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}:
+        _image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif',
+                       '.heic', '.heif', '.ico', '.jp2'}
+        _raw_exts = {'.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2',
+                     '.pef', '.raf', '.3fr', '.x3f'}
+        if ext in _image_exts:
             w, h = self._generate_image_thumb(source_path, cache_path)
             method = "pillow"
+        elif ext in _raw_exts:
+            w, h = self._generate_raw_thumb(source_path, cache_path)
+            method = "rawpy"
         elif ext in {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.3gp', '.ts'}:
             w, h = self._generate_video_thumb(source_path, cache_path)
             method = "opencv_mid"
@@ -214,6 +221,30 @@ class ThumbnailGenerator:
                 pil_format = "JPEG" if self._format.lower() == "jpg" else self._format.upper()
                 img.save(dest, format=pil_format, **save_kwargs)
                 return img.size
+        except Exception as e:
+            raise ThumbnailGenerationError(str(source), str(e))
+
+    def _generate_raw_thumb(self, source: Path, dest: Path) -> tuple[int, int]:
+        """生成 RAW 图片缩略图（rawpy → Pillow）。"""
+        try:
+            import rawpy
+            import numpy as np
+            with rawpy.imread(str(source)) as raw:
+                rgb = raw.postprocess(
+                    use_camera_wb=True,
+                    half_size=True,
+                    no_auto_bright=True,
+                    output_bps=8,
+                )
+            img = Image.fromarray(rgb)
+            img.thumbnail((self._max_size, self._max_size), Image.LANCZOS)
+            save_kwargs = {}
+            if self._format.lower() == "jpg":
+                save_kwargs["quality"] = self._quality
+                save_kwargs["optimize"] = True
+            pil_format = "JPEG" if self._format.lower() == "jpg" else self._format.upper()
+            img.save(dest, format=pil_format, **save_kwargs)
+            return img.size
         except Exception as e:
             raise ThumbnailGenerationError(str(source), str(e))
 

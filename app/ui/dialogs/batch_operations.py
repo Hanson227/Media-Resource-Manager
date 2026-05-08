@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from config import AppConfig
 from app.services.cleanup_service import CleanupService
+from app.ui.theme import SUBTEXT_0, BLUE
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ class BatchOperationsDialog(QDialog):
         backup_layout = QHBoxLayout()
         backup_layout.addWidget(QLabel("备份目录:"))
         self._backup_label = QLabel("（未选择）")
-        self._backup_label.setStyleSheet("color: #888;")
+        self._backup_label.setStyleSheet(f"color: {SUBTEXT_0};")
         backup_layout.addWidget(self._backup_label)
         browse_btn = QPushButton("浏览...")
         browse_btn.clicked.connect(self._on_browse_backup)
@@ -113,7 +114,7 @@ class BatchOperationsDialog(QDialog):
         preview_layout.addWidget(self._file_table)
 
         count_label = QLabel(f"共 {len(self._matches)} 对匹配文件")
-        count_label.setStyleSheet("color: #888; padding: 4px;")
+        count_label.setStyleSheet(f"color: {SUBTEXT_0}; padding: 4px;")
         preview_layout.addWidget(count_label)
 
         layout.addWidget(preview_group)
@@ -147,7 +148,7 @@ class BatchOperationsDialog(QDialog):
         if folder:
             self._backup_dir = Path(folder)
             self._backup_label.setText(str(self._backup_dir))
-            self._backup_label.setStyleSheet("color: #44a;")
+            self._backup_label.setStyleSheet(f"color: {BLUE};")
 
     @Slot()
     def _on_execute(self) -> None:

@@ -46,6 +46,7 @@ _fix_windows_encoding()
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 
 from config import AppConfig
 from app.db.engine import DatabaseManager
@@ -122,6 +123,12 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName(config.window_title)
     app.setApplicationVersion("0.1.0")
+
+    # 设置应用图标
+    icon_path = Path(__file__).parent / "app" / "resources" / "icon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+        logger.info(f"已加载应用图标: {icon_path}")
 
     # 加载现代化样式表
     style_path = Path(__file__).parent / "app" / "ui" / "style.qss"

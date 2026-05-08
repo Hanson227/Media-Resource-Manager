@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QProgressBar, QPushButton,
 )
+from app.ui.theme import SUBTEXT_0
 
 
 class ProgressPanel(QWidget):
@@ -52,7 +53,7 @@ class ProgressPanel(QWidget):
 
         # 详情文字
         self._detail_label = QLabel("")
-        self._detail_label.setStyleSheet("color: #888; font-size: 11px;")
+        self._detail_label.setStyleSheet(f"color: {SUBTEXT_0}; font-size: 11px;")
         layout.addWidget(self._detail_label)
 
     @Slot(str)

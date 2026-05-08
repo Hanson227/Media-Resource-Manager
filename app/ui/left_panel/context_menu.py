@@ -32,6 +32,8 @@ class FolderTreeContextMenu(QMenu):
     split_requested = Signal(int)
     mark_requested = Signal(str)
     unmark_requested = Signal(int)
+    star_requested = Signal(int)
+    unstar_requested = Signal(int)
     exclude_requested = Signal(int)
     remove_root_requested = Signal(int)
     refresh_requested = Signal()
@@ -98,6 +100,22 @@ class FolderTreeContextMenu(QMenu):
             mark_action = QAction("标记为资源单元", self)
             mark_action.triggered.connect(lambda p=node.path: self.mark_requested.emit(p))
             self.addAction(mark_action)
+
+        # 收藏 / 取消收藏
+        if node.is_starred:
+            unstar_action = QAction("取消收藏", self)
+            unstar_action.setToolTip("将此文件夹从收藏中移除")
+            unstar_action.triggered.connect(
+                lambda uid=unit_id: self.unstar_requested.emit(uid)
+            )
+            self.addAction(unstar_action)
+        else:
+            star_action = QAction("添加到收藏", self)
+            star_action.setToolTip("收藏此文件夹以便快速访问")
+            star_action.triggered.connect(
+                lambda uid=unit_id: self.star_requested.emit(uid)
+            )
+            self.addAction(star_action)
 
         self.addSeparator()
 

@@ -255,7 +255,9 @@ class ThumbnailGridView(QListView):
     """缩略图网格视图。支持文件列表和文件夹卡片两种模式。"""
 
     file_double_clicked = Signal(int)
+    file_selected = Signal(int)
     folder_entered = Signal(int)  # 双击文件夹卡片 → 进入该单元
+    preview_requested = Signal(int, str, str)  # file_id, file_path, media_type
 
     def __init__(self, model: ThumbnailGridModel, config: AppConfig,
                  parent=None) -> None:
@@ -384,3 +386,17 @@ class ThumbnailGridView(QListView):
         fid = model.data(idxs[0], Qt.ItemDataRole.UserRole + 1)
         if fid:
             self.file_selected.emit(fid)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            idxs = self.selectedIndexes()
+            if idxs:
+                model = self.model()
+                fid = model.data(idxs[0], Qt.ItemDataRole.UserRole + 1)
+                fp = model.data(idxs[0], Qt.ItemDataRole.UserRole)
+                mt = model.data(idxs[0], Qt.ItemDataRole.UserRole + 2)
+                if fid and fp and mt:
+                    self.preview_requested.emit(fid, fp, mt)
+                    event.accept()
+                    return
+        super().keyPressEvent(event)
