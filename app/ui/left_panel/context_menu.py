@@ -35,6 +35,8 @@ class FolderTreeContextMenu(QMenu):
     star_requested = Signal(int)
     unstar_requested = Signal(int)
     exclude_requested = Signal(int)
+    cover_requested = Signal(int)       # 设置封面 (unit_id)
+    clear_cover_requested = Signal(int) # 清除封面 (unit_id)
     remove_root_requested = Signal(int)
     refresh_requested = Signal()
 
@@ -124,6 +126,20 @@ class FolderTreeContextMenu(QMenu):
         exclude_action.setToolTip(f"将「{node.name}」标记为已排除，不再参与扫描和查重")
         exclude_action.triggered.connect(lambda *args, uid=unit_id: self.exclude_requested.emit(uid))
         self.addAction(exclude_action)
+
+        self.addSeparator()
+
+        # 设置封面
+        cover_action = QAction("设置封面...", self)
+        cover_action.setToolTip("为此文件夹选择一张封面图片")
+        cover_action.triggered.connect(lambda *args, uid=unit_id: self.cover_requested.emit(uid))
+        self.addAction(cover_action)
+
+        if node.is_manual or node.is_starred:
+            clear_cover_action = QAction("清除封面", self)
+            clear_cover_action.setToolTip("恢复为默认缩略图")
+            clear_cover_action.triggered.connect(lambda *args, uid=unit_id: self.clear_cover_requested.emit(uid))
+            self.addAction(clear_cover_action)
 
     def _build_root_menu(self) -> None:
         """根目录节点的右键菜单。"""

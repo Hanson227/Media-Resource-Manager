@@ -93,6 +93,9 @@ class ResourceUnit(Base):
     total_size = Column(BigInteger, nullable=False, default=0)
     """该单元内所有媒体文件的总字节数。"""
 
+    cover_path = Column(String(2048), nullable=True, default=None)
+    """用户手动设置的封面图片路径。"""
+
     library_root_id = Column(Integer, ForeignKey("media_library_roots.id", ondelete="CASCADE"), nullable=False)
     """所属媒体库根目录 ID。"""
 

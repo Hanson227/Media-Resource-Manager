@@ -131,6 +131,22 @@ def mark_unit_manual(session: Session, unit_id: int, is_manual: bool = True) -> 
     })
 
 
+def set_unit_cover(session: Session, unit_id: int, cover_path: str) -> None:
+    """设置资源单元的封面图片。"""
+    session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
+        "cover_path": cover_path,
+        "updated_at": datetime.now(),
+    })
+
+
+def clear_unit_cover(session: Session, unit_id: int) -> None:
+    """清除资源单元的手动封面。"""
+    session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
+        "cover_path": None,
+        "updated_at": datetime.now(),
+    })
+
+
 def set_unit_starred(session: Session, unit_id: int, starred: bool = True) -> None:
     """设置资源单元的星标状态。"""
     session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
