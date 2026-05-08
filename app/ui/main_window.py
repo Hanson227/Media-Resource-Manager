@@ -953,16 +953,33 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先添加媒体库根目录。")
             return
 
-        for path in paths:
-            self._start_scan(path)
+        if len(paths) == 1:
+            self._start_scan(paths[0])
+        else:
+            # 多根目录：逐个串行扫描，避免 worker 覆盖
+            self._start_scan(paths[0])
+            for path in paths[1:]:
+                # 等前一个扫描完成再启动下一个
+                if self._scan_worker:
+                    self._scan_worker.finished.connect(
+                        lambda p=path: self._start_scan(p),
+                        Qt.ConnectionType.SingleShotConnection,
+                    )
 
     def _cancel_all_workers(self) -> None:
         """安全停止所有后台工作线程。"""
-        for w in (self._scan_worker, self._hash_worker, self._dedup_worker):
+        # 先解除引用，确保 worker 信号不会访问过期指针
+        workers = [self._scan_worker, self._hash_worker, self._dedup_worker]
+        self._scan_worker = self._hash_worker = self._dedup_worker = None
+
+        for w in workers:
             if w and w.isRunning():
                 if hasattr(w, 'cancel'):
                     w.cancel()
-                w.wait(3000)
+                if not w.wait(10000):
+                    logger.warning(f"Worker {type(w).__name__} 未在 10s 内停止，强制终止")
+                    w.terminate()
+                    w.wait()
         self._grid_view._cancel_all_workers()
 
     # ============================================================
