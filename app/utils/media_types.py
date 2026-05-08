@@ -15,6 +15,8 @@ from app.utils.constants import MediaType
 _IMAGE_EXTENSIONS: FrozenSet[str] = frozenset({
     '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp',
     '.tiff', '.tif', '.heic', '.heif', '.ico', '.jp2',
+    '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2',
+    '.pef', '.raf', '.3fr', '.x3f',
 })
 
 _VIDEO_EXTENSIONS: FrozenSet[str] = frozenset({

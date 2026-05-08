@@ -2,8 +2,12 @@
   "db_path": "data\\media_manager.db",
   "media_extensions": [
     ".3gp",
+    ".3fr",
+    ".arw",
     ".avi",
     ".bmp",
+    ".cr2",
+    ".dng",
     ".flv",
     ".gif",
     ".heic",
@@ -16,13 +20,19 @@
     ".mp4",
     ".mpeg",
     ".mpg",
+    ".nef",
+    ".orf",
+    ".pef",
     ".png",
+    ".raf",
+    ".rw2",
     ".tif",
     ".tiff",
     ".ts",
     ".webm",
     ".webp",
-    ".wmv"
+    ".wmv",
+    ".x3f"
   ],
   "exclude_patterns": [
     "$RECYCLE.BIN",

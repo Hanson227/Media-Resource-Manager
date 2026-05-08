@@ -13,6 +13,7 @@ import logging
 from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal, Slot
+from app.ui.theme import SUBTEXT_0
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QSplitter,
     QListWidget, QListWidgetItem, QTextBrowser,
@@ -86,7 +87,7 @@ class MessageCenterDialog(QDialog):
 
         # 底部
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet("color: #888; padding: 4px;")
+        self._status_label.setStyleSheet(f"color: {SUBTEXT_0}; padding: 4px;")
         layout.addWidget(self._status_label)
 
         # 关闭

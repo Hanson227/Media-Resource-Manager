@@ -118,6 +118,13 @@ class MainWindow(QMainWindow):
         dedup_action.triggered.connect(self._on_start_dedup)
         tools_menu.addAction(dedup_action)
 
+        tools_menu.addSeparator()
+
+        excluded_action = QAction("管理已排除文件夹(&L)...", self)
+        excluded_action.setStatusTip("查看和管理已被排除的文件夹列表")
+        excluded_action.triggered.connect(self._on_manage_excluded)
+        tools_menu.addAction(excluded_action)
+
         reset_db_action = QAction("重置数据库(&Z)...", self)
         reset_db_action.setStatusTip("删除所有扫描数据并重新初始化数据库")
         reset_db_action.triggered.connect(self._on_reset_db)
@@ -314,11 +321,16 @@ class MainWindow(QMainWindow):
         # ---- 网格文件夹卡片 → 进入单元 ----
         self._grid_view.folder_entered.connect(self._on_unit_double_clicked)
 
+        # ---- 空格键预览 ----
+        self._grid_view.preview_requested.connect(self._on_show_preview)
+
         # ---- 右键菜单：合并/拆分 ----
         self._tree_view.merge_requested.connect(self._on_merge_units)
         self._tree_view.split_requested.connect(self._on_split_unit)
         self._tree_view.mark_requested.connect(self._on_mark_unit)
         self._tree_view.unmark_requested.connect(self._on_unmark_unit)
+        self._tree_view.star_requested.connect(self._on_star_unit)
+        self._tree_view.unstar_requested.connect(self._on_unstar_unit)
         self._tree_view.exclude_requested.connect(self._on_exclude_unit)
         self._tree_view.remove_root_requested.connect(self._on_remove_root)
 
@@ -531,6 +543,32 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "取消标记失败", str(e))
 
     @Slot(int)
+    def _on_star_unit(self, unit_id: int) -> None:
+        """添加到收藏。"""
+        try:
+            with DatabaseManager.session() as session:
+                unit = q.get_unit_by_id(session, unit_id)
+                name = unit.name if unit else str(unit_id)
+                q.set_unit_starred(session, unit_id, True)
+            self._tree_view.refresh_model()
+            self._status_bar.set_status(f"已收藏: {name}")
+        except Exception as e:
+            QMessageBox.critical(self, "收藏失败", str(e))
+
+    @Slot(int)
+    def _on_unstar_unit(self, unit_id: int) -> None:
+        """取消收藏。"""
+        try:
+            with DatabaseManager.session() as session:
+                unit = q.get_unit_by_id(session, unit_id)
+                name = unit.name if unit else str(unit_id)
+                q.set_unit_starred(session, unit_id, False)
+            self._tree_view.refresh_model()
+            self._status_bar.set_status(f"已取消收藏: {name}")
+        except Exception as e:
+            QMessageBox.critical(self, "取消收藏失败", str(e))
+
+    @Slot(int)
     def _on_exclude_unit(self, unit_id: int) -> None:
         """排除资源单元：标记为 excluded。"""
         try:
@@ -539,10 +577,25 @@ class MainWindow(QMainWindow):
                 name = unit.name if unit else str(unit_id)
                 q.mark_unit_excluded(session, unit_id)
             self._grid_view.clear()
+            # 记录当前展开状态和选中项，避免刷新后跳转到顶部
+            current_idx = self._tree_view.currentIndex()
             self._tree_view.refresh_model()
-            root_idx = self._tree_view.model().index(0, 0)
-            if root_idx.isValid():
-                self._tree_view.setCurrentIndex(root_idx)
+            if current_idx.isValid():
+                # 尝试恢复到同级位置（父节点下的第一个子节点）
+                parent_idx = self._tree_view.model().parent(current_idx)
+                if parent_idx.isValid():
+                    sibling = self._tree_view.model().index(0, 0, parent_idx)
+                    if sibling.isValid():
+                        self._tree_view.setCurrentIndex(sibling)
+                else:
+                    # 无父节点 → 选中第一个根目录
+                    root_idx = self._tree_view.model().index(0, 0)
+                    if root_idx.isValid():
+                        self._tree_view.setCurrentIndex(root_idx)
+            else:
+                root_idx = self._tree_view.model().index(0, 0)
+                if root_idx.isValid():
+                    self._tree_view.setCurrentIndex(root_idx)
             self._status_bar.set_status(f"已排除: {name}")
         except Exception as e:
             QMessageBox.critical(self, "排除失败", str(e))
@@ -675,6 +728,47 @@ class MainWindow(QMainWindow):
             logger.error(f"处理查重结果失败: {e}")
 
     # ============================================================
+    # 快速预览
+    # ============================================================
+
+    @Slot(int, str, str)
+    def _on_show_preview(self, file_id: int, file_path: str, media_type: str) -> None:
+        """打开 Quick Look 预览对话框。"""
+        from app.ui.dialogs.preview_dialog import QuickLookPreviewDialog
+        from app.utils.file_helpers import format_size
+
+        # 从当前网格模型收集文件列表
+        model = self._grid_view.model()
+        file_list = []
+        current_index = -1
+        for row in range(model.rowCount()):
+            idx = model.index(row, 0)
+            fid = model.data(idx, Qt.ItemDataRole.UserRole + 1)
+            fp = model.data(idx, Qt.ItemDataRole.UserRole)
+            mt = model.data(idx, Qt.ItemDataRole.UserRole + 2)
+            fn = model.data(idx, Qt.ItemDataRole.DisplayRole)
+            fs = model.data(idx, Qt.ItemDataRole.UserRole + 3)
+            if fp and mt:
+                item = {
+                    "path": fp, "filename": fn, "media_type": mt,
+                    "file_id": fid, "size_formatted": fs,
+                }
+                if fid == file_id:
+                    current_index = len(file_list)
+                file_list.append(item)
+
+        if not file_list:
+            return
+        if current_index < 0:
+            current_index = 0
+
+        dlg = QuickLookPreviewDialog(file_list, current_index, self)
+        screen = self.screen().availableGeometry()
+        dlg.resize(int(screen.width() * 0.75), int(screen.height() * 0.75))
+        dlg.move(screen.center() - dlg.rect().center())
+        dlg.exec()
+
+    # ============================================================
     # 对话框
     # ============================================================
 
@@ -683,6 +777,13 @@ class MainWindow(QMainWindow):
         from app.ui.dialogs.message_center import MessageCenterDialog
         dlg = MessageCenterDialog(self)
         dlg.messages_updated.connect(self._update_message_badge)
+        dlg.exec()
+
+    @Slot()
+    def _on_manage_excluded(self) -> None:
+        from app.ui.dialogs.excluded_folders import ExcludedFoldersDialog
+        dlg = ExcludedFoldersDialog(self)
+        dlg.excluded_changed.connect(self._tree_view.refresh_model)
         dlg.exec()
 
     @Slot()

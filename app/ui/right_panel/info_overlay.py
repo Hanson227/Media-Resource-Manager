@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.utils.file_helpers import format_size
+from app.ui.theme import SURFACE_0, TEXT, SUBTEXT_0, SUBTEXT_1, OVERLAY_0
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +27,13 @@ class InfoOverlay(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #fff;
-                border: 1px solid #ccc;
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {SURFACE_0};
+                border: 1px solid {OVERLAY_0};
                 border-radius: 4px;
                 padding: 8px;
-            }
+            }}
         """)
 
         layout = QVBoxLayout(self)
@@ -40,20 +41,22 @@ class InfoOverlay(QFrame):
         layout.setSpacing(2)
 
         self._filename_label = QLabel("")
-        self._filename_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        self._filename_label.setStyleSheet(
+            f"font-weight: bold; font-size: 12px; color: {TEXT};"
+        )
         layout.addWidget(self._filename_label)
 
         self._path_label = QLabel("")
-        self._path_label.setStyleSheet("color: #888; font-size: 11px;")
+        self._path_label.setStyleSheet(f"color: {SUBTEXT_0}; font-size: 11px;")
         self._path_label.setWordWrap(True)
         layout.addWidget(self._path_label)
 
         self._meta_label = QLabel("")
-        self._meta_label.setStyleSheet("color: #444; font-size: 11px;")
+        self._meta_label.setStyleSheet(f"color: {SUBTEXT_1}; font-size: 11px;")
         layout.addWidget(self._meta_label)
 
         self._hash_label = QLabel("")
-        self._hash_label.setStyleSheet("color: #aaa; font-size: 10px;")
+        self._hash_label.setStyleSheet(f"color: {OVERLAY_0}; font-size: 10px;")
         layout.addWidget(self._hash_label)
 
         self.setMaximumWidth(320)

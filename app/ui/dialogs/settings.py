@@ -12,6 +12,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import Signal, Slot
+from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QTabWidget, QWidget, QFormLayout,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import AppConfig
+from app.ui.theme import BASE, TEXT, SURFACE_0, OVERLAY_0
 
 
 class SettingsDialog(QDialog):
@@ -47,6 +49,16 @@ class SettingsDialog(QDialog):
 
     def _setup_ui(self) -> None:
         """构建选项卡式 UI。"""
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(BASE))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(TEXT))
+        palette.setColor(QPalette.ColorRole.Base, QColor(SURFACE_0))
+        palette.setColor(QPalette.ColorRole.Button, QColor(SURFACE_0))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor(TEXT))
+        palette.setColor(QPalette.ColorRole.Text, QColor(TEXT))
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(OVERLAY_0))
+        self.setPalette(palette)
+
         layout = QVBoxLayout(self)
 
         tabs = QTabWidget()

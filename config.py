@@ -31,6 +31,7 @@ class AppConfig:
         '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif',
         '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v',
         '.mpg', '.mpeg', '.3gp', '.ts', '.heic', '.heif',
+        '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef', '.raf', '.3fr', '.x3f',
     }))
     """参与索引的媒体文件扩展名集合。"""
 

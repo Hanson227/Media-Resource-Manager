@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import AppConfig
+from app.ui.theme import SUBTEXT_0
 
 
 class DedupSettingsDialog(QDialog):
@@ -88,7 +89,7 @@ class DedupSettingsDialog(QDialog):
             "提示: 阈值越低越严格（减少误报但可能漏报），"
             "阈值越高越宽松（发现更多重复但可能误判）。"
         )
-        hint.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
+        hint.setStyleSheet(f"color: {SUBTEXT_0}; font-size: 11px; padding: 4px;")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 

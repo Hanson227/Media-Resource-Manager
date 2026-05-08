@@ -139,10 +139,33 @@ def set_unit_starred(session: Session, unit_id: int, starred: bool = True) -> No
     })
 
 
+def get_starred_units(session: Session) -> list[ResourceUnit]:
+    """获取所有已收藏的资源单元。"""
+    return session.query(ResourceUnit).filter(
+        ResourceUnit.is_starred == True,
+        ResourceUnit.status == "active",
+    ).all()
+
+
 def mark_unit_excluded(session: Session, unit_id: int) -> None:
     """将资源单元标记为排除状态。"""
     session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
         "status": "excluded",
+        "updated_at": datetime.now(),
+    })
+
+
+def get_excluded_units(session: Session) -> list[ResourceUnit]:
+    """获取所有已排除的资源单元。"""
+    return session.query(ResourceUnit).filter(
+        ResourceUnit.status == "excluded"
+    ).all()
+
+
+def unexclude_unit(session: Session, unit_id: int) -> None:
+    """将已排除的资源单元恢复为活跃状态。"""
+    session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
+        "status": "active",
         "updated_at": datetime.now(),
     })
 
