@@ -6,12 +6,15 @@
 提供线程安全的会话上下文管理器。
 """
 
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Optional
 
-from sqlalchemy import create_engine, Engine, event
+from sqlalchemy import create_engine, Engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
@@ -63,6 +66,15 @@ class DatabaseManager:
         )
         cls._db_path = db_path
 
+        # 启动时自动检查完整性
+        integrity = cls.check_integrity()
+        if integrity is not None and integrity != "ok":
+            logger.warning(f"数据库文件可能损坏: {integrity}")
+            if cls.try_repair():
+                logger.info("数据库已自动修复")
+            else:
+                logger.error("数据库自动修复失败，建议恢复备份")
+
     @classmethod
     @contextmanager
     def session(cls) -> Generator[Session, None, None]:
@@ -102,6 +114,51 @@ class DatabaseManager:
             cls._engine = None
             cls._session_factory = None
             cls._db_path = None
+
+    @classmethod
+    def check_integrity(cls) -> Optional[str]:
+        """执行 SQLite 完整性检查。
+
+        返回:
+            损坏描述字符串（损坏时），或 None（完好时）。
+        """
+        if cls._engine is None:
+            return "数据库未初始化"
+        try:
+            with cls._engine.connect() as conn:
+                result = conn.execute(text("PRAGMA integrity_check;")).scalar()
+                if result != "ok":
+                    logger.error(f"数据库完整性检查失败: {result}")
+                    return str(result)
+                return None
+        except Exception as e:
+            logger.error(f"完整性检查异常: {e}")
+            return str(e)
+
+    @classmethod
+    def try_repair(cls) -> bool:
+        """尝试修复损坏的数据库（VACUUM + 从 WAL 恢复）。
+
+        返回:
+            修复是否成功。
+        """
+        if cls._engine is None:
+            return False
+        try:
+            with cls._engine.connect() as conn:
+                conn.execute(text("PRAGMA integrity_check;"))
+                # VACUUM 重建数据库文件，可清除 WAL 不一致
+                conn.execute(text("VACUUM;"))
+                # 再次检查
+                result = conn.execute(text("PRAGMA integrity_check;")).scalar()
+                if result == "ok":
+                    logger.info("数据库修复成功")
+                    return True
+                logger.error(f"VACUUM 修复后仍有问题: {result}")
+                return False
+        except Exception as e:
+            logger.error(f"数据库修复失败: {e}")
+            return False
 
     @classmethod
     @property
