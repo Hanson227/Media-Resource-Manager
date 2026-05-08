@@ -434,7 +434,7 @@ class MainWindow(QMainWindow):
     def _on_breadcrumb_back(self) -> None:
         """点击面包屑 → 返回当前单元所属媒体库的文件夹卡片。"""
         if not self._breadcrumb.isVisible():
-            return  # 已在根级，无上级可返回
+            return
         self._breadcrumb.hide()
         model = self._tree_view.model()
         # 遍历所有根，找到包含当前单元的根
