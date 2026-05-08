@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-代码修改后请运行验证（测试/类型检查/lint）确认无误。请使用中文进行回答，代码、文件名、API 名等保持英文。
+代码修改后请运行 `python tests/test_flow.py` 验证确认无误。请使用中文进行回答，代码、文件名、API 名等保持英文。
 ## Project Overview
 
 影视资源管理器 (Media Resource Manager) — a Windows desktop app for managing local media collections (movies/TV). Built with PySide6 + SQLAlchemy + FastAPI. v0.1.0, Chinese UI.
@@ -9,7 +9,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Run the application (conda env: media-manager, Python 3.10)
+# Activate conda environment
+conda activate media-manager
+
+# Run the application (Python 3.10)
 python main.py
 
 # Run the test suite (single file with 10 test sections)
@@ -18,8 +21,6 @@ python tests/test_flow.py
 # Install dependencies
 pip install -r requirements.txt
 ```
-
-No linter, type-checker, or formatter is configured yet.
 
 ## Architecture
 
@@ -81,7 +82,9 @@ The scanner (`app/core/scanner.py`) walks bottom-up: a folder is a "resource uni
 
 ## Database
 
-SQLite with WAL mode + foreign keys enabled. Single-file at `data/media_manager.db` (configurable). 10 tables with CHECK constraints enforcing enum values. `expire_on_commit=False` so ORM objects survive session close.
+SQLite with WAL mode + foreign keys enabled. Single-file at `data/media_manager.db` (configurable via `config.json`). 10 tables with CHECK constraints enforcing enum values. `expire_on_commit=False` so ORM objects survive session close.
+
+Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `config.json`, loaded into a frozen `AppConfig` dataclass at startup.
 
 ## Limitations / Work-in-Progress
 
