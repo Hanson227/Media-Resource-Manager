@@ -411,10 +411,20 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_breadcrumb_back(self) -> None:
-        """点击面包屑返回文件夹卡片视图。"""
+        """点击面包屑 → 返回当前单元所属媒体库的文件夹卡片。"""
         self._breadcrumb.hide()
-        # 选中根节点，触发根→文件夹卡片
-        root_idx = self._tree_view.model().index(0, 0)
+        model = self._tree_view.model()
+        # 遍历所有根，找到包含当前单元的根
+        for row in range(model.rowCount()):
+            root_idx = model.index(row, 0)
+            unit_ids = model.get_selected_units(root_idx)
+            if self._current_unit_id in unit_ids:
+                self._tree_view.setCurrentIndex(root_idx)
+                # 强制刷新为文件夹卡片（即使根已选中也生效）
+                self._show_folder_cards(unit_ids)
+                return
+        # 回退：选第一个根
+        root_idx = model.index(0, 0)
         if root_idx.isValid():
             self._tree_view.setCurrentIndex(root_idx)
 
