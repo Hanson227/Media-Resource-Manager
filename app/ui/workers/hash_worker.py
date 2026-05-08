@@ -147,14 +147,12 @@ class HashWorker(QThread):
                     # 计算哈希
                     result = engine.hash_file(fpath)
 
-                    # 写入数据库
+                    # 写入数据库：始终写入 md5/phash/dhash，
+                    # 失败时写 "" 而非 None，避免被 get_unindexed_files 反复检出
                     update_data = {}
-                    if result.md5:
-                        update_data["md5_hash"] = result.md5
-                    if result.phash:
-                        update_data["phash"] = result.phash
-                    if result.dhash:
-                        update_data["dhash"] = result.dhash
+                    update_data["md5_hash"] = result.md5 or ""
+                    update_data["phash"] = result.phash or ""
+                    update_data["dhash"] = result.dhash or ""
                     if result.width:
                         update_data["width"] = result.width
                     if result.height:
@@ -162,9 +160,8 @@ class HashWorker(QThread):
                     if result.duration_ms:
                         update_data["duration_ms"] = result.duration_ms
 
-                    if update_data:
-                        with DatabaseManager.session() as session:
-                            q.update_file_hash(session, fid, **update_data)
+                    with DatabaseManager.session() as session:
+                        q.update_file_hash(session, fid, **update_data)
 
                         # 视频帧哈希
                         if result.video_frame_hashes:
