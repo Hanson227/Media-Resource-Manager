@@ -50,7 +50,7 @@ from PySide6.QtGui import QIcon
 
 from config import AppConfig
 from app.db.engine import DatabaseManager
-from app.db.migrations import init_db
+from app.db.migrations import init_db, migrate_db
 from app.api.server import APIServer
 
 # 日志配置 —— 指定 UTF-8 编码的 StreamHandler
@@ -101,6 +101,7 @@ def main() -> None:
     # ============================================================
     try:
         init_db(config.db_path)
+        migrate_db()
         logger.info(f"数据库已初始化: {config.db_path}")
     except Exception as e:
         logger.error(f"数据库初始化失败: {e}")
