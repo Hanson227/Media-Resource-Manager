@@ -308,6 +308,9 @@ class MainWindow(QMainWindow):
         # ---- 空格键预览 ----
         self._grid_view.preview_requested.connect(self._on_show_preview)
 
+        # ---- 网格右键 → 封面设置 ----
+        self._grid_view.cover_from_file_requested.connect(self._on_set_cover_from_file)
+
         # ---- 右键菜单：合并/拆分 ----
         self._tree_view.merge_requested.connect(self._on_merge_units)
         self._tree_view.split_requested.connect(self._on_split_unit)
@@ -633,9 +636,20 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self._apply_cover(unit_id, path)
+
+    @Slot(str)
+    def _on_set_cover_from_file(self, file_path: str) -> None:
+        """从网格右键直接将某图片设为当前单元的封面。"""
+        if self._current_unit_id is None:
+            return
+        self._apply_cover(self._current_unit_id, file_path)
+
+    def _apply_cover(self, unit_id: int, cover_path: str) -> None:
+        """通用：将指定路径设为单元的封面。"""
         try:
             with DatabaseManager.session() as session:
-                q.set_unit_cover(session, unit_id, path)
+                q.set_unit_cover(session, unit_id, cover_path)
             self._tree_view.refresh_model()
             self._status_bar.set_status(f"封面已设置")
         except Exception as e:
