@@ -964,8 +964,10 @@ const PreviewPage = {
       hideTimer: null, speedOptions: [0.5, 1, 1.25, 1.5, 2],
       // Gesture state
       gestureActive: false, gestureSide: '', gestureTimer: null, rewindTimer: null,
-      gestureStartX: 0, gestureStartY: 0, gestureStartTime: 0,
+      gestureStartX: 0, gestureStartY: 0, gestureStartTime: 0, gestureStartVideoTime: 0,
       gestureSwiping: false, gestureSeekDir: 0, gestureSeekLabel: '',
+      // Double-tap state
+      lastTapTime: 0, tapTimer: null,
       // Seek state
       seeking: false, seekHintPct: 0, seekHintTime: 0,
     };
@@ -993,10 +995,13 @@ const PreviewPage = {
       this.gestureStartX = t.clientX;
       this.gestureStartY = t.clientY;
       this.gestureStartTime = Date.now();
+      this.gestureStartVideoTime = this.videoEl ? this.videoEl.currentTime : 0;
       this.gestureSide = t.clientX > window.innerWidth / 2 ? 'right' : 'left';
       this.gestureSwiping = false;
       this.gestureSeekDir = 0;
       this.gestureSeekLabel = '';
+      // Cancel pending tap timer (user already started next gesture)
+      if (this.tapTimer) { clearTimeout(this.tapTimer); this.tapTimer = null; }
       // Start long-press timer
       this.gestureTimer = setTimeout(() => {
         this.gestureActive = true;
@@ -1018,10 +1023,23 @@ const PreviewPage = {
       if (this.rewindTimer) { clearInterval(this.rewindTimer); this.rewindTimer = null; }
       // Restore playback rate
       if (this.gestureActive && this.videoEl) { this.videoEl.playbackRate = this.playbackRate; }
-      // If neither long-press nor swipe was activated, treat as tap → toggle controls
+      // Handle tap (no long-press, no swipe)
       if (!this.gestureActive && !this.gestureSwiping) {
-        this.controlsHidden = !this.controlsHidden;
-        this.speedMenuOpen = false;
+        const now = Date.now();
+        if (now - this.lastTapTime < 350) {
+          // Double tap → toggle play/pause
+          if (this.tapTimer) { clearTimeout(this.tapTimer); this.tapTimer = null; }
+          this.togglePlay();
+          this.lastTapTime = 0;
+        } else {
+          // Single tap → toggle controls after short delay
+          this.lastTapTime = now;
+          this.tapTimer = setTimeout(() => {
+            this.controlsHidden = !this.controlsHidden;
+            this.speedMenuOpen = false;
+            this.tapTimer = null;
+          }, 350);
+        }
       }
       this.gestureActive = false;
       this.gestureSwiping = false;
@@ -1034,7 +1052,6 @@ const PreviewPage = {
       if (!t || this.gestureActive) return;  // long press active, keep 2x
       const dx = t.clientX - this.gestureStartX;
       const dy = t.clientY - this.gestureStartY;
-      // Only trigger swipe on significant horizontal movement
       const absDx = Math.abs(dx);
       const absDy = Math.abs(dy);
       if (absDx > 10 && absDx > absDy) {
@@ -1042,12 +1059,13 @@ const PreviewPage = {
         if (this.gestureTimer) { clearTimeout(this.gestureTimer); this.gestureTimer = null; }
         this.gestureSwiping = true;
         this.gestureSeekDir = dx > 0 ? 1 : -1;
-        const seek = dx * 0.1; // 1px = 0.1 seconds
         const dur = this.videoEl ? (this.videoEl.duration || 0) : 0;
         if (dur > 0 && this.videoEl) {
-          this.videoEl.currentTime = Math.max(0, Math.min(dur, this.videoEl.currentTime + seek));
+          // 从起点计算目标位置，避免 touchmove 多次触发叠加
+          const targetTime = this.gestureStartVideoTime + (dx * 0.1);
+          this.videoEl.currentTime = Math.max(0, Math.min(dur, targetTime));
         }
-        const secs = Math.round(Math.abs(seek));
+        const secs = Math.round(Math.abs(dx * 0.1));
         this.gestureSeekLabel = (dx > 0 ? '+' : '-') + secs + 's';
       }
     },
@@ -1133,6 +1151,7 @@ const PreviewPage = {
     if (this.hideTimer) clearTimeout(this.hideTimer);
     if (this.rewindTimer) clearInterval(this.rewindTimer);
     if (this.gestureTimer) clearTimeout(this.gestureTimer);
+    if (this.tapTimer) clearTimeout(this.tapTimer);
   }
 };
 
