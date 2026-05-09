@@ -15,7 +15,7 @@ from typing import Optional
 from PySide6.QtCore import (
     Qt, QAbstractItemModel, QModelIndex, Signal, Slot,
 )
-from PySide6.QtWidgets import QTreeView, QAbstractItemView
+from PySide6.QtWidgets import QTreeView, QAbstractItemView, QHeaderView
 
 from config import AppConfig
 from app.db.engine import DatabaseManager
@@ -212,7 +212,15 @@ class FolderTreeModel(QAbstractItemModel):
                 return f"{prefix}{node.name}"
             elif col == self.COL_META:
                 if node.node_type == "unit":
-                    return f"{node.file_count} 个文件"
+                    if node.status == "merged":
+                        return ""
+                    from app.utils.file_helpers import format_size
+                    return f"{node.file_count} 个 · {format_size(node.total_size)}"
+                elif node.node_type == "root":
+                    active = sum(1 for c in node.children if c.status == "active")
+                    return f"{active} 个片段" if active else ""
+                elif node.node_type == "favorites":
+                    return f"{len(node.children)} 个收藏"
                 return ""
 
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -296,7 +304,10 @@ class FolderTreeView(QTreeView):
         self._model = model
         self.setModel(model)
         self.setHeaderHidden(True)
-        self.setColumnHidden(model.COL_META, True)
+        header = self.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(model.COL_NAME, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(model.COL_META, QHeaderView.ResizeMode.ResizeToContents)
         self.setAnimated(True)
         self.setExpandsOnDoubleClick(True)
         self.setIndentation(16)
