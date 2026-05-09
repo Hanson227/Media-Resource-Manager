@@ -180,6 +180,99 @@ class CleanupService:
                 logger.warning(f"缩略图清理失败 {thumb}: {e}")
 
     @staticmethod
+    def remove_unit_thumbnails(unit_id: int) -> int:
+        """删除指定资源单元下所有文件的缩略图缓存。
+
+        返回:
+            删除的文件数。
+        """
+        from app.db import queries as q
+        count = 0
+        try:
+            with DatabaseManager.session() as session:
+                files = q.get_files_by_unit(session, unit_id)
+                for f in files:
+                    CleanupService._remove_thumbnail(f.id)
+                    count += 1
+            logger.info(f"已清理单元 {unit_id} 共 {count} 个缩略图")
+        except Exception as e:
+            logger.error(f"清理单元缩略图失败 (unit_id={unit_id}): {e}")
+        return count
+
+    @staticmethod
+    def remove_root_thumbnails(root_id: int) -> int:
+        """删除指定媒体库根目录下所有文件的缩略图缓存。
+
+        返回:
+            删除的文件数。
+        """
+        from app.db import queries as q
+        count = 0
+        try:
+            with DatabaseManager.session() as session:
+                root = q.get_root_by_id(session, root_id)
+                if not root:
+                    return 0
+                units = q.get_units_by_root(session, root_id)
+                for unit in units:
+                    count += CleanupService.remove_unit_thumbnails(unit.id)
+            logger.info(f"已清理根目录 {root_id} 共 {count} 个缩略图")
+        except Exception as e:
+            logger.error(f"清理根目录缩略图失败 (root_id={root_id}): {e}")
+        return count
+
+    @staticmethod
+    def purge_orphaned_thumbnails(cache_dir: Path = None) -> int:
+        """清理孤儿缩略图：缓存存在但 DB 中无对应文件的。
+
+        返回:
+            删除的孤儿文件数。
+        """
+        if cache_dir is None:
+            cache_dir = Path("data/.thumbnails")
+        if not cache_dir.is_dir():
+            return 0
+
+        from app.db.engine import DatabaseManager
+        from app.db.models import MediaFile
+        from sqlalchemy import select
+
+        count = 0
+        try:
+            with DatabaseManager.session() as session:
+                cached_ids = set()
+                for f in cache_dir.iterdir():
+                    if f.suffix == ".jpg" and f.stem.isdigit():
+                        cached_ids.add(int(f.stem))
+
+                if not cached_ids:
+                    return 0
+
+                # 查出所有缓存ID中哪些确实有对应的文件记录
+                existing = {
+                    row[0] for row in session.execute(
+                        select(MediaFile.id).where(MediaFile.id.in_(cached_ids))
+                    ).all()
+                }
+                orphaned = cached_ids - existing
+                for fid in orphaned:
+                    (cache_dir / f"{fid}_thumb.jpg").unlink(missing_ok=True)
+                    count += 1
+
+            if count > 0:
+                logger.info(f"已清理 {count} 个孤儿缩略图")
+            return count
+        except Exception as e:
+            logger.error(f"清理孤儿缩略图失败: {e}")
+            return 0
+
+    @staticmethod
+    def invalidate_thumbnail(file_id: int) -> None:
+        """使缩略图缓存失效：删除后触发下次请求时重新生成。"""
+        CleanupService._remove_thumbnail(file_id)
+        logger.debug(f"缩略图缓存已失效 (file_id={file_id})")
+
+    @staticmethod
     def delete_empty_dirs(directory: Path) -> int:
         """递归删除空文件夹。
 

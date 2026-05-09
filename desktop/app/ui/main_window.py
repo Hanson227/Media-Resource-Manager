@@ -402,6 +402,8 @@ class MainWindow(QMainWindow):
     def _on_unit_double_clicked(self, unit_id: int) -> None:
         """双击单元 → 直接加载文件列表。"""
         self._grid_view.load_unit(unit_id)
+        # 左树同步高亮（当操作来自右侧面板时）
+        self._tree_view.select_unit(unit_id)
         self._breadcrumb.show()
         try:
             with DatabaseManager.session() as session:
@@ -649,7 +651,23 @@ class MainWindow(QMainWindow):
         """通用：将指定路径设为单元的封面。"""
         try:
             with DatabaseManager.session() as session:
+                # 先查旧封面路径，用于失效缓存
+                old = q.get_unit_by_id(session, unit_id)
+                old_cover = old.cover_path if old else None
                 q.set_unit_cover(session, unit_id, cover_path)
+
+            # 封面文件变更时，使旧封面的缩略图缓存失效
+            if old_cover and old_cover != cover_path:
+                from app.services.cleanup_service import CleanupService
+                from app.db.models import MediaFile
+                with DatabaseManager.session() as session:
+                    old_file = session.query(MediaFile).filter(
+                        MediaFile.path == old_cover,
+                        MediaFile.resource_unit_id == unit_id,
+                    ).first()
+                    if old_file:
+                        CleanupService.invalidate_thumbnail(old_file.id)
+
             self._tree_view.refresh_model()
             self._status_bar.set_status(f"封面已设置")
         except Exception as e:
@@ -680,6 +698,9 @@ class MainWindow(QMainWindow):
 
         try:
             self._grid_view.clear()
+            # 先清理缓存，再删数据库
+            from app.services.cleanup_service import CleanupService
+            CleanupService.remove_root_thumbnails(root_id)
             with DatabaseManager.session() as session:
                 q.remove_library_root(session, root_id)
             self._tree_view.refresh_model()

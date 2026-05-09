@@ -23,7 +23,7 @@ async def list_units():
         with DatabaseManager.session() as session:
             units = q.get_all_active_units(session)
 
-            # 批量查询每个单元第一个文件的 ID（封面缩略图用）
+            # 封面文件 ID：手动设置的 cover_path 优先，没有则退到首个文件
             unit_ids = [u.id for u in units]
             cover_rows = (
                 session.query(
@@ -34,7 +34,17 @@ async def list_units():
                 .group_by(MediaFile.resource_unit_id)
                 .all()
             )
-            cover_map = {row.resource_unit_id: row.first_id for row in cover_rows}
+            first_map = {row.resource_unit_id: row.first_id for row in cover_rows}
+            # 查找手动设置过封面的单元 → 对应 cover_path 的 file_id
+            cover_path_map = {}
+            for u in units:
+                if u.cover_path:
+                    row = session.query(MediaFile.id).filter(
+                        MediaFile.resource_unit_id == u.id,
+                        MediaFile.path == u.cover_path,
+                    ).first()
+                    if row:
+                        cover_path_map[u.id] = row[0]
 
             items = [
                 UnitItem(
@@ -44,7 +54,7 @@ async def list_units():
                     status=u.status,
                     library_root_id=u.library_root_id,
                     library_root_name=Path(u.library_root.path).name if u.library_root else None,
-                    cover_file_id=cover_map.get(u.id),
+                    cover_file_id=cover_path_map.get(u.id) or first_map.get(u.id),
                 )
                 for u in units
             ]
@@ -61,13 +71,22 @@ async def get_unit(unit_id: int):
             u = q.get_unit_by_id(session, unit_id)
             if not u:
                 raise HTTPException(status_code=404, detail=f"单元不存在: {unit_id}")
-            # 单个单元也查封面
-            first_file = (
-                session.query(MediaFile.id)
-                .filter(MediaFile.resource_unit_id == unit_id)
-                .order_by(MediaFile.id)
-                .first()
-            )
+            # 封面 ID：手动 cover_path 优先
+            cover_file_id = None
+            if u.cover_path:
+                row = session.query(MediaFile.id).filter(
+                    MediaFile.resource_unit_id == unit_id,
+                    MediaFile.path == u.cover_path,
+                ).first()
+                cover_file_id = row[0] if row else None
+            if cover_file_id is None:
+                first_file = (
+                    session.query(MediaFile.id)
+                    .filter(MediaFile.resource_unit_id == unit_id)
+                    .order_by(MediaFile.id)
+                    .first()
+                )
+                cover_file_id = first_file[0] if first_file else None
             return UnitItem(
                 id=u.id, name=u.name, path=u.path,
                 file_count=u.file_count, total_size=u.total_size,
@@ -75,7 +94,7 @@ async def get_unit(unit_id: int):
                 status=u.status,
                 library_root_id=u.library_root_id,
                 library_root_name=Path(u.library_root.path).name if u.library_root else None,
-                cover_file_id=first_file[0] if first_file else None,
+                cover_file_id=cover_file_id,
             )
     except HTTPException:
         raise
