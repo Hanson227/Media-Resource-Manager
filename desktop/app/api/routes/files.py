@@ -3,6 +3,7 @@
 文件路由 —— /api/files 真实数据库查询端点。
 """
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -10,8 +11,14 @@ from fastapi import APIRouter, Query, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from app.api.schemas import FileItem, FileDetailResponse, FileListResponse, StatusResponse
+
+logger = logging.getLogger(__name__)
+from app.core.thumbnail_generator import ThumbnailGenerator
 from app.db.engine import DatabaseManager
 from app.db import queries as q
+
+# 全局缩略图生成器（按需生成）
+_thumb_gen = ThumbnailGenerator(max_size=256)
 
 router = APIRouter(prefix="/api/files", tags=["文件"])
 
@@ -76,15 +83,31 @@ async def get_file(file_id: int):
 
 
 @router.delete("/{file_id}", response_model=StatusResponse)
-async def delete_file(file_id: int):
-    """删除指定文件记录。"""
+async def delete_file(file_id: int, request: Request):
+    """删除指定文件记录（同时清理缩略图缓存）。"""
+    unit_path = None
     try:
         with DatabaseManager.session() as session:
             f = q.get_file_by_id(session, file_id)
             if not f:
                 raise HTTPException(status_code=404, detail=f"文件不存在: {file_id}")
+            # 删除前记录单元路径，删完后清理缩略图用
+            unit = q.get_unit_by_id(session, f.resource_unit_id)
+            unit_path = Path(unit.path) if unit else None
             q.delete_media_file(session, file_id)
-            return StatusResponse(success=True, message=f"已删除: {f.filename}")
+
+        # 清理缩略图缓存（文件已删，用之前记录的路径）
+        cfg = getattr(request.app.state, "config", None)
+        if cfg and cfg.thumbnail_cache_dir:
+            central = Path(cfg.thumbnail_cache_dir) / f"{file_id}_thumb.jpg"
+            if central.exists():
+                central.unlink()
+        if unit_path:
+            local = unit_path / ".thumbnails" / f"{file_id}_thumb.jpg"
+            if local.exists():
+                local.unlink()
+
+        return StatusResponse(success=True, message=f"已删除: {f.filename}")
     except HTTPException:
         raise
     except Exception as e:
@@ -112,6 +135,18 @@ async def get_file_thumbnail(file_id: int, request: Request):
                 thumb_file = Path(unit.path) / ".thumbnails" / f"{file_id}_thumb.jpg"
                 if thumb_file.exists():
                     return FileResponse(str(thumb_file), media_type="image/jpeg")
+
+            # 缓存不存在，按需生成
+            if unit and f.path:
+                src = Path(f.path)
+                if src.is_file():
+                    cache_dir = cfg.thumbnail_cache_dir if cfg and cfg.thumbnail_cache_dir else Path(unit.path) / ".thumbnails"
+                    try:
+                        info = _thumb_gen.generate(src, cache_dir, file_id=file_id)
+                        if info.thumbnail_path.exists():
+                            return FileResponse(str(info.thumbnail_path), media_type="image/jpeg")
+                    except Exception as gen_e:
+                        logger.warning(f"缩略图按需生成失败: {f.path} - {gen_e}")
 
         raise HTTPException(status_code=404, detail="缩略图未生成")
     except HTTPException:

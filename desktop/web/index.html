@@ -655,8 +655,9 @@ const UnitsPage = {
             <div v-for="u in group.units" :key="u.id" class="card" @click="$router.push('/units/' + u.id)">
               <div class="card-row">
                 <div class="card-cover">
-                  <img v-if="u.cover_file_id" :src="coverUrl(u.cover_file_id)" loading="lazy" @error="$event.target.style.display='none'">
-                  <span v-else class="mdi mdi-folder-image"></span>
+                  <img v-if="u.cover_file_id" :src="coverUrl(u.cover_file_id)" loading="lazy"
+                    @load="onCoverLoad(u.id)" @error="onCoverError(u.id)">
+                  <span v-if="!u.cover_file_id || coverFailed[u.id]" class="mdi mdi-folder-image"></span>
                 </div>
                 <div class="card-body">
                   <div class="card-title">{{ u.name }}</div>
@@ -675,10 +676,12 @@ const UnitsPage = {
   `,
   props: ['serverUrl'],
   emits: ['loading'],
-  data() { return { loading: true, roots: [] };},
+  data() { return { loading: true, roots: [], coverFailed: {} };},
   methods: {
     toggleRoot(ri) { this.roots[ri].open = !this.roots[ri].open; },
     coverUrl(fid) { return fid ? this.serverUrl + '/api/files/' + fid + '/thumbnail' : ''; },
+    onCoverLoad(id) { this.coverFailed[id] = false; },
+    onCoverError(id) { this.coverFailed[id] = true; },
     formatSize(bytes) {
       if (!bytes) return '';
       const units = ['B', 'KB', 'MB', 'GB'];
@@ -729,7 +732,7 @@ const UnitFilesPage = {
                 @load="onImgLoad(f.id)" @error="onImgError($event, f.id)"
                 :alt="f.filename"
                 :class="{ loaded: loaded.has(f.id) }">
-              <span v-if="!loaded.has(f.id) && !errored.has(f.id)" class="fallback-icon">
+              <span v-if="!loaded.has(f.id)" class="fallback-icon">
                 <span class="mdi" :class="f.media_type === 'video' ? 'mdi-filmstrip-box-multiple' : 'mdi-file-image-outline'"></span>
               </span>
               <span v-if="f.media_type === 'video'" class="vid-badge"><span class="mdi mdi-play"></span></span>
@@ -906,26 +909,30 @@ const PreviewPage = {
       else { if (document.exitFullscreen) document.exitFullscreen(); }
     },
     /* ---- Seek ---- */
-    onSeek(e) {
+    getSeekBar() { return this.$el ? this.$el.querySelector('.progress-wrap') : null; },
+    seekAt(clientX) {
       if (!this.videoEl || !this.duration) return;
-      const rect = e.currentTarget.getBoundingClientRect();
-      const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const bar = this.getSeekBar();
+      if (!bar) return;
+      const rect = bar.getBoundingClientRect();
+      const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
       this.videoEl.currentTime = pct * this.duration;
+      this.progressPct = pct * 100;
+      this.seekHintPct = pct * 100;
+      this.seekHintTime = pct * this.duration;
     },
+    onSeek(e) { this.seekAt(e.clientX); },
     onSeekStart(e) {
       this.seeking = true;
-      this.updateSeekHint(e);
+      const cx = e.clientX || (e.changedTouches && e.changedTouches[0].clientX) || 0;
+      this.seekAt(cx);
     },
-    onSeekMove(e) { this.updateSeekHint(e); },
+    onSeekMove(e) {
+      if (!this.seeking) return;
+      const cx = e.clientX || (e.changedTouches && e.changedTouches[0].clientX) || 0;
+      this.seekAt(cx);
+    },
     onSeekEnd() { this.seeking = false; this.startHideTimer(); },
-    updateSeekHint(e) {
-      const bar = this.$el.querySelector('.progress-wrap');
-      if (!bar || !this.duration) return;
-      const rect = bar.getBoundingClientRect();
-      const pct = Math.max(0, Math.min(100, ((e.clientX || e.changedTouches[0].clientX) - rect.left) / rect.width * 100));
-      this.seekHintPct = pct;
-      this.seekHintTime = (pct / 100) * this.duration;
-    },
     /* ---- Controls auto-hide ---- */
     startHideTimer() {
       if (this.hideTimer) clearTimeout(this.hideTimer);
