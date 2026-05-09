@@ -44,6 +44,13 @@ def _fix_windows_encoding():
 
 _fix_windows_encoding()
 
+# 注册 HEIC/HEIF 图片格式支持（必须在 PIL 使用前）
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pass
+
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
@@ -68,6 +75,13 @@ for handler in logging.root.handlers:
         handler.setStream(sys.stdout)
 
 logger = logging.getLogger(__name__)
+
+# 确认 HEIC 支持状态
+try:
+    __import__("pillow_heif")
+    logger.info("HEIC/HEIF 格式支持已加载")
+except ImportError:
+    logger.warning("pillow-heif 未安装，HEIC/HEIF 文件无法识别")
 
 
 def main() -> None:

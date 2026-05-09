@@ -313,6 +313,17 @@ class FolderTreeView(QTreeView):
         self._model.refresh()
         self.expandAll()
 
+    def select_unit(self, unit_id: int) -> None:
+        """选中指定单元 ID 对应的树节点（用于右侧面板联动）。"""
+        model = self._model
+        for root_row, root in enumerate(model._roots):
+            for child_row, child in enumerate(root.children):
+                if child.node_id == unit_id:
+                    root_idx = model.index(root_row, 0)
+                    child_idx = model.index(child_row, 0, root_idx)
+                    self.setCurrentIndex(child_idx)
+                    return
+
     def selected_unit_ids(self) -> list[int]:
         """获取当前选中项对应的所有资源单元 ID（不触发信号）。"""
         unit_ids: set[int] = set()

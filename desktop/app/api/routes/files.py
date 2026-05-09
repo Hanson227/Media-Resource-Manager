@@ -20,6 +20,9 @@ from app.db import queries as q
 # 全局缩略图生成器（按需生成）
 _thumb_gen = ThumbnailGenerator(max_size=256)
 
+# 缩略图 HTTP 缓存头：封面变更后手机端能较快更新
+_THUMB_HEADERS = {"Cache-Control": "private, max-age=300"}
+
 router = APIRouter(prefix="/api/files", tags=["文件"])
 
 
@@ -128,13 +131,13 @@ async def get_file_thumbnail(file_id: int, request: Request):
             if cfg and cfg.thumbnail_cache_dir:
                 central = Path(cfg.thumbnail_cache_dir) / f"{file_id}_thumb.jpg"
                 if central.exists():
-                    return FileResponse(str(central), media_type="image/jpeg")
+                    return FileResponse(str(central), media_type="image/jpeg", headers=_THUMB_HEADERS)
 
             unit = q.get_unit_by_id(session, f.resource_unit_id)
             if unit:
                 thumb_file = Path(unit.path) / ".thumbnails" / f"{file_id}_thumb.jpg"
                 if thumb_file.exists():
-                    return FileResponse(str(thumb_file), media_type="image/jpeg")
+                    return FileResponse(str(thumb_file), media_type="image/jpeg", headers=_THUMB_HEADERS)
 
             # 缓存不存在，按需生成
             if unit and f.path:
@@ -144,7 +147,7 @@ async def get_file_thumbnail(file_id: int, request: Request):
                     try:
                         info = _thumb_gen.generate(src, cache_dir, file_id=file_id)
                         if info.thumbnail_path.exists():
-                            return FileResponse(str(info.thumbnail_path), media_type="image/jpeg")
+                            return FileResponse(str(info.thumbnail_path), media_type="image/jpeg", headers=_THUMB_HEADERS)
                     except Exception as gen_e:
                         logger.warning(f"缩略图按需生成失败: {f.path} - {gen_e}")
 

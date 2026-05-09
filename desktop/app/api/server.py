@@ -101,6 +101,22 @@ def create_app(config: AppConfig) -> FastAPI:
     return app
 
 
+def _make_proactor_handler(original_handler):
+    """创建忽略 Windows proactor 清理错误的 asyncio 异常处理器。
+
+    手机端断开流式连接时，ProactorEventLoop 内部 socket shutdown
+    可能抛出异常，破坏事件循环状态。此处理器静默忽略此类错误。
+    """
+    def handler(loop, context):
+        msg = context.get("message", "")
+        # 仅忽略连接关闭时的传输层清理错误
+        if "connection_lost" in msg or "shutdown" in msg or "Transport" in msg:
+            return
+        if original_handler:
+            loop.default_exception_handler(context)
+    return handler
+
+
 class APIServer:
     """API 服务器管理器。
 
@@ -133,6 +149,8 @@ class APIServer:
         global _app
         _app = create_app(self._config)
 
+        import asyncio
+
         config = uvicorn.Config(
             app=_app,
             host=self._config.api_host,
@@ -141,6 +159,16 @@ class APIServer:
             access_log=False,
         )
         self._server = uvicorn.Server(config)
+
+        # 注入 asyncio 异常处理器，防止客户端断开时 ProactorEventLoop 崩溃
+        original_serve = self._server.serve
+        async def _safe_serve(sockets=None):
+            loop = asyncio.get_event_loop()
+            loop.set_exception_handler(
+                _make_proactor_handler(loop.get_exception_handler())
+            )
+            return await original_serve(sockets=sockets)
+        self._server.serve = _safe_serve
 
         self._thread = threading.Thread(
             target=self._server.run,
