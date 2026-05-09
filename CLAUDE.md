@@ -42,6 +42,13 @@ Media/                          # Git root — monorepo
 - 新增功能实现后，运行 `python desktop/tests/test_flow.py` 确认全部通过
 - 所有测试按 `test_TAG()` 函数组织，在 `main()` 中按顺序调用
 
+### Bug Fix 纪律
+
+1. **追踪完整数据流** — 报 bug 时先 tracing 整条链：请求 → 端点 → 存储 → 返回，每步加日志验证，不准假设中间环节正确
+2. **一次只修一个 bug** — 同一轮改动不超过 2 个文件，修渲染就别同时改播放器
+3. **复现测试先 FAIL** — fix 前写最小测试让它 FAIL 证明 bug 存在，fix 后确认变 PASS，测试必须直接对应 bug，不准写宽松判据绕过
+4. **三次失败换思路** — 同一个 bug 修两次没好，第三次必须写根因分析做架构性质疑，而不是再修一层
+
 ## Commands
 
 ```bash
@@ -132,3 +139,17 @@ Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desk
 - Search and media-type filtering in the grid are placeholder slots
 - No user authentication (API is open on LAN)
 - Config is mutable at runtime via settings dialog but frozen everywhere else
+
+
+## Bug Fix 纪律
+
+1. **追踪完整数据流** — 报 bug 时先 tracing 整条链：请求 → 端点 → 存储 → 返回，
+   每步加日志验证，不准假设中间环节正确。
+
+2. **一次只修一个 bug** — 同一轮改动不超过 2 个文件。修渲染就别动播放器。
+
+3. **复现测试先 FAIL** — fix 前写最小测试让它 FAIL 证明 bug 存在，
+   fix 后确认变 PASS。测试必须直接对应报的 bug，不准写宽松判据绕过。
+
+4. **三次失败换思路** — 同一个 bug 修两次没好，第三次必须写根因分析文档，
+   做架构性质疑（比如这次是"API 不生成缩略图"，而不是"前端显示不对"）。

@@ -49,6 +49,9 @@ class CleanupService:
                 logger.warning(f"文件不存在，跳过: {file_path}")
                 return False
 
+            # 清理缩略图缓存
+            CleanupService._remove_thumbnail(file_id)
+
             # 确保备份目录存在
             backup_dir.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +99,9 @@ class CleanupService:
                 logger.warning(f"文件不存在，跳过: {file_path}")
                 return False
 
+            # 清理缩略图缓存
+            CleanupService._remove_thumbnail(file_id)
+
             # 尝试使用 send2trash（放入回收站）
             try:
                 import send2trash
@@ -139,6 +145,9 @@ class CleanupService:
             if not file_path.exists():
                 return False
 
+            # 清理缩略图缓存
+            CleanupService._remove_thumbnail(file_id)
+
             file_path.unlink()
             logger.info(f"已永久删除: {file_path}")
 
@@ -154,6 +163,21 @@ class CleanupService:
         except Exception as e:
             logger.error(f"永久删除失败: {file_path} - {e}")
             return False
+
+    @staticmethod
+    def _remove_thumbnail(file_id: int, cache_dir=None) -> None:
+        """删除文件对应的缩略图缓存文件。"""
+        if cache_dir is None:
+            cache_dir = Path("data/.thumbnails")
+        if file_id is None:
+            return
+        thumb = cache_dir / f"{file_id}_thumb.jpg"
+        if thumb.exists():
+            try:
+                thumb.unlink()
+                logger.debug(f"已清理缩略图缓存: {thumb}")
+            except Exception as e:
+                logger.warning(f"缩略图清理失败 {thumb}: {e}")
 
     @staticmethod
     def delete_empty_dirs(directory: Path) -> int:
