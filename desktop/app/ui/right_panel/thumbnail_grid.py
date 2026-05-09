@@ -112,6 +112,8 @@ class ThumbnailGridModel(QAbstractListModel):
         self._thumb_cache: dict[int, QPixmap] = {}
         self._search_text: str = ""
         self._media_filter: str = ""
+        self._sort_field: str = ""     # ""=默认文件名顺序, "name"=名称, "size"=大小
+        self._sort_asc: bool = True
 
     def set_files(self, files: list) -> None:
         self.beginResetModel()
@@ -119,14 +121,37 @@ class ThumbnailGridModel(QAbstractListModel):
         self._full_files = []
         self._thumb_cache.clear()
         for f in files:
+            duration = getattr(f, "duration_ms", None) if hasattr(f, 'id') else f.get("duration_ms")
             entry = (
                 {"id": f.id, "filename": f.filename, "path": f.path,
                  "media_type": f.media_type, "size_bytes": f.size_bytes,
                  "width": getattr(f, "width", None),
-                 "height": getattr(f, "height", None)}
+                 "height": getattr(f, "height", None),
+                 "duration_ms": duration}
                 if hasattr(f, 'id') else f
             )
             self._full_files.append(entry)
+        self._sort_in_place()
+        self._apply_filter_in_place()
+        self.endResetModel()
+
+    def _sort_in_place(self) -> None:
+        """对完整列表排序（在过滤前执行）。"""
+        field = self._sort_field
+        if not field:
+            return
+        rev = not self._sort_asc
+        if field == "name":
+            self._full_files.sort(key=lambda x: x.get("filename", "").lower(), reverse=rev)
+        elif field == "size":
+            self._full_files.sort(key=lambda x: x.get("size_bytes", 0), reverse=rev)
+
+    def set_sort(self, field: str, ascending: bool = True) -> None:
+        """设置排序字段并刷新。field: ''=默认, 'name'=名称, 'size'=大小。"""
+        self._sort_field = field
+        self._sort_asc = ascending
+        self.beginResetModel()
+        self._sort_in_place()
         self._apply_filter_in_place()
         self.endResetModel()
 
@@ -169,6 +194,10 @@ class ThumbnailGridModel(QAbstractListModel):
     def file_list(self) -> list[dict]:
         return self._files
 
+    @property
+    def sort_field(self) -> str:
+        return self._sort_field
+
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._files)
 
@@ -197,7 +226,18 @@ class ThumbnailGridModel(QAbstractListModel):
         if role == Qt.ItemDataRole.UserRole + 2:
             return mf.get("media_type", "")
         if role == Qt.ItemDataRole.UserRole + 3:
-            return format_size(mf.get("size_bytes", 0))
+            parts = [format_size(mf.get("size_bytes", 0))]
+            mt = mf.get("media_type")
+            if mt == "image":
+                w, h = mf.get("width"), mf.get("height")
+                if w and h:
+                    parts.append(f"{w}×{h}")
+            elif mt == "video":
+                ms = mf.get("duration_ms")
+                if ms and ms > 0:
+                    s = ms // 1000
+                    parts.append(f"{s//60:02d}:{s%60:02d}")
+            return " | ".join(parts)
         if role == Qt.ItemDataRole.DecorationRole:
             return self._thumb_cache.get(fid)
         return None

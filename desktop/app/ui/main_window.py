@@ -194,6 +194,19 @@ class MainWindow(QMainWindow):
         self._filter_combo.setMaximumWidth(80)
         toolbar.addWidget(self._filter_combo)
 
+        # 排序按钮
+        self._sort_name_btn = QPushButton("名称↑")
+        self._sort_name_btn.setCheckable(True)
+        self._sort_name_btn.setToolTip("按文件名排序")
+        self._sort_name_btn.clicked.connect(lambda: self._on_sort("name"))
+        toolbar.addWidget(self._sort_name_btn)
+
+        self._sort_size_btn = QPushButton("大小↑")
+        self._sort_size_btn.setCheckable(True)
+        self._sort_size_btn.setToolTip("按文件大小排序")
+        self._sort_size_btn.clicked.connect(lambda: self._on_sort("size"))
+        toolbar.addWidget(self._sort_size_btn)
+
         toolbar.addSeparator()
 
         self._msg_btn = QPushButton("消息")
@@ -984,6 +997,29 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_filter_changed(self, index: int) -> None:
         self._apply_current_filter()
+
+    def _on_sort(self, field: str) -> None:
+        """切换排序。再次点击同字段切换升降序。"""
+        model = self._grid_model
+        if model.sort_field == field:
+            # 同字段切换排序方向
+            model.set_sort(field, not model._sort_asc)
+        else:
+            model.set_sort(field, True)
+        sort_label = {"name": "名称", "size": "大小"}.get(field, field)
+        arrow = "↑" if model._sort_asc else "↓"
+        self._status_bar.set_status(f"排序: {sort_label}{arrow}")
+        self._update_sort_buttons()
+
+    def _update_sort_buttons(self) -> None:
+        """同步排序按钮的选中状态和图标。"""
+        field = self._grid_model.sort_field
+        asc = self._grid_model._sort_asc
+        arrow = "↑" if asc else "↓"
+        self._sort_name_btn.setChecked(field == "name")
+        self._sort_size_btn.setChecked(field == "size")
+        self._sort_name_btn.setText(f"名称{arrow if field == 'name' else '↑'}")
+        self._sort_size_btn.setText(f"大小{arrow if field == 'size' else '↑'}")
 
     def _apply_current_filter(self) -> None:
         """读取搜索框和筛选下拉的当前值，合并应用到网格模型。"""
