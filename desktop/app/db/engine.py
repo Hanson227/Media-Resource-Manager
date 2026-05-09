@@ -50,8 +50,7 @@ class DatabaseManager:
             echo=echo,
             connect_args={
                 "check_same_thread": False,
-                # 写入冲突时等待最多 5 秒而非立即失败
-                "timeout": 5,
+                "timeout": 30,  # 写入冲突时等待最多 30 秒
             },
         )
 

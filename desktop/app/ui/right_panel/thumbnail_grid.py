@@ -289,12 +289,15 @@ class ThumbnailGridView(QListView):
         self.selectionModel().selectionChanged.connect(self._on_selection_changed)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
+        self._saved_scroll = 0  # 返回文件夹卡片时恢复的滚动位置
 
     # ---- 公开方法 ----
 
     def load_unit(self, unit_id: int) -> None:
         """加载指定单元的文件列表。"""
         self._cancel_all_workers()
+        # 保存当前滚动位置（文件夹卡片视图的位置）
+        self._saved_scroll = self.verticalScrollBar().value() if self.verticalScrollBar() else 0
         self.setModel(self._file_model)  # 恢复文件模型
         try:
             with DatabaseManager.session() as session:
@@ -314,6 +317,13 @@ class ThumbnailGridView(QListView):
 
         folder_model = FolderCardModel(unit_data)
         self.setModel(folder_model)
+
+        # 布局稳定后恢复上次的滚动位置
+        if self._saved_scroll > 0:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(50, lambda: self.verticalScrollBar().setValue(
+                min(self._saved_scroll, self.verticalScrollBar().maximum())
+            ))
 
         ts = config.thumbnail_max_size
         self.setIconSize(QSize(ts, ts))
