@@ -7,11 +7,13 @@
 
 import logging
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
 from PIL import Image as PILImage
 from PySide6.QtCore import QThread, Signal, Slot
+from sqlalchemy.exc import OperationalError
 
 from config import AppConfig
 from app.core.hash_engine import HashEngine, FileHashes
@@ -84,6 +86,23 @@ def _detect_faces_for_file(engine: HashEngine, file_path: Path, media_type: str)
                 Path(tmp_path).unlink(missing_ok=True)
             except Exception:
                 pass
+
+
+def _retry_db(func, max_retries=3):
+    """遇到 database locked 时自动重试（指数退避）。"""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except OperationalError as e:
+            msg = str(e)
+            if "locked" in msg.lower() and attempt < max_retries - 1:
+                wait = (2 ** attempt) * 0.5  # 0.5s, 1s, 2s
+                logger.warning(
+                    f"数据库繁忙，{wait:.1f}s 后重试（第{attempt+1}/{max_retries}次）"
+                )
+                time.sleep(wait)
+            else:
+                raise
 
 
 class HashWorker(QThread):
@@ -160,14 +179,9 @@ class HashWorker(QThread):
                     if result.duration_ms:
                         update_data["duration_ms"] = result.duration_ms
 
-                    with DatabaseManager.session() as session:
-                        q.update_file_hash(session, fid, **update_data)
-
-                        # 视频帧哈希
-                        if result.video_frame_hashes:
-                            with DatabaseManager.session() as session:
-                                for ts_ms, ph in result.video_frame_hashes:
-                                    q.insert_video_frame(session, fid, ts_ms, ph)
+                    _retry_db(lambda: self._do_db_write(
+                        fid, update_data, result.video_frame_hashes
+                    ))
 
                     # 人脸检测：图片直接检测，视频先抽中间帧再检测
                     if self._config.face_detection_enabled:
@@ -199,6 +213,15 @@ class HashWorker(QThread):
         except Exception as e:
             logger.error(f"哈希线程错误: {e}")
             self.error_occurred.emit(str(e))
+
+    @staticmethod
+    def _do_db_write(fid: int, update_data: dict, video_frame_hashes) -> None:
+        """将哈希更新和视频帧写入合并到一个事务中（减少锁竞争）。"""
+        with DatabaseManager.session() as session:
+            q.update_file_hash(session, fid, **update_data)
+            if video_frame_hashes:
+                for ts_ms, ph in video_frame_hashes:
+                    q.insert_video_frame(session, fid, ts_ms, ph)
 
     @Slot()
     def cancel(self) -> None:

@@ -210,9 +210,6 @@ class CleanupService:
         count = 0
         try:
             with DatabaseManager.session() as session:
-                root = q.get_root_by_id(session, root_id)
-                if not root:
-                    return 0
                 units = q.get_units_by_root(session, root_id)
                 for unit in units:
                     count += CleanupService.remove_unit_thumbnails(unit.id)
