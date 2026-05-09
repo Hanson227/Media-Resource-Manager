@@ -258,6 +258,7 @@ class ThumbnailGridView(QListView):
     folder_entered = Signal(int)  # 双击文件夹卡片 → 进入该单元
     back_requested = Signal()     # 空白区域双击 → 返回上一级
     preview_requested = Signal(int, str, str)  # file_id, file_path, media_type
+    cover_from_file_requested = Signal(str)    # 右键图片 → 设为此单元封面
 
     def __init__(self, model: ThumbnailGridModel, config: AppConfig,
                  parent=None) -> None:
@@ -286,6 +287,8 @@ class ThumbnailGridView(QListView):
 
         self.doubleClicked.connect(self._on_double_clicked)
         self.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
 
     # ---- 公开方法 ----
 
@@ -412,3 +415,24 @@ class ThumbnailGridView(QListView):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
+
+    @Slot()
+    def _on_context_menu(self, pos) -> None:
+        """右键菜单：图片文件可设为本单元封面。"""
+        from PySide6.QtWidgets import QMenu
+        idx = self.indexAt(pos)
+        if not idx.isValid():
+            return
+        model = idx.model()
+        media_type = model.data(idx, Qt.ItemDataRole.UserRole + 2) or ""
+        if media_type not in ("image", "folder"):
+            return
+        file_path = model.data(idx, Qt.ItemDataRole.UserRole)
+        if not file_path:
+            return
+
+        menu = QMenu(self)
+        if media_type == "image":
+            action = menu.addAction("设为此文件夹封面")
+            action.triggered.connect(lambda *args, fp=file_path: self.cover_from_file_requested.emit(fp))
+        menu.exec(self.viewport().mapToGlobal(pos))
