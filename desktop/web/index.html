@@ -263,16 +263,15 @@ body {
 }
 .preview-content video {
   width: 100%; height: 100%; object-fit: contain;
+  pointer-events: none;
 }
 
-/* ========== Gesture Zones ========== */
+/* ========== Gesture Zone ========== */
 .gesture-zone {
-  position: absolute; top: 0; bottom: 80px; width: 33.33%;
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0;
   z-index: 5; cursor: pointer;
 }
-.gesture-zone.left { left: 0; }
-.gesture-zone.right { right: 0; }
-.gesture-zone.active { background: rgba(255,255,255,.05); }
+.gesture-zone.seek-active { background: rgba(255,255,255,.05); }
 
 /* ========== Gesture Feedback ========== */
 .gesture-feedback {
@@ -323,6 +322,7 @@ body {
 .progress-wrap {
   flex: 1; height: 32px; display: flex; align-items: center;
   cursor: pointer; position: relative; min-width: 0;
+  touch-action: none;
 }
 .progress-track {
   width: 100%; height: 3px; background: rgba(255,255,255,.25);
@@ -776,7 +776,7 @@ const UnitsPage = {
 /* ========== Unit Files Page ========== */
 const UnitFilesPage = {
   template: `
-    <div class="page" style="padding:0">
+    <div class="page" style="padding:0 0 calc(var(--tab-height) + var(--safe-bottom) + 12px) 0">
       <div v-if="loading" class="loading-dots" style="padding-top:40px"><span></span><span></span><span></span></div>
       <template v-else-if="files.length === 0">
         <div class="empty-state">
@@ -824,7 +824,6 @@ const UnitFilesPage = {
     loading: true, unitName: '', files: [], loaded: new Set(), errored: new Set(),
     sortBy: localStorage.getItem('file_sort_by') || 'name',
     sortOrder: localStorage.getItem('file_sort_order') || 'asc',
-    _savedScrollTop: 0,
   };},
   computed: {
     sortedFiles() {
@@ -852,7 +851,7 @@ const UnitFilesPage = {
     },
     preview(file) {
       const main = document.querySelector('.app-main');
-      if (main) this._savedScrollTop = main.scrollTop;
+      if (main) _fileScrollTop = main.scrollTop;
       this.$router.push('/preview/' + file.id);
     },
     setSort(field) {
@@ -883,10 +882,10 @@ const UnitFilesPage = {
       this.loading = false;
       this.$emit('loading', false);
       this.$nextTick(() => {
-        if (this._savedScrollTop > 0) {
+        if (_fileScrollTop > 0) {
           const main = document.querySelector('.app-main');
-          if (main) main.scrollTop = this._savedScrollTop;
-          this._savedScrollTop = 0;
+          if (main) main.scrollTop = _fileScrollTop;
+          _fileScrollTop = 0;
         }
       });
     }
@@ -904,19 +903,20 @@ const PreviewPage = {
       <div class="preview-content" @click="onTap">
         <img v-if="mediaType === 'image'" :src="streamUrl" :alt="filename" style="max-width:100%;max-height:100%;object-fit:contain">
         <template v-else-if="mediaType === 'video'">
-          <video ref="videoEl" preload="metadata" @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop :src="streamUrl"></video>
+          <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop :src="streamUrl"></video>
 
-          <!-- Gesture Zones -->
-          <div class="gesture-zone left" @touchstart.prevent="onTouchStart($event,'left')" @touchend="onTouchEnd" @touchmove="onTouchMove" @touchcancel="onTouchEnd"
-            :class="{ active: gestureActive && gestureSide === 'left' }"></div>
-          <div class="gesture-zone right" @touchstart.prevent="onTouchStart($event,'right')" @touchend="onTouchEnd" @touchmove="onTouchMove" @touchcancel="onTouchEnd"
-            :class="{ active: gestureActive && gestureSide === 'right' }"></div>
+          <!-- Gesture Zone -->
+          <div class="gesture-zone"
+            :class="{ 'seek-active': gestureSwiping }"
+            @touchstart.prevent="onGestureStart($event)" @touchend="onGestureEnd" @touchmove.prevent="onGestureMove($event)" @touchcancel="onGestureEnd"></div>
 
           <!-- Gesture Feedback -->
-          <div class="gesture-feedback" :class="{ show: gestureActive }">
-            <span v-if="gestureSide === 'right'" class="icon mdi mdi-fast-forward"></span>
+          <div class="gesture-feedback" :class="{ show: gestureActive || gestureSwiping }">
+            <span v-if="gestureSwiping" class="icon mdi" :class="gestureSeekDir > 0 ? 'mdi-fast-forward' : 'mdi-rewind'"></span>
+            <span v-else-if="gestureSide === 'right'" class="icon mdi mdi-fast-forward"></span>
             <span v-else class="icon mdi mdi-rewind"></span>
-            <span class="label">{{ gestureSide === 'right' ? '2x 快进' : '2x 快退' }}</span>
+            <span v-if="gestureSwiping" class="label">{{ gestureSeekLabel }}</span>
+            <span v-else class="label">{{ gestureSide === 'right' ? '2x 快进' : '2x 快退' }}</span>
           </div>
 
           <!-- Speed Menu -->
@@ -931,7 +931,9 @@ const PreviewPage = {
             </button>
             <span class="time">{{ fmtTime(currentTime) }}</span>
             <div class="progress-wrap" :class="{ dragging: seeking }"
-              @click="onSeek" @touchstart.prevent="onSeekStart" @touchmove.prevent="onSeekMove" @touchend="onSeekEnd">
+              @click="onSeek"
+              @touchstart.prevent="onSeekStart" @touchmove.prevent="onSeekMove" @touchend="onSeekEnd"
+              @mousedown.prevent="onSeekMouseDown">
               <div class="progress-track">
                 <div class="progress-fill" :style="{ width: progressPct + '%' }">
                   <div class="progress-thumb"></div>
@@ -962,6 +964,8 @@ const PreviewPage = {
       hideTimer: null, speedOptions: [0.5, 1, 1.25, 1.5, 2],
       // Gesture state
       gestureActive: false, gestureSide: '', gestureTimer: null, rewindTimer: null,
+      gestureStartX: 0, gestureStartY: 0, gestureStartTime: 0,
+      gestureSwiping: false, gestureSeekDir: 0, gestureSeekLabel: '',
       // Seek state
       seeking: false, seekHintPct: 0, seekHintTime: 0,
     };
@@ -983,12 +987,21 @@ const PreviewPage = {
     },
     onMeta() { if (this.videoEl) this.duration = this.videoEl.duration || 0; },
     /* ---- Gestures ---- */
-    onTouchStart(e, side) {
-      this.gestureSide = side;
+    onGestureStart(e) {
+      const t = e.changedTouches && e.changedTouches[0];
+      if (!t) return;
+      this.gestureStartX = t.clientX;
+      this.gestureStartY = t.clientY;
+      this.gestureStartTime = Date.now();
+      this.gestureSide = t.clientX > window.innerWidth / 2 ? 'right' : 'left';
+      this.gestureSwiping = false;
+      this.gestureSeekDir = 0;
+      this.gestureSeekLabel = '';
+      // Start long-press timer
       this.gestureTimer = setTimeout(() => {
         this.gestureActive = true;
         if (this.videoEl) {
-          if (side === 'right') {
+          if (this.gestureSide === 'right') {
             this.videoEl.playbackRate = 2;
           } else {
             this.rewindTimer = setInterval(() => {
@@ -999,22 +1012,43 @@ const PreviewPage = {
         this.controlsHidden = true;
       }, 200);
     },
-    onTouchEnd() {
+    onGestureEnd() {
       clearTimeout(this.gestureTimer);
+      this.gestureTimer = null;
       if (this.rewindTimer) { clearInterval(this.rewindTimer); this.rewindTimer = null; }
+      // Restore playback rate
       if (this.gestureActive && this.videoEl) { this.videoEl.playbackRate = this.playbackRate; }
+      // If neither long-press nor swipe was activated, treat as tap → toggle controls
+      if (!this.gestureActive && !this.gestureSwiping) {
+        this.controlsHidden = !this.controlsHidden;
+        this.speedMenuOpen = false;
+      }
       this.gestureActive = false;
+      this.gestureSwiping = false;
       this.gestureSide = '';
+      this.gestureSeekLabel = '';
       this.startHideTimer();
     },
-    onTouchMove(e) {
-      const t = e.changedTouches[0];
-      if (t && this.gestureTimer && !this.gestureActive) {
-        // If finger moved more than 10px, cancel long-press
-        if (Math.abs(t.clientX - e.changedTouches[0].clientX) > 10 || Math.abs(t.clientY - e.changedTouches[0].clientY) > 10) {
-          clearTimeout(this.gestureTimer);
-          this.gestureTimer = null;
+    onGestureMove(e) {
+      const t = e.changedTouches && e.changedTouches[0];
+      if (!t || this.gestureActive) return;  // long press active, keep 2x
+      const dx = t.clientX - this.gestureStartX;
+      const dy = t.clientY - this.gestureStartY;
+      // Only trigger swipe on significant horizontal movement
+      const absDx = Math.abs(dx);
+      const absDy = Math.abs(dy);
+      if (absDx > 10 && absDx > absDy) {
+        // Cancel long press, enter swipe mode
+        if (this.gestureTimer) { clearTimeout(this.gestureTimer); this.gestureTimer = null; }
+        this.gestureSwiping = true;
+        this.gestureSeekDir = dx > 0 ? 1 : -1;
+        const seek = dx * 0.1; // 1px = 0.1 seconds
+        const dur = this.videoEl ? (this.videoEl.duration || 0) : 0;
+        if (dur > 0 && this.videoEl) {
+          this.videoEl.currentTime = Math.max(0, Math.min(dur, this.videoEl.currentTime + seek));
         }
+        const secs = Math.round(Math.abs(seek));
+        this.gestureSeekLabel = (dx > 0 ? '+' : '-') + secs + 's';
       }
     },
     /* ---- Speed ---- */
@@ -1023,8 +1057,18 @@ const PreviewPage = {
     /* ---- Fullscreen ---- */
     toggleFullscreen() {
       const el = this.$el;
-      if (!document.fullscreenElement) { if (el.requestFullscreen) el.requestFullscreen(); }
-      else { if (document.exitFullscreen) document.exitFullscreen(); }
+      if (!document.fullscreenElement) {
+        // 竖屏视频：锁定 portrait-primary 防止横屏
+        if (this.videoEl && this.videoEl.videoHeight > this.videoEl.videoWidth) {
+          if (screen.orientation && screen.orientation.lock) {
+            screen.orientation.lock('portrait-primary').catch(() => {});
+          }
+        }
+        if (el.requestFullscreen) el.requestFullscreen();
+      } else {
+        if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
+        if (document.exitFullscreen) document.exitFullscreen();
+      }
     },
     /* ---- Seek ---- */
     getSeekBar() { return this.$el ? this.$el.querySelector('.progress-wrap') : null; },
@@ -1051,6 +1095,15 @@ const PreviewPage = {
       this.seekAt(cx);
     },
     onSeekEnd() { this.seeking = false; this.startHideTimer(); },
+    /* ---- Mouse drag (desktop) ---- */
+    onSeekMouseDown(e) {
+      this.seeking = true;
+      this.seekAt(e.clientX);
+      const onMove = (ev) => { ev.preventDefault(); if (this.seeking) this.seekAt(ev.clientX); };
+      const onUp = () => { this.seeking = false; this.startHideTimer(); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
     /* ---- Controls auto-hide ---- */
     startHideTimer() {
       if (this.hideTimer) clearTimeout(this.hideTimer);
@@ -1358,6 +1411,9 @@ const routes = [
 ];
 
 const router = createRouter({ history: createWebHashHistory(), routes });
+
+/* 模块级变量：跨组件实例持久化 */
+let _fileScrollTop = 0;
 
 /* ========== Root App ========== */
 const App = {

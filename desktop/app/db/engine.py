@@ -48,8 +48,11 @@ class DatabaseManager:
         cls._engine = create_engine(
             db_url,
             echo=echo,
-            connect_args={"check_same_thread": False},
-            # SQLite 在多线程环境下需要禁用 check_same_thread
+            connect_args={
+                "check_same_thread": False,
+                # 写入冲突时等待最多 5 秒而非立即失败
+                "timeout": 5,
+            },
         )
 
         # 启用 WAL 模式以提升并发性能
