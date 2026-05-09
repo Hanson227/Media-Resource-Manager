@@ -235,6 +235,8 @@ body {
 }
 .sort-btn.active { color: var(--accent); background: var(--accent-dim); }
 .sort-btn:active { background: var(--bg-card); }
+.sort-bar .count { font-size: 12px; color: var(--text-secondary); }
+.sort-bar .spacer { flex: 1; }
 
 /* ========== Preview ========== */
 .preview-overlay {
@@ -680,8 +682,8 @@ const UnitsPage = {
           </div>
           <div v-if="group.open" class="root-units">
             <div class="sort-bar">
-              <span style="font-size:12px;color:var(--text-secondary)">{{ group.units.length }} 个单元</span>
-              <span style="flex:1"></span>
+              <span class="count">{{ group.units.length }} 个单元</span>
+              <span class="spacer"></span>
               <button class="sort-btn" :class="{ active: sortBy === 'name' }" @click.stop="setSort('name')">
                 <span class="mdi" :class="sortIcon('name')"></span> 名称
               </button>
@@ -785,10 +787,18 @@ const UnitFilesPage = {
       <template v-else>
         <div class="feed-header">
           <h2>{{ unitName }}</h2>
-          <span class="count">{{ files.length }} 个文件</span>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="count">{{ files.length }} 个文件</span>
+            <button class="sort-btn" :class="{ active: sortBy === 'name' }" @click="setSort('name')">
+              <span class="mdi" :class="sortIcon('name')"></span>
+            </button>
+            <button class="sort-btn" :class="{ active: sortBy === 'size' }" @click="setSort('size')">
+              <span class="mdi" :class="sortIcon('size')"></span>
+            </button>
+          </div>
         </div>
         <div class="feed-grid">
-          <div v-for="f in files" :key="f.id" class="feed-item" @click="preview(f)">
+          <div v-for="f in sortedFiles" :key="f.id" class="feed-item" @click="preview(f)">
             <div class="thumb-wrap">
               <img :src="thumbUrl(f.id)" loading="lazy"
                 @load="onImgLoad(f.id)" @error="onImgError($event, f.id)"
@@ -810,7 +820,24 @@ const UnitFilesPage = {
   `,
   props: ['serverUrl'],
   emits: ['loading'],
-  data() { return { loading: true, unitName: '', files: [], loaded: new Set(), errored: new Set() };},
+  data() { return {
+    loading: true, unitName: '', files: [], loaded: new Set(), errored: new Set(),
+    sortBy: localStorage.getItem('file_sort_by') || 'name',
+    sortOrder: localStorage.getItem('file_sort_order') || 'asc',
+  };},
+  computed: {
+    sortedFiles() {
+      const arr = [...this.files];
+      if (this.sortBy === 'name') {
+        arr.sort((a, b) => this.sortOrder === 'asc'
+          ? a.filename.localeCompare(b.filename) : b.filename.localeCompare(a.filename));
+      } else {
+        arr.sort((a, b) => this.sortOrder === 'asc'
+          ? (a.size_bytes || 0) - (b.size_bytes || 0) : (b.size_bytes || 0) - (a.size_bytes || 0));
+      }
+      return arr;
+    },
+  },
   methods: {
     thumbUrl(id) { return this.serverUrl + '/api/files/' + id + '/thumbnail'; },
     onImgLoad(id) { this.loaded.add(id); },
@@ -822,7 +849,21 @@ const UnitFilesPage = {
       while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
       return size.toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
     },
-    preview(file) { this.$router.push('/preview/' + file.id); }
+    preview(file) { this.$router.push('/preview/' + file.id); },
+    setSort(field) {
+      if (this.sortBy === field) {
+        this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
+      } else {
+        this.sortBy = field;
+        this.sortOrder = 'asc';
+      }
+      localStorage.setItem('file_sort_by', this.sortBy);
+      localStorage.setItem('file_sort_order', this.sortOrder);
+    },
+    sortIcon(field) {
+      if (this.sortBy !== field) return 'mdi-unfold-more-horizontal';
+      return this.sortOrder === 'asc' ? 'mdi-sort-ascending' : 'mdi-sort-descending';
+    },
   },
   async mounted() {
     this.$emit('loading', true);
