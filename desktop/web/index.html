@@ -824,6 +824,7 @@ const UnitFilesPage = {
     loading: true, unitName: '', files: [], loaded: new Set(), errored: new Set(),
     sortBy: localStorage.getItem('file_sort_by') || 'name',
     sortOrder: localStorage.getItem('file_sort_order') || 'asc',
+    _savedScrollTop: 0,
   };},
   computed: {
     sortedFiles() {
@@ -849,7 +850,11 @@ const UnitFilesPage = {
       while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
       return size.toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
     },
-    preview(file) { this.$router.push('/preview/' + file.id); },
+    preview(file) {
+      const main = document.querySelector('.app-main');
+      if (main) this._savedScrollTop = main.scrollTop;
+      this.$router.push('/preview/' + file.id);
+    },
     setSort(field) {
       if (this.sortBy === field) {
         this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
@@ -874,7 +879,17 @@ const UnitFilesPage = {
       this.files = data.files || [];
     } catch(e) {
       this.files = [];
-    } finally { this.loading = false; this.$emit('loading', false); }
+    } finally {
+      this.loading = false;
+      this.$emit('loading', false);
+      this.$nextTick(() => {
+        if (this._savedScrollTop > 0) {
+          const main = document.querySelector('.app-main');
+          if (main) main.scrollTop = this._savedScrollTop;
+          this._savedScrollTop = 0;
+        }
+      });
+    }
   }
 };
 
