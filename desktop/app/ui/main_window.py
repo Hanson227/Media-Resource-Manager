@@ -273,6 +273,9 @@ class MainWindow(QMainWindow):
             return
         self._tray_icon = QSystemTrayIcon(self)
         self._tray_icon.setToolTip(self._config.window_title)
+        app_icon = self.windowIcon()
+        if not app_icon.isNull():
+            self._tray_icon.setIcon(app_icon)
         tray_menu = QMenu()
         show_a = QAction("显示主窗口", tray_menu)
         show_a.triggered.connect(self._on_tray_show)
