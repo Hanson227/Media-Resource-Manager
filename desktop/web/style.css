@@ -541,3 +541,14 @@ body {
 }
 .ptr-indicator.active { height: 48px; }
 .ptr-indicator .mdi { font-size: 20px; }
+
+/* ========== Image Navigation ========== */
+.image-nav-hint {
+  position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%);
+  z-index: 5; display: flex; align-items: center; gap: 12px;
+  background: rgba(0,0,0,.5); border-radius: 20px;
+  padding: 6px 16px; color: #fff; font-size: 13px;
+}
+.image-nav-hint .mdi { font-size: 22px; cursor: pointer; padding: 4px; }
+.image-nav-hint .mdi:active { opacity: .6; }
+.image-nav-hint .pos { font-variant-numeric: tabular-nums; min-width: 40px; text-align: center; }
