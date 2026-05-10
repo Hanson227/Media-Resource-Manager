@@ -647,7 +647,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
             self, "选择封面图片", "",
-            "图片文件 (*.jpg *.jpeg *.png *.bmp *.webp);;所有文件 (*)",
+            "媒体文件 (*.jpg *.jpeg *.png *.bmp *.webp *.mp4 *.mkv *.avi *.mov);;所有文件 (*)",
         )
         if not path:
             return
@@ -1015,19 +1015,26 @@ class MainWindow(QMainWindow):
         """同步排序按钮的选中状态和图标。"""
         field = self._grid_model.sort_field
         asc = self._grid_model._sort_asc
-        arrow = "↑" if asc else "↓"
+        self._sort_name_btn.blockSignals(True)
+        self._sort_size_btn.blockSignals(True)
         self._sort_name_btn.setChecked(field == "name")
         self._sort_size_btn.setChecked(field == "size")
+        self._sort_name_btn.blockSignals(False)
+        self._sort_size_btn.blockSignals(False)
+        arrow = "↑" if asc else "↓"
         self._sort_name_btn.setText(f"名称{arrow if field == 'name' else '↑'}")
         self._sort_size_btn.setText(f"大小{arrow if field == 'size' else '↑'}")
 
     def _apply_current_filter(self) -> None:
-        """读取搜索框和筛选下拉的当前值，合并应用到网格模型。"""
+        """读取搜索框和筛选下拉的当前值，应用到网格+文件夹树。"""
         media_data = self._filter_combo.currentData()
+        search_text = self._search_input.text()
         self._grid_model.apply_filter(
-            search_text=self._search_input.text(),
+            search_text=search_text,
             media_filter=media_data if media_data else "",
         )
+        # 搜索文件夹树：按名称过滤
+        self._tree_view.filter_by_name(search_text)
 
     # ============================================================
     # 刷新

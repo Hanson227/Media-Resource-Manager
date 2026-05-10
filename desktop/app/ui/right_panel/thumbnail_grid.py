@@ -458,7 +458,11 @@ class ThumbnailGridView(QListView):
         super().keyPressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        """双击空白区域 → 返回上一级；双击有效项目 → 正常处理。"""
+        """双击：左键正常处理，右键弹菜单不打开文件。"""
+        if event.button() == Qt.MouseButton.RightButton:
+            self._on_context_menu(event.pos())
+            event.accept()
+            return
         idx = self.indexAt(event.pos())
         if not idx.isValid():
             self.back_requested.emit()
@@ -468,21 +472,34 @@ class ThumbnailGridView(QListView):
 
     @Slot()
     def _on_context_menu(self, pos) -> None:
-        """右键菜单：图片文件可设为本单元封面。"""
+        """右键菜单：预览、设封面、删除。"""
         from PySide6.QtWidgets import QMenu
         idx = self.indexAt(pos)
         if not idx.isValid():
             return
         model = idx.model()
         media_type = model.data(idx, Qt.ItemDataRole.UserRole + 2) or ""
-        if media_type not in ("image", "folder"):
-            return
         file_path = model.data(idx, Qt.ItemDataRole.UserRole)
         if not file_path:
             return
+        fid = model.data(idx, Qt.ItemDataRole.UserRole + 1)
 
         menu = QMenu(self)
-        if media_type == "image":
-            action = menu.addAction("设为此文件夹封面")
-            action.triggered.connect(lambda *args, fp=file_path: self.cover_from_file_requested.emit(fp))
+
+        # 预览（图片 & 视频）
+        if media_type in ("image", "video") and fid:
+            act_preview = menu.addAction("预览")
+            act_preview.triggered.connect(
+                lambda *args, fid=fid, fp=file_path, mt=media_type:
+                    self.preview_requested.emit(fid, fp, mt)
+            )
+
+        # 设为此文件夹封面（图片和视频都可以）
+        if media_type in ("image", "video"):
+            menu.addSeparator()
+            act_cover = menu.addAction("设为此文件夹封面")
+            act_cover.triggered.connect(
+                lambda *args, fp=file_path: self.cover_from_file_requested.emit(fp)
+            )
+
         menu.exec(self.viewport().mapToGlobal(pos))

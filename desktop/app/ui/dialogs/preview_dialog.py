@@ -40,47 +40,36 @@ except ImportError:
 
 
 class _KeyHoldTimer:
-    """按键长按检测：长按 2 秒后步长翻倍，直到 8 倍。"""
+    """按键长按检测：长按时控制播放速度。"""
 
-    def __init__(self, callback):
-        self._callback = callback
-        self._timer = QTimer()
-        self._timer.timeout.connect(self._on_timeout)
-        self._step = 0
-        self._base_step = 0
-        self._held_since = QElapsedTimer()
+    def __init__(self, player_getter, target_rate: float):
+        """
+        Args:
+            player_getter: 返回 QMediaPlayer 的可调用对象。
+            target_rate: 长按时目标倍速（如 2.0 = 2x）。
+        """
+        self._get_player = player_getter
+        self._target_rate = target_rate
         self._active = False
 
-    def start(self, base_step_sec: int) -> None:
-        self._step = base_step_sec
-        self._base_step = base_step_sec
-        self._held_since.start()
+    def start(self) -> None:
+        player = self._get_player()
+        if not player:
+            return
         self._active = True
-        self._callback(self._step)
-        self._timer.start(300)
+        player.setPlaybackRate(self._target_rate)
 
     def stop(self) -> None:
-        self._timer.stop()
+        if not self._active:
+            return
         self._active = False
+        player = self._get_player()
+        if player:
+            player.setPlaybackRate(1.0)
 
     @property
     def is_active(self) -> bool:
         return self._active
-
-    def _on_timeout(self) -> None:
-        if not self._active:
-            return
-        elapsed = self._held_since.elapsed()
-        # 长按 2 秒后加速度递增
-        multiplier = 1
-        if elapsed > 6000:
-            multiplier = 8
-        elif elapsed > 4000:
-            multiplier = 4
-        else:
-            multiplier = 2
-        self._step = self._base_step * multiplier
-        self._callback(self._step)
 
 
 class QuickLookPreviewDialog(QDialog):
@@ -112,9 +101,9 @@ class QuickLookPreviewDialog(QDialog):
         self._total_frames = 0
         self._fps = 0.0
 
-        # 长按加速
-        self._left_hold = _KeyHoldTimer(lambda s: self._seek_video(-s))
-        self._right_hold = _KeyHoldTimer(lambda s: self._seek_video(s))
+        # 长按变速（左=0.5x慢放，右=2.0x快放）
+        self._left_hold = _KeyHoldTimer(lambda: self._player, target_rate=0.5)
+        self._right_hold = _KeyHoldTimer(lambda: self._player, target_rate=2.0)
 
         self.setWindowTitle("预览")
         self.setWindowFlags(
@@ -193,7 +182,7 @@ class QuickLookPreviewDialog(QDialog):
         )
         bottom_layout.addWidget(self._info_label)
         bottom_layout.addStretch()
-        hint_label = QLabel("← → 快进/快退  |  长按 ← → 加速  |  ↑ ↓ 切换文件  |  Space/Esc 关闭")
+        hint_label = QLabel("← → 快进/快退  |  长按 ← 0.5x → 2.0x  |  ↑ ↓ 切换文件  |  Space/Esc 关闭")
         hint_label.setStyleSheet(
             f"color: {OVERLAY_0}; font-size: 11px; background: transparent;"
         )
@@ -456,17 +445,16 @@ class QuickLookPreviewDialog(QDialog):
             self._navigate(1)
         elif key == Qt.Key.Key_Left:
             self._right_hold.stop()
-            # 如果在非视频页，切换文件
             if not self._player and self._cap is None:
                 self._navigate(-1)
             else:
-                self._left_hold.start(self._seek_step_sec)
+                self._left_hold.start()
         elif key == Qt.Key.Key_Right:
             self._left_hold.stop()
             if not self._player and self._cap is None:
                 self._navigate(1)
             else:
-                self._right_hold.start(self._seek_step_sec)
+                self._right_hold.start()
         else:
             super().keyPressEvent(event)
 
