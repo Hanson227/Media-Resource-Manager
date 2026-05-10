@@ -79,6 +79,9 @@ const ConnectPage = {
 const UnitsPage = {
   template: `
     <div class="page">
+      <div class="ptr-indicator" :class="{ active: refreshing }">
+        <span class="mdi mdi-loading mdi-spin"></span> 刷新中...
+      </div>
       <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
       <template v-else-if="roots.length === 0">
         <div class="empty-state">
@@ -129,6 +132,7 @@ const UnitsPage = {
     loading: true, roots: [], coverFailed: {},
     sortBy: localStorage.getItem('unit_sort_by') || 'name',
     sortOrder: localStorage.getItem('unit_sort_order') || 'asc',
+    refreshing: false,
   }},
   methods: {
     openUnit(id) {
@@ -172,6 +176,25 @@ const UnitsPage = {
       }
       return arr;
     },
+    async refresh() {
+      if (this.refreshing) return;
+      this.refreshing = true;
+      try {
+        const data = await api(this.serverUrl, '/api/units');
+        const units = data.units || [];
+        const map = {};
+        for (const u of units) {
+          const key = u.library_root_name || '其他';
+          if (!map[key]) map[key] = { name: key, units: [], open: true };
+          map[key].units.push(u);
+        }
+        this.roots = Object.values(map);
+      } catch(e) {
+        // 刷新失败，保持当前数据
+      } finally {
+        this.refreshing = false;
+      }
+    },
   },
   async mounted() {
     this.$emit('loading', true);
@@ -197,6 +220,23 @@ const UnitsPage = {
           if (main) main.scrollTop = _unitsScrollTop;
           _unitsScrollTop = 0;
         }
+        // 下拉刷新：监听滚动到顶部继续下拉
+        let startY = 0;
+        const main = document.querySelector('.app-main');
+        if (main) {
+          main.addEventListener('touchstart', (e) => {
+            if (main.scrollTop <= 0) startY = e.touches[0].clientY;
+            else startY = 0;
+          }, { passive: true });
+          main.addEventListener('touchmove', (e) => {
+            if (!startY || this.refreshing) return;
+            const dy = e.touches[0].clientY - startY;
+            if (dy > 60) {
+              startY = 0;
+              this.refresh();
+            }
+          }, { passive: true });
+        }
       });
     }
   }
@@ -206,6 +246,9 @@ const UnitsPage = {
 const UnitFilesPage = {
   template: `
     <div class="page" style="padding:0 0 calc(var(--tab-height) + var(--safe-bottom) + 12px) 0">
+      <div class="ptr-indicator" :class="{ active: refreshing }">
+        <span class="mdi mdi-loading mdi-spin"></span> 刷新中...
+      </div>
       <div v-if="loading" class="loading-dots" style="padding-top:40px"><span></span><span></span><span></span></div>
       <template v-else-if="files.length === 0">
         <div class="empty-state">
@@ -260,6 +303,7 @@ const UnitFilesPage = {
     sortBy: localStorage.getItem('file_sort_by') || 'name',
     sortOrder: localStorage.getItem('file_sort_order') || 'asc',
     searchQuery: '',
+    refreshing: false,
   }},
   computed: {
     filteredFiles() {
@@ -316,6 +360,20 @@ const UnitFilesPage = {
       if (this.sortBy !== field) return 'mdi-unfold-more-horizontal';
       return this.sortOrder === 'asc' ? 'mdi-sort-ascending' : 'mdi-sort-descending';
     },
+    async refresh() {
+      if (this.refreshing) return;
+      this.refreshing = true;
+      try {
+        const id = this.$route.params.id;
+        const data = await api(this.serverUrl, '/api/units/' + id + '/files');
+        this.unitName = data.unit_name || '';
+        this.files = data.files || [];
+      } catch(e) {
+        // refresh failed
+      } finally {
+        this.refreshing = false;
+      }
+    },
   },
   async mounted() {
     this.$emit('loading', true);
@@ -334,6 +392,23 @@ const UnitFilesPage = {
           const main = document.querySelector('.app-main');
           if (main) main.scrollTop = _fileScrollTop;
           _fileScrollTop = 0;
+        }
+        // 下拉刷新：监听滚动到顶部继续下拉
+        let startY = 0;
+        const main = document.querySelector('.app-main');
+        if (main) {
+          main.addEventListener('touchstart', (e) => {
+            if (main.scrollTop <= 0) startY = e.touches[0].clientY;
+            else startY = 0;
+          }, { passive: true });
+          main.addEventListener('touchmove', (e) => {
+            if (!startY || this.refreshing) return;
+            const dy = e.touches[0].clientY - startY;
+            if (dy > 60) {
+              startY = 0;
+              this.refresh();
+            }
+          }, { passive: true });
         }
       });
     }
