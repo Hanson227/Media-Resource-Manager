@@ -344,7 +344,11 @@ const UnitFilesPage = {
     preview(file) {
       const main = document.querySelector('.app-main');
       if (main) _fileScrollTop = main.scrollTop;
-      this.$router.push('/preview/' + file.id);
+      const idx = this.files.indexOf(file);
+      this.$router.push({
+        path: '/preview/' + file.id,
+        state: { files: this.files, fileIndex: idx },
+      });
     },
     setSort(field) {
       if (this.sortBy === field) {
@@ -424,7 +428,15 @@ const PreviewPage = {
         <span style="font-size:14px;color:rgba(255,255,255,.7);margin-left:8px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ filename }}</span>
       </div>
       <div class="preview-content" @click="onTap">
-        <img v-if="mediaType === 'image'" :src="streamUrl" :alt="filename" style="max-width:100%;max-height:100%;object-fit:contain">
+        <template v-if="mediaType === 'image'">
+          <img :src="streamUrl" :alt="filename" style="max-width:100%;max-height:100%;object-fit:contain">
+          <div class="image-nav-hint" v-if="fileList.length > 1">
+            <span class="mdi mdi-chevron-left" @click.stop="prevImage"></span>
+            <span class="pos">{{ fileIndex + 1 }} / {{ fileList.length }}</span>
+            <span class="mdi mdi-chevron-right" @click.stop="nextImage"></span>
+          </div>
+          <div class="gesture-zone" @touchstart.prevent="onImageSwipeStart($event)" @touchend="onImageSwipeEnd" @touchmove.prevent="onImageSwipeMove($event)"></div>
+        </template>
         <template v-else-if="mediaType === 'video'">
           <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop :src="streamUrl"></video>
 
@@ -434,7 +446,7 @@ const PreviewPage = {
             @touchstart.prevent="onGestureStart($event)" @touchend="onGestureEnd" @touchmove.prevent="onGestureMove($event)" @touchcancel="onGestureEnd"></div>
 
           <!-- Gesture Feedback -->
-          <div class="gesture-feedback" :class="{ show: gestureActive || gestureSwiping }">
+          <div class="gesture-feedback" :class="{ show: gestureShowFeedback }">
             <span v-if="gestureSwiping" class="icon mdi" :class="gestureSeekDir > 0 ? 'mdi-fast-forward' : 'mdi-rewind'"></span>
             <span v-else-if="gestureSide === 'right'" class="icon mdi mdi-fast-forward"></span>
             <span v-else class="icon mdi mdi-rewind"></span>
@@ -448,7 +460,7 @@ const PreviewPage = {
           </div>
 
           <!-- Controls Bar -->
-          <div class="controls-bar" :class="{ hidden: controlsHidden && playing }" @click.stop>
+          <div class="controls-bar" :class="{ hidden: controlsHidden && playing }" @click.stop @touchstart="keepControlsVisible">
             <button class="ctrl-btn" @click="togglePlay">
               <span class="mdi" :class="playing ? 'mdi-pause' : 'mdi-play'"></span>
             </button>
@@ -481,6 +493,7 @@ const PreviewPage = {
   data() {
     return {
       filename: '', mediaType: 'image', streamUrl: '',
+      fileList: [], fileIndex: -1,
       // Video state
       playing: false, currentTime: 0, duration: 0, progressPct: 0,
       playbackRate: 1, speedMenuOpen: false, controlsHidden: false,
@@ -488,18 +501,26 @@ const PreviewPage = {
       // Gesture state
       gestureActive: false, gestureSide: '', gestureTimer: null, rewindTimer: null,
       gestureStartX: 0, gestureStartY: 0, gestureStartTime: 0, gestureStartVideoTime: 0,
-      gestureSwiping: false, gestureSeekDir: 0, gestureSeekLabel: '',
+      gestureSwiping: false, gestureSeekDir: 0, gestureSeekLabel: '', gestureShowFeedback: false,
       // Double-tap state
       lastTapTime: 0, tapTimer: null,
       // Seek state
       seeking: false, seekHintPct: 0, seekHintTime: 0,
+      // Image swipe
+      imageSwipeStartX: 0,
     };
   },
   computed: {
     videoEl() { return this.$refs.videoEl; },
   },
   methods: {
-    goBack() { this.$router.back(); },
+    goBack() {
+      // Clear history state so fresh load doesn't retain stale file list
+      if (history.state && history.state.files) {
+        history.replaceState(null, '');
+      }
+      this.$router.back();
+    },
     /* ---- Tap to toggle controls ---- */
     onTap() { if (this.mediaType !== 'video') return; this.controlsHidden = !this.controlsHidden; this.speedMenuOpen = false; },
     /* ---- Playback ---- */
@@ -528,6 +549,7 @@ const PreviewPage = {
       // Start long-press timer
       this.gestureTimer = setTimeout(() => {
         this.gestureActive = true;
+        this.gestureShowFeedback = true;
         if (this.videoEl) {
           if (this.gestureSide === 'right') {
             this.videoEl.playbackRate = 2;
@@ -564,6 +586,8 @@ const PreviewPage = {
           }, 350);
         }
       }
+      // 先隐藏反馈（避免残留内容在 fadeout 期间闪烁）
+      this.gestureShowFeedback = false;
       this.gestureActive = false;
       this.gestureSwiping = false;
       this.gestureSide = '';
@@ -581,12 +605,14 @@ const PreviewPage = {
         // 若长按已激活，立即覆盖取消
         if (this.gestureActive) {
           this.gestureActive = false;
+          this.gestureShowFeedback = false;
           if (this.videoEl) this.videoEl.playbackRate = this.playbackRate;
           if (this.rewindTimer) { clearInterval(this.rewindTimer); this.rewindTimer = null; }
         }
         // Cancel waiting timer if still pending
         if (this.gestureTimer) { clearTimeout(this.gestureTimer); this.gestureTimer = null; }
         this.gestureSwiping = true;
+        this.gestureShowFeedback = true;
         this.gestureSeekDir = dx > 0 ? 1 : -1;
         const dur = this.videoEl ? (this.videoEl.duration || 0) : 0;
         if (dur > 0 && this.videoEl) {
@@ -651,11 +677,48 @@ const PreviewPage = {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
+    /* ---- Image Swipe ---- */
+    onImageSwipeStart(e) {
+      this.imageSwipeStartX = (e.changedTouches && e.changedTouches[0].clientX) || 0;
+    },
+    onImageSwipeMove(e) {
+      // no-op, track for end
+    },
+    onImageSwipeEnd(e) {
+      if (this.fileList.length < 2) return;
+      const cx = (e.changedTouches && e.changedTouches[0].clientX) || 0;
+      const dx = cx - this.imageSwipeStartX;
+      if (Math.abs(dx) > 40) {
+        if (dx < 0) this.nextImage();
+        else this.prevImage();
+      }
+    },
+    prevImage() {
+      if (this.fileIndex <= 0 || this.fileList.length < 2) return;
+      this.navigateToImage(this.fileIndex - 1);
+    },
+    nextImage() {
+      if (this.fileIndex >= this.fileList.length - 1) return;
+      this.navigateToImage(this.fileIndex + 1);
+    },
+    navigateToImage(idx) {
+      const file = this.fileList[idx];
+      if (!file) return;
+      this.fileIndex = idx;
+      this.filename = file.filename;
+      this.mediaType = file.media_type || 'image';
+      this.streamUrl = this.serverUrl + '/api/files/' + file.id + '/stream';
+      // Update URL without reloading
+      history.replaceState({ files: this.fileList, fileIndex: idx }, '', '#/preview/' + file.id);
+    },
     /* ---- Controls auto-hide ---- */
-    startHideTimer() {
+    startHideTimer(delay) {
       if (this.hideTimer) clearTimeout(this.hideTimer);
       this.controlsHidden = false;
-      if (this.playing) { this.hideTimer = setTimeout(() => { this.controlsHidden = true; this.speedMenuOpen = false; }, 3000); }
+      if (this.playing) { this.hideTimer = setTimeout(() => { this.controlsHidden = true; this.speedMenuOpen = false; }, delay || 5000); }
+    },
+    keepControlsVisible() {
+      if (this.hideTimer) clearTimeout(this.hideTimer);
     },
     /* ---- Utils ---- */
     fmtTime(t) {
@@ -667,11 +730,20 @@ const PreviewPage = {
   async mounted() {
     this.$emit('loading', true);
     try {
+      // 从 router state 恢复文件列表（用于图片切换）
+      if (history.state && history.state.files) {
+        this.fileList = history.state.files || [];
+        this.fileIndex = history.state.fileIndex ?? -1;
+      }
       const id = this.$route.params.id;
       const data = await api(this.serverUrl, '/api/files/' + id);
       this.filename = data.filename || '';
       this.mediaType = data.media_type || 'image';
       this.streamUrl = this.serverUrl + '/api/files/' + id + '/stream';
+      // 如果 fileIndex 没设置，从 fileList 中查找匹配
+      if (this.fileIndex < 0 && this.fileList.length) {
+        this.fileIndex = this.fileList.findIndex(f => f.id == id);
+      }
     } catch(e) {
       this.filename = '加载失败';
     } finally { this.$emit('loading', false); }
