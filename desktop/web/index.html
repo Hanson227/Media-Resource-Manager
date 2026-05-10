@@ -37,6 +37,11 @@
     <!-- Loading indicator -->
     <div v-if="loading" class="loading-bar"></div>
 
+    <!-- Offline Banner -->
+    <div v-if="offline" class="offline-banner">
+      <span class="mdi mdi-wifi-off"></span> 网络连接已断开，正在重连...
+    </div>
+
     <!-- Top Bar -->
     <template v-if="!isConnectPage && !isPreviewPage && serverUrl">
       <div class="top-bar">
