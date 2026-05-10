@@ -414,6 +414,7 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_unit_double_clicked(self, unit_id: int) -> None:
         """双击单元 → 直接加载文件列表。"""
+        self._current_unit_id = unit_id
         self._grid_view.load_unit(unit_id)
         # 左树同步高亮（当操作来自右侧面板时）
         self._tree_view.select_unit(unit_id)
