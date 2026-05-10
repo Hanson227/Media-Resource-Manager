@@ -532,3 +532,12 @@ body {
   padding: 6px 16px; display: flex; align-items: center;
   justify-content: center; gap: 6px;
 }
+
+/* ========== Pull to Refresh ========== */
+.ptr-indicator {
+  display: flex; align-items: center; justify-content: center;
+  height: 0; color: var(--text-tertiary); font-size: 13px;
+  gap: 6px; overflow: hidden; transition: height .2s;
+}
+.ptr-indicator.active { height: 48px; }
+.ptr-indicator .mdi { font-size: 20px; }
