@@ -237,6 +237,7 @@ const UnitFilesPage = {
                 <span class="mdi" :class="f.media_type === 'video' ? 'mdi-filmstrip-box-multiple' : 'mdi-file-image-outline'"></span>
               </span>
               <span v-if="f.media_type === 'video'" class="vid-badge"><span class="mdi mdi-play"></span></span>
+              <span v-if="f.media_type === 'video' && f.duration_ms" class="dur-badge">{{ fmtDuration(f.duration_ms) }}</span>
             </div>
             <div class="file-info">
               <div class="name">{{ f.filename }}</div>
@@ -277,6 +278,13 @@ const UnitFilesPage = {
       let i = 0; let size = bytes;
       while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
       return size.toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+    },
+    fmtDuration(ms) {
+      if (!ms || ms <= 0) return '';
+      const totalSec = Math.floor(ms / 1000);
+      const min = Math.floor(totalSec / 60);
+      const sec = totalSec % 60;
+      return min + ':' + (sec < 10 ? '0' : '') + sec;
     },
     preview(file) {
       const main = document.querySelector('.app-main');
