@@ -523,3 +523,12 @@ body {
   background: none; border: none; color: var(--text-tertiary);
   font-size: 16px; cursor: pointer; padding: 2px;
 }
+
+/* ========== Offline Banner ========== */
+.offline-banner {
+  position: sticky; top: 0; z-index: 50;
+  background: #b45400; color: #fff;
+  text-align: center; font-size: 13px; font-weight: 500;
+  padding: 6px 16px; display: flex; align-items: center;
+  justify-content: center; gap: 6px;
+}
