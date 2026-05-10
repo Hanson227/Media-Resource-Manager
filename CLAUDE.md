@@ -61,9 +61,13 @@ cd desktop && python main.py
 # Run the test suite
 cd desktop && python tests/test_flow.py
 
+# Run web frontend tests (requires API server running)
+python desktop/tests/test_web.py
+
 # Or run from repo root (main.py auto-switches CWD)
 python desktop/main.py
 python desktop/tests/test_flow.py
+python desktop/tests/test_web.py
 
 # Install dependencies
 cd desktop && pip install -r requirements.txt
