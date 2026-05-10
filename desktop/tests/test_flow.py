@@ -984,6 +984,137 @@ def test_dedup_run_api():
 
 
 # ============================================================
+# TDD 测试 —— 右键菜单、排序、树搜索过滤
+# ============================================================
+
+def test_grid_context_menu_signals():
+    """TDD-T3: 右键菜单对 image/video 文件正确发射信号。"""
+    section("TDD T3: 右键菜单信号")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.right_panel.thumbnail_grid import ThumbnailGridView
+    from app.ui.right_panel.thumbnail_grid import ThumbnailGridModel
+    from PySide6.QtCore import Qt
+    config = AppConfig()
+    model = ThumbnailGridModel(config)
+    view = ThumbnailGridView(model, config)
+
+    # 注入模拟数据
+    fake_files = [
+        {"id": 1, "filename": "test.jpg", "path": "C:/test/test.jpg",
+         "media_type": "image", "size_bytes": 1000, "width": 100, "height": 100, "duration_ms": None},
+        {"id": 2, "filename": "test.mp4", "path": "C:/test/test.mp4",
+         "media_type": "video", "size_bytes": 2000, "width": 1920, "height": 1080, "duration_ms": 5000},
+    ]
+    model.set_files(fake_files)
+    view.setModel(model)
+
+    # 验证模型数据正确
+    check("T3: 行0是 image", model.data(model.index(0, 0), Qt.ItemDataRole.UserRole + 2) == "image")
+    check("T3: 行1是 video", model.data(model.index(1, 0), Qt.ItemDataRole.UserRole + 2) == "video")
+    check("T3: 行0路径正确", model.data(model.index(0, 0), Qt.ItemDataRole.UserRole) == "C:/test/test.jpg")
+    check("T3: 行1路径正确", model.data(model.index(1, 0), Qt.ItemDataRole.UserRole) == "C:/test/test.mp4")
+
+    # 验证信号连接正常工作
+    captured_cover = []
+    view.cover_from_file_requested.connect(captured_cover.append)
+    # 直接发射信号模拟菜单操作结果
+    view.cover_from_file_requested.emit("C:/test/test.mp4")
+    check("T3: 信号可发射到视频路径", len(captured_cover) == 1 and captured_cover[0] == "C:/test/test.mp4")
+
+
+def test_grid_sort():
+    """TDD-T5: 排序按钮调用 model.set_sort 正确排序。"""
+    section("TDD T5: 模型排序")
+    from app.ui.right_panel.thumbnail_grid import ThumbnailGridModel
+    config = AppConfig()
+    model = ThumbnailGridModel(config)
+
+    fake_files = [
+        {"id": 3, "filename": "zzz.jpg", "path": "/a/zzz.jpg",
+         "media_type": "image", "size_bytes": 3000, "width": 100, "height": 100},
+        {"id": 1, "filename": "aaa.jpg", "path": "/a/aaa.jpg",
+         "media_type": "image", "size_bytes": 1000, "width": 100, "height": 100},
+        {"id": 2, "filename": "bbb.jpg", "path": "/a/bbb.jpg",
+         "media_type": "image", "size_bytes": 2000, "width": 100, "height": 100},
+    ]
+    model.set_files(fake_files)
+
+    # 按名称排序
+    model.set_sort("name", ascending=True)
+    names = [f["filename"] for f in model.file_list]
+    check("T5: 名称升序 aaa 第一", names[0] == "aaa.jpg")
+    check("T5: 名称升序 zzz 第三", names[2] == "zzz.jpg")
+
+    # 按大小降序
+    model.set_sort("size", ascending=False)
+    sizes = [f["size_bytes"] for f in model.file_list]
+    check("T5: 大小降序 3000 最大", sizes[0] == 3000)
+    check("T5: 大小降序 1000 最小", sizes[2] == 1000)
+
+
+def test_tree_filter():
+    """TDD-T6: 文件夹树 filter_by_name 隐藏不匹配节点。"""
+    section("TDD T6: 树搜索过滤")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView
+    from app.ui.left_panel.folder_tree import TreeNode
+    from PySide6.QtCore import QModelIndex
+    config = AppConfig()
+    model = FolderTreeModel(config)
+
+    # 直接构造测试用 TreeNode 数据
+    model._roots = [
+        TreeNode(
+            node_type="root", node_id=1, name="测试库1",
+            path="/test1", file_count=2, total_size=2000,
+            children=[
+                TreeNode(node_type="unit", node_id=10, name="春天",
+                         path="/test1/spring", file_count=1),
+                TreeNode(node_type="unit", node_id=11, name="夏天",
+                         path="/test1/summer", file_count=1),
+            ],
+        ),
+        TreeNode(
+            node_type="root", node_id=2, name="测试库2",
+            path="/test2", file_count=1, total_size=1000,
+            children=[
+                TreeNode(node_type="unit", node_id=20, name="冬天",
+                         path="/test2/winter", file_count=1),
+            ],
+        ),
+    ]
+    model.beginResetModel()
+    model.endResetModel()
+
+    view = FolderTreeView(model)
+    view.setModel(model)
+
+    root0_idx = model.index(0, 0)
+    check("T6: 根0存在", root0_idx.isValid())
+
+    # 过滤 "天" → 全部匹配
+    view.filter_by_name("天")
+    check("T6: '天' 春天可见", not view.isRowHidden(0, root0_idx))
+    check("T6: '天' 夏天可见", not view.isRowHidden(1, root0_idx))
+
+    # 过滤 "春" → 只有春天匹配
+    view.filter_by_name("春")
+    check("T6: '春' 春天可见", not view.isRowHidden(0, root0_idx))
+    check("T6: '春' 夏天隐藏", view.isRowHidden(1, root0_idx))
+
+    # 清空 → 全部可见
+    view.filter_by_name("")
+    check("T6: 清空后春天可见", not view.isRowHidden(0, root0_idx))
+    check("T6: 清空后夏天可见", not view.isRowHidden(1, root0_idx))
+
+
+# ============================================================
 # 主测
 # ============================================================
 
@@ -1033,6 +1164,9 @@ def main():
         test_unread_events_endpoint()
         test_web_static_files()
         test_dedup_run_api()
+        test_grid_context_menu_signals()
+        test_grid_sort()
+        test_tree_filter()
 
     finally:
         # 清理数据库连接

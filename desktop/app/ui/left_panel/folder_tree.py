@@ -324,6 +324,24 @@ class FolderTreeView(QTreeView):
         self._model.refresh()
         self.expandAll()
 
+    def filter_by_name(self, keyword: str) -> None:
+        """按名称过滤树节点（隐藏不匹配的单元）。"""
+        model = self._model
+        keyword = keyword.strip().lower()
+        self.expandAll()
+        for root_row, root in enumerate(model._roots):
+            root_idx = model.index(root_row, 0)
+            any_visible = False
+            for child_row, child in enumerate(root.children):
+                child_idx = model.index(child_row, 0, root_idx)
+                if keyword and keyword not in child.name.lower():
+                    self.setRowHidden(child_row, root_idx, True)
+                else:
+                    self.setRowHidden(child_row, root_idx, False)
+                    any_visible = True
+            # 隐藏空的根节点
+            self.setRowHidden(root_row, QModelIndex(), bool(keyword) and not any_visible)
+
     def select_unit(self, unit_id: int) -> None:
         """选中指定单元 ID 对应的树节点（用于右侧面板联动）。"""
         model = self._model
