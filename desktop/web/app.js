@@ -898,6 +898,9 @@ const App = {
       serverUrl: saved,
       loading: false,
       unreadCount: 0,
+      // Offline detection
+      offline: false,
+      failCount: 0,
       // PIN state
       pinUnlocked: !storedPin,   // if no PIN set, skip lock
       pinMode: storedPin ? 'enter' : 'set',
@@ -991,7 +994,13 @@ const App = {
       try {
         const data = await api(this.serverUrl, '/api/messages/unread-count');
         this.unreadCount = data.unread_count || 0;
-      } catch(e) { this.unreadCount = 0; }
+        this.failCount = 0;
+        if (this.offline) { this.offline = false; }
+      } catch(e) {
+        this.failCount++;
+        if (this.failCount >= 2 && !this.offline) { this.offline = true; }
+        this.unreadCount = 0;
+      }
     },
     refresh() {
       this.$router.go(0);
