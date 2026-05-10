@@ -121,6 +121,7 @@ async def get_unit_files(unit_id: int):
                         "filename": f.filename,
                         "media_type": f.media_type,
                         "size_bytes": f.size_bytes,
+                        "duration_ms": f.duration_ms,
                     }
                     for f in files[:200]
                 ],
