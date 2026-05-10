@@ -692,7 +692,7 @@ const UnitsPage = {
               </button>
             </div>
             <div class="unit-grid">
-              <div v-for="u in sortedUnits(group.units)" :key="u.id" class="unit-card" @click="$router.push('/units/' + u.id)">
+              <div v-for="u in sortedUnits(group.units)" :key="u.id" class="unit-card" @click="openUnit(u.id)">
                 <div class="cover">
                   <img v-if="u.cover_file_id" :src="coverUrl(u.cover_file_id)" loading="lazy"
                     @load="onCoverLoad(u.id)" @error="onCoverError(u.id)">
@@ -717,6 +717,11 @@ const UnitsPage = {
     sortOrder: localStorage.getItem('unit_sort_order') || 'asc',
   }},
   methods: {
+    openUnit(id) {
+      const main = document.querySelector('.app-main');
+      if (main) _unitsScrollTop = main.scrollTop;
+      this.$router.push('/units/' + id);
+    },
     toggleRoot(ri) { this.roots[ri].open = !this.roots[ri].open; },
     coverUrl(fid) { return fid ? this.serverUrl + '/api/files/' + fid + '/thumbnail' : ''; },
     onCoverLoad(id) { this.coverFailed[id] = false; },
@@ -769,7 +774,17 @@ const UnitsPage = {
       this.roots = Object.values(map);
     } catch(e) {
       this.roots = [];
-    } finally { this.loading = false; this.$emit('loading', false); }
+    } finally {
+      this.loading = false;
+      this.$emit('loading', false);
+      this.$nextTick(() => {
+        if (_unitsScrollTop > 0) {
+          const main = document.querySelector('.app-main');
+          if (main) main.scrollTop = _unitsScrollTop;
+          _unitsScrollTop = 0;
+        }
+      });
+    }
   }
 };
 
@@ -1049,13 +1064,19 @@ const PreviewPage = {
     },
     onGestureMove(e) {
       const t = e.changedTouches && e.changedTouches[0];
-      if (!t || this.gestureActive) return;  // long press active, keep 2x
+      if (!t) return;
       const dx = t.clientX - this.gestureStartX;
       const dy = t.clientY - this.gestureStartY;
       const absDx = Math.abs(dx);
       const absDy = Math.abs(dy);
       if (absDx > 10 && absDx > absDy) {
-        // Cancel long press, enter swipe mode
+        // 若长按已激活，立即覆盖取消
+        if (this.gestureActive) {
+          this.gestureActive = false;
+          if (this.videoEl) this.videoEl.playbackRate = this.playbackRate;
+          if (this.rewindTimer) { clearInterval(this.rewindTimer); this.rewindTimer = null; }
+        }
+        // Cancel waiting timer if still pending
         if (this.gestureTimer) { clearTimeout(this.gestureTimer); this.gestureTimer = null; }
         this.gestureSwiping = true;
         this.gestureSeekDir = dx > 0 ? 1 : -1;
@@ -1433,6 +1454,7 @@ const router = createRouter({ history: createWebHashHistory(), routes });
 
 /* 模块级变量：跨组件实例持久化 */
 let _fileScrollTop = 0;
+let _unitsScrollTop = 0;
 
 /* ========== Root App ========== */
 const App = {
