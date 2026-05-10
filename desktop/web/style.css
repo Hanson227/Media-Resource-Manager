@@ -506,3 +506,20 @@ body {
 .setting-item .label { font-size: 14px; }
 .setting-item .value { font-size: 13px; color: var(--text-secondary); }
 .setting-item .mdi-chevron-right { color: var(--text-tertiary); font-size: 20px; }
+
+/* ========== Search Bar ========== */
+.search-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 16px; background: var(--bg-card);
+  margin: 0; border-bottom: 1px solid var(--border);
+}
+.search-bar .mdi-magnify { font-size: 18px; color: var(--text-tertiary); flex-shrink: 0; }
+.search-input {
+  flex: 1; border: none; background: none;
+  color: var(--text-primary); font-size: 14px; outline: none;
+}
+.search-input::placeholder { color: var(--text-tertiary); }
+.search-clear {
+  background: none; border: none; color: var(--text-tertiary);
+  font-size: 16px; cursor: pointer; padding: 2px;
+}

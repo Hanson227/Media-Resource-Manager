@@ -217,7 +217,7 @@ const UnitFilesPage = {
         <div class="feed-header">
           <h2>{{ unitName }}</h2>
           <div style="display:flex;align-items:center;gap:6px">
-            <span class="count">{{ files.length }} 个文件</span>
+            <span class="count">{{ filteredFiles.length }} / {{ files.length }} 个文件</span>
             <button class="sort-btn" :class="{ active: sortBy === 'name' }" @click="setSort('name')">
               <span class="mdi" :class="sortIcon('name')"></span>
             </button>
@@ -225,6 +225,11 @@ const UnitFilesPage = {
               <span class="mdi" :class="sortIcon('size')"></span>
             </button>
           </div>
+        </div>
+        <div class="search-bar" v-if="files.length > 0">
+          <span class="mdi mdi-magnify"></span>
+          <input v-model="searchQuery" type="text" placeholder="搜索文件名..." class="search-input">
+          <button v-if="searchQuery" class="search-clear" @click="searchQuery = ''"><span class="mdi mdi-close"></span></button>
         </div>
         <div class="feed-grid">
           <div v-for="f in sortedFiles" :key="f.id" class="feed-item" @click="preview(f)">
@@ -254,10 +259,16 @@ const UnitFilesPage = {
     loading: true, unitName: '', files: [], loaded: new Set(), errored: new Set(),
     sortBy: localStorage.getItem('file_sort_by') || 'name',
     sortOrder: localStorage.getItem('file_sort_order') || 'asc',
+    searchQuery: '',
   }},
   computed: {
+    filteredFiles() {
+      if (!this.searchQuery) return this.files;
+      const q = this.searchQuery.toLowerCase();
+      return this.files.filter(f => f.filename.toLowerCase().includes(q));
+    },
     sortedFiles() {
-      const arr = [...this.files];
+      const arr = [...this.filteredFiles];
       if (this.sortBy === 'name') {
         arr.sort((a, b) => this.sortOrder === 'asc'
           ? a.filename.localeCompare(b.filename) : b.filename.localeCompare(a.filename));
