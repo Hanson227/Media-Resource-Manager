@@ -469,7 +469,7 @@ class FolderTreeView(QTreeView):
                         root_idx = model.index(root_row, 0)
                         child_idx = model.index(child_row, 0, root_idx)
                         self.setCurrentIndex(child_idx)
-                        self.scrollTo(child_idx)
+                        self.scrollTo(child_idx, QAbstractItemView.ScrollHint.PositionAtCenter)
                         return
         finally:
             if sel:
