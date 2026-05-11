@@ -4,7 +4,7 @@
 
 核心算法：
 1. 对每对资源单元，执行多策略匹配（MD5/pHash/dHash/人脸）
-2. 使用贪婪最佳匹配分配（每个文件 A 最多匹配一个文件 B）
+2. 使用贪婪最佳匹配分配（每个文件 A 最多匹配一个文件 B
 3. 杰卡德指数 = |匹配对| / (|A| + |B| - |匹配对|)
 4. 杰卡德指数 ≥ 阈值 → 视为单元级重复
 """
@@ -110,7 +110,7 @@ class DedupEngine:
         phash_hamming_threshold: int = 5,
         dhash_hamming_threshold: int = 5,
         face_distance_threshold: float = 0.6,
-        face_enabled: bool = False,
+        face_enabled: bool = True,
         registry: Optional[HashAlgorithmRegistry] = None,
     ) -> None:
         """初始化查重引擎。
