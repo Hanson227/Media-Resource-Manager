@@ -1483,8 +1483,8 @@ def test_time_sort_and_button():
 # ============================================================
 
 def test_tree_folder_click_shows_folder_cards():
-    """T11: 树中单击文件夹 → folder_single_clicked 信号。"""
-    section("T11: 树中单击文件夹 → 文件夹卡片")
+    """T11: 树中单击文件夹 → unit_double_clicked 信号（直接进入文件夹）。"""
+    section("T11: 树中单击文件夹 → 进入文件夹")
     from PySide6.QtWidgets import QApplication
     if QApplication.instance() is None:
         QApplication([])
@@ -1505,14 +1505,14 @@ def test_tree_folder_click_shows_folder_cards():
     tree_view = FolderTreeView(tree_model)
 
     captured = []
-    tree_view.folder_single_clicked.connect(captured.append)
+    tree_view.unit_double_clicked.connect(captured.append)
 
     # 选中 "春天" 文件夹节点（行0）
     root_idx = tree_model.index(0, 0)
     unit_idx = tree_model.index(0, 0, root_idx)
     tree_view.selectionModel().select(unit_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
 
-    check("T11: folder_single_clicked 已发射", len(captured) >= 1)
+    check("T11: unit_double_clicked 已发射", len(captured) >= 1)
     if captured:
         check("T11: 携带 unit_id=10", captured[0] == 10)
 
