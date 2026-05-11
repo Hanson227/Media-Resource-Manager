@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QVBoxLayout, QLabel,
     QTableWidget, QTableWidgetItem, QPushButton, QGroupBox,
     QHeaderView, QSplitter, QListWidget, QListWidgetItem,
-    QDialogButtonBox, QMessageBox,
+    QDialogButtonBox, QMessageBox, QWidget,
 )
 
 from config import AppConfig
