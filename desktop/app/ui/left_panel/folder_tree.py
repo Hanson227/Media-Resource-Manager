@@ -564,10 +564,12 @@ class FolderTreeView(QTreeView):
                                     sel = self.selectionModel()
                                     if sel:
                                         sel.blockSignals(True)
-                                    self.setCurrentIndex(file_idx)
-                                    self.scrollTo(file_idx)
-                                    if sel:
-                                        sel.blockSignals(False)
+                                    try:
+                                        self.setCurrentIndex(file_idx)
+                                        self.scrollTo(file_idx)
+                                    finally:
+                                        if sel:
+                                            sel.blockSignals(False)
                                     return True
         return False
 
