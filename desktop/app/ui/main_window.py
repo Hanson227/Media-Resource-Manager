@@ -429,6 +429,9 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_unit_double_clicked(self, unit_id: int) -> None:
         """双击进入文件夹：手风琴展开 + 加载文件 + 自动选中首文件。"""
+        # ---- 高亮树中的文件夹节点 ----
+        self._tree_view.select_unit_silent(unit_id)
+
         # ---- Accordion: 同一根下之前的展开单元自动收起 ----
         if (self._current_expanded_unit_id is not None
                 and self._current_expanded_unit_id != unit_id):
@@ -469,12 +472,11 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"展开单元文件树失败: {e}")
 
-        # ---- 自动选中第一个文件 ----
+        # ---- 自动选中第一个文件（仅网格高亮，树保持文件夹高亮） ----
         if self._grid_model.file_list:
             first_id = self._grid_model.file_list[0]["id"]
             # 50ms 延迟确保 load_unit 后的模型切换完成布局
             QTimer.singleShot(50, lambda fid=first_id: self._grid_view.select_file_by_id(fid))
-            QTimer.singleShot(50, lambda fid=first_id: self._tree_view.select_tree_node_by_file_id(fid))
 
         # ---- 更新 accordion 状态 ----
         self._current_expanded_unit_id = unit_id
@@ -556,7 +558,7 @@ class MainWindow(QMainWindow):
                 finally:
                     if sel:
                         sel.blockSignals(False)
-                self._show_folder_cards(unit_ids)
+                self._show_folder_cards(unit_ids, reset_scroll=False)
                 return
         # 回退：选第一个根
         root_idx = model.index(0, 0)
@@ -572,7 +574,7 @@ class MainWindow(QMainWindow):
             # 补偿信号阻塞：手动显示文件夹卡片
             unit_ids = model.get_selected_units(root_idx)
             if unit_ids:
-                self._show_folder_cards(unit_ids)
+                self._show_folder_cards(unit_ids, reset_scroll=False)
 
     @Slot(list)
     def _on_unit_selected(self, unit_ids: list[int]) -> None:
@@ -588,6 +590,17 @@ class MainWindow(QMainWindow):
                 pass
         self._current_expanded_unit_id = None
         self._current_unit_id = None
+
+        # 折叠其他根节点，只展开当前选中的根
+        model = self._tree_view.model()
+        target_set = set(unit_ids)
+        for row in range(model.rowCount()):
+            root_idx = model.index(row, 0)
+            root_unit_ids = set(model.get_selected_units(root_idx))
+            if root_unit_ids == target_set or root_unit_ids.issuperset(target_set):
+                self._tree_view.expand(root_idx)
+            else:
+                self._tree_view.collapse(root_idx)
 
         self._show_folder_cards(unit_ids)
 
@@ -1069,7 +1082,7 @@ class MainWindow(QMainWindow):
     # 搜索与筛选
     # ============================================================
 
-    def _show_folder_cards(self, unit_ids: list[int]) -> None:
+    def _show_folder_cards(self, unit_ids: list[int], reset_scroll: bool = True) -> None:
         """显示文件夹卡片：将指定 unit_ids 的文件夹显示为缩略图卡片。"""
         try:
             with DatabaseManager.session() as session:
@@ -1099,7 +1112,7 @@ class MainWindow(QMainWindow):
                     total_files += u.file_count or 0
                     total_size += u.total_size or 0
             if unit_data:
-                self._grid_view.load_folder_cards(unit_data, self._config)
+                self._grid_view.load_folder_cards(unit_data, self._config, reset_scroll=reset_scroll)
                 self._right_header.setText(f"文件夹 ({len(unit_data)} 个片段)")
                 self._right_footer.setText(
                     f"{total_files} 个项目 | 共 {format_size(total_size)}"

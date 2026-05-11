@@ -356,6 +356,7 @@ class ThumbnailGridView(QListView):
         # 保存当前滚动位置（文件夹卡片视图的位置）
         self._saved_scroll = self.verticalScrollBar().value() if self.verticalScrollBar() else 0
         self.setModel(self._file_model)  # 恢复文件模型
+        self._reconnect_selection_signals()
         try:
             with DatabaseManager.session() as session:
                 files = q.get_files_by_unit(session, unit_id)
@@ -368,15 +369,24 @@ class ThumbnailGridView(QListView):
             logger.error(f"加载单元失败 {unit_id}: {e}")
             self._file_model.set_files([])
 
-    def load_folder_cards(self, unit_data: list[dict], config: AppConfig) -> None:
-        """显示文件夹卡片视图。"""
+    def load_folder_cards(self, unit_data: list[dict], config: AppConfig,
+                          reset_scroll: bool = True) -> None:
+        """显示文件夹卡片视图。
+
+        Args:
+            reset_scroll: True=重置滚动到顶部（主动导航时用）；
+                         False=恢复上次滚动位置（面包屑返回时用）。
+        """
         self._cancel_all_workers()
 
         folder_model = FolderCardModel(unit_data)
         self.setModel(folder_model)
+        self._reconnect_selection_signals()
 
-        # 布局稳定后恢复上次的滚动位置
-        if self._saved_scroll > 0:
+        # 主动导航时重置滚动，面包屑返回时恢复上次位置
+        if reset_scroll:
+            self._saved_scroll = 0
+        elif self._saved_scroll > 0:
             from PySide6.QtCore import QTimer
             QTimer.singleShot(50, lambda: self.verticalScrollBar().setValue(
                 min(self._saved_scroll, self.verticalScrollBar().maximum())
@@ -397,6 +407,7 @@ class ThumbnailGridView(QListView):
         """清空视图。"""
         self._cancel_all_workers()
         self.setModel(self._file_model)
+        self._reconnect_selection_signals()
         self._file_model.set_files([])
 
     def select_file_by_id(self, file_id: int) -> None:
@@ -459,6 +470,14 @@ class ThumbnailGridView(QListView):
                 w.wait(5000)
         self._thumb_worker = None
         self._folder_worker = None
+
+    def _reconnect_selection_signals(self) -> None:
+        """setModel 会替换 selectionModel，需要重新连接信号。"""
+        sm = self.selectionModel()
+        if sm is None:
+            return
+        sm.selectionChanged.connect(self._on_selection_changed)
+        sm.selectionChanged.connect(self._on_any_selection_changed)
 
     @Slot(QModelIndex)
     def _on_double_clicked(self, index: QModelIndex) -> None:
