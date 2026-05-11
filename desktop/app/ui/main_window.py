@@ -29,7 +29,7 @@ from app.db import queries as q
 from app.ui.widgets.status_bar import MainStatusBar
 from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView
 from app.ui.right_panel.thumbnail_grid import (
-    ThumbnailGridModel, ThumbnailGridView,
+    ThumbnailGridModel, ThumbnailGridView, FolderCardModel,
 )
 from app.ui.right_panel.thumbnail_delegate import ThumbnailDelegate
 from app.ui.widgets.progress_panel import ProgressPanel
@@ -55,6 +55,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._config = config
         self._current_unit_id: Optional[int] = None
+        self._last_sort_field: str = ""
+        self._last_sort_asc: bool = True
         self._scan_worker: Optional[ScanWorker] = None
         self._hash_worker: Optional[HashWorker] = None
         self._dedup_worker: Optional[DedupWorker] = None
@@ -207,6 +209,12 @@ class MainWindow(QMainWindow):
         self._sort_size_btn.clicked.connect(lambda: self._on_sort("size"))
         toolbar.addWidget(self._sort_size_btn)
 
+        self._sort_date_btn = QPushButton("时间↑")
+        self._sort_date_btn.setCheckable(True)
+        self._sort_date_btn.setToolTip("按创建时间排序")
+        self._sort_date_btn.clicked.connect(lambda: self._on_sort("date"))
+        toolbar.addWidget(self._sort_date_btn)
+
         toolbar.addSeparator()
 
         self._msg_btn = QPushButton("消息")
@@ -316,6 +324,7 @@ class MainWindow(QMainWindow):
 
         # ---- 网格文件夹卡片 → 进入单元 ----
         self._grid_view.folder_entered.connect(self._on_unit_double_clicked)
+        self._grid_view.folder_selected.connect(self._tree_view.select_unit)
         self._grid_view.back_requested.connect(self._on_breadcrumb_back)
 
         # ---- 空格键预览 ----
@@ -323,6 +332,10 @@ class MainWindow(QMainWindow):
 
         # ---- 网格右键 → 封面设置 ----
         self._grid_view.cover_from_file_requested.connect(self._on_set_cover_from_file)
+
+        # ---- 文件级联动 ----
+        self._tree_view.file_selected_from_tree.connect(self._grid_view.select_file_by_id)
+        self._grid_view.file_selected_in_grid.connect(self._tree_view.select_tree_node_by_file_id)
 
         # ---- 右键菜单：合并/拆分 ----
         self._tree_view.merge_requested.connect(self._on_merge_units)
@@ -419,6 +432,20 @@ class MainWindow(QMainWindow):
         # 左树同步高亮（当操作来自右侧面板时）
         self._tree_view.select_unit(unit_id)
         self._breadcrumb.show()
+
+        # 加载树的子文件节点
+        try:
+            with DatabaseManager.session() as session:
+                files = q.get_files_by_unit(session, unit_id)
+                file_dicts = [
+                    {"id": f.id, "filename": f.filename,
+                     "path": f.path, "size_bytes": f.size_bytes}
+                    for f in files
+                ]
+            self._tree_view.model().expand_unit(unit_id, file_dicts)
+        except Exception as e:
+            logger.error(f"展开单元文件树失败: {e}")
+
         try:
             with DatabaseManager.session() as session:
                 unit = q.get_unit_by_id(session, unit_id)
@@ -437,11 +464,21 @@ class MainWindow(QMainWindow):
             return
         self._breadcrumb.hide()
         model = self._tree_view.model()
+
+        # 收起树的文件子节点
+        unit_id = self._current_unit_id
+        if unit_id:
+            try:
+                model.collapse_unit(unit_id)
+            except Exception as e:
+                logger.error(f"收起单元文件树失败: {e}")
+            self._current_unit_id = None
+
         # 遍历所有根，找到包含当前单元的根
         for row in range(model.rowCount()):
             root_idx = model.index(row, 0)
             unit_ids = model.get_selected_units(root_idx)
-            if self._current_unit_id in unit_ids:
+            if unit_id and unit_id in unit_ids:
                 self._tree_view.setCurrentIndex(root_idx)
                 # 强制刷新为文件夹卡片（即使根已选中也生效）
                 self._show_folder_cards(unit_ids)
@@ -463,6 +500,13 @@ class MainWindow(QMainWindow):
 
         if len(unit_ids) > 1:
             self._breadcrumb.hide()
+            # 收起之前展开的单元文件节点
+            if self._current_unit_id:
+                try:
+                    self._tree_view.model().collapse_unit(self._current_unit_id)
+                except Exception:
+                    pass
+                self._current_unit_id = None
             self._show_folder_cards(unit_ids)
             return
 
@@ -471,6 +515,19 @@ class MainWindow(QMainWindow):
         self._current_unit_id = unit_id
         self._breadcrumb.show()
         self._grid_view.load_unit(unit_id)
+
+        # 加载树的子文件节点
+        try:
+            with DatabaseManager.session() as session:
+                files = q.get_files_by_unit(session, unit_id)
+                file_dicts = [
+                    {"id": f.id, "filename": f.filename,
+                     "path": f.path, "size_bytes": f.size_bytes}
+                    for f in files
+                ]
+            self._tree_view.model().expand_unit(unit_id, file_dicts)
+        except Exception as e:
+            logger.error(f"展开单元文件树失败: {e}")
 
         try:
             with DatabaseManager.session() as session:
@@ -979,6 +1036,7 @@ class MainWindow(QMainWindow):
                         "file_count": u.file_count or 0,
                         "total_size": u.total_size or 0,
                         "preview_path": preview_path,
+                        "created_at": u.created_at.isoformat() if u.created_at else None,
                     })
                     total_files += u.file_count or 0
                     total_size += u.total_size or 0
@@ -1001,30 +1059,55 @@ class MainWindow(QMainWindow):
 
     def _on_sort(self, field: str) -> None:
         """切换排序。再次点击同字段切换升降序。"""
+        current = self._grid_view.model()
+        if isinstance(current, FolderCardModel):
+            # 文件夹卡片模式
+            if current._data:
+                asc = True
+                if self._last_sort_field == field:
+                    asc = not self._last_sort_asc
+                current.set_sort(field, asc)
+                self._last_sort_field = field
+                self._last_sort_asc = asc
+            sort_label = {"name": "名称", "size": "大小", "date": "时间"}.get(field, field)
+            arrow = "↑" if self._last_sort_asc else "↓"
+            self._status_bar.set_status(f"排序: {sort_label}{arrow}")
+            self._update_sort_buttons()
+            return
+
+        # 文件模式
         model = self._grid_model
         if model.sort_field == field:
-            # 同字段切换排序方向
             model.set_sort(field, not model._sort_asc)
         else:
             model.set_sort(field, True)
-        sort_label = {"name": "名称", "size": "大小"}.get(field, field)
+        sort_label = {"name": "名称", "size": "大小", "date": "时间"}.get(field, field)
         arrow = "↑" if model._sort_asc else "↓"
         self._status_bar.set_status(f"排序: {sort_label}{arrow}")
         self._update_sort_buttons()
 
     def _update_sort_buttons(self) -> None:
         """同步排序按钮的选中状态和图标。"""
-        field = self._grid_model.sort_field
-        asc = self._grid_model._sort_asc
+        current = self._grid_view.model()
+        if isinstance(current, FolderCardModel):
+            field = self._last_sort_field
+            asc = self._last_sort_asc
+        else:
+            field = self._grid_model.sort_field
+            asc = self._grid_model._sort_asc
         self._sort_name_btn.blockSignals(True)
         self._sort_size_btn.blockSignals(True)
+        self._sort_date_btn.blockSignals(True)
         self._sort_name_btn.setChecked(field == "name")
         self._sort_size_btn.setChecked(field == "size")
+        self._sort_date_btn.setChecked(field == "date")
         self._sort_name_btn.blockSignals(False)
         self._sort_size_btn.blockSignals(False)
+        self._sort_date_btn.blockSignals(False)
         arrow = "↑" if asc else "↓"
         self._sort_name_btn.setText(f"名称{arrow if field == 'name' else '↑'}")
         self._sort_size_btn.setText(f"大小{arrow if field == 'size' else '↑'}")
+        self._sort_date_btn.setText(f"时间{arrow if field == 'date' else '↑'}")
 
     def _apply_current_filter(self) -> None:
         """读取搜索框和筛选下拉的当前值，应用到网格+文件夹树。"""
@@ -1036,6 +1119,11 @@ class MainWindow(QMainWindow):
         )
         # 搜索文件夹树：按名称过滤
         self._tree_view.filter_by_name(search_text)
+        # 搜索时自动选中第一个可见单元
+        if search_text.strip():
+            first = self._tree_view.find_first_visible_unit()
+            if first:
+                self._on_unit_selected([first])
 
     # ============================================================
     # 刷新

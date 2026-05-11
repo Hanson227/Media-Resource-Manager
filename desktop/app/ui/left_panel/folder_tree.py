@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TreeNode:
     """树节点的纯数据容器，不从 SQLAlchemy 继承。"""
-    node_type: str           # "root" | "unit"
+    node_type: str           # "root" | "unit" | "favorites"
     node_id: int             # 数据库 ID
     name: str                # 显示名称
     path: str                # 文件夹/文件路径
@@ -43,6 +43,8 @@ class TreeNode:
     status: str = "active"
     library_root_id: Optional[int] = None
     children: list["TreeNode"] = None
+    node_subtype: str = ""   # "" 普通 / "file" 文件节点
+    created_at: Optional[str] = None  # ISO 时间
 
     def __post_init__(self):
         if self.children is None:
@@ -98,6 +100,7 @@ class FolderTreeModel(QAbstractItemModel):
                             is_starred=True,
                             status=unit.status or "active",
                             library_root_id=-1,
+                            created_at=unit.created_at.isoformat() if unit.created_at else None,
                         ))
                     self._roots.append(fav_node)
 
@@ -122,6 +125,7 @@ class FolderTreeModel(QAbstractItemModel):
                             is_starred=unit.is_starred or False,
                             status=unit.status or "active",
                             library_root_id=root.id,
+                            created_at=unit.created_at.isoformat() if unit.created_at else None,
                         )
                         root_node.children.append(unit_node)
                     self._roots.append(root_node)
@@ -137,7 +141,7 @@ class FolderTreeModel(QAbstractItemModel):
         node = index.internalPointer()
         if node is None:
             return []
-        if node.node_type == "unit":
+        if node.node_type == "unit" and node.node_subtype != "file":
             return [node.node_id] if node.node_id > 0 else []
         if node.node_type in ("root", "favorites"):
             return [c.node_id for c in node.children if c.status == "active" and c.node_id > 0]
@@ -151,6 +155,31 @@ class FolderTreeModel(QAbstractItemModel):
                     return child
         return None
 
+    def expand_unit(self, unit_id: int, files: list) -> None:
+        """加载单元下的文件作为树节点子项。"""
+        node = self.get_node_by_unit_id(unit_id)
+        if not node:
+            return
+        node.children = [
+            TreeNode(
+                node_type="unit",
+                node_subtype="file",
+                node_id=f["id"],
+                name=f["filename"],
+                path=f["path"],
+                total_size=f.get("size_bytes", 0),
+            )
+            for f in files[:200]
+        ]
+        self.layoutChanged.emit()
+
+    def collapse_unit(self, unit_id: int) -> None:
+        """卸载文件子节点。"""
+        node = self.get_node_by_unit_id(unit_id)
+        if node:
+            node.children = []
+            self.layoutChanged.emit()
+
     # ============================================================
     # QAbstractItemModel 实现
     # ============================================================
@@ -163,8 +192,11 @@ class FolderTreeModel(QAbstractItemModel):
                 return self.createIndex(row, column, self._roots[row])
         else:
             pnode = parent.internalPointer()
-            if pnode and pnode.node_type in ("root", "favorites") and row < len(pnode.children):
-                return self.createIndex(row, column, pnode.children[row])
+            if pnode:
+                if pnode.node_type in ("root", "favorites") and row < len(pnode.children):
+                    return self.createIndex(row, column, pnode.children[row])
+                if pnode.node_type == "unit" and pnode.children and row < len(pnode.children):
+                    return self.createIndex(row, column, pnode.children[row])
         return QModelIndex()
 
     def parent(self, index: QModelIndex) -> QModelIndex:
@@ -172,6 +204,15 @@ class FolderTreeModel(QAbstractItemModel):
             return QModelIndex()
         node = index.internalPointer()
         if not node:
+            return QModelIndex()
+        if node.node_subtype == "file":
+            # 文件节点 → 搜索父单元（遍历所有根的子节点）
+            for r_idx, root in enumerate(self._roots):
+                for c_idx, child in enumerate(root.children):
+                    if child.node_type == "unit" and child.children:
+                        for fn in child.children:
+                            if fn.node_id == node.node_id:
+                                return self.createIndex(c_idx, 0, child)
             return QModelIndex()
         if node.node_type == "unit":
             for r_idx, root in enumerate(self._roots):
@@ -187,6 +228,8 @@ class FolderTreeModel(QAbstractItemModel):
             return len(self._roots)
         node = parent.internalPointer()
         if node and node.node_type in ("root", "favorites"):
+            return len(node.children)
+        if node and node.node_type == "unit" and node.children:
             return len(node.children)
         return 0
 
@@ -204,13 +247,16 @@ class FolderTreeModel(QAbstractItemModel):
         if role == Qt.ItemDataRole.DisplayRole:
             if col == self.COL_NAME:
                 prefix = ""
-                if node.node_type == "unit":
+                if node.node_type == "unit" and node.node_subtype != "file":
                     if node.is_starred or node.is_manual:
                         prefix = "★ "
                     elif node.status == "merged":
                         prefix = "▷ "
                 return f"{prefix}{node.name}"
             elif col == self.COL_META:
+                if node.node_subtype == "file":
+                    from app.utils.file_helpers import format_size
+                    return format_size(node.total_size)
                 if node.node_type == "unit":
                     if node.status == "merged":
                         return ""
@@ -251,6 +297,13 @@ class FolderTreeModel(QAbstractItemModel):
             return f"媒体库根目录: {node.path}"
         if node.node_type == "favorites":
             return "收藏的文件夹，可快速访问常用位置"
+        if node.node_subtype == "file":
+            from app.utils.file_helpers import format_size
+            return (
+                f"文件名: {node.name}\n"
+                f"路径: {node.path}\n"
+                f"大小: {format_size(node.total_size)}"
+            )
         from app.utils.file_helpers import format_size
         lines = [
             f"名称: {node.name}",
@@ -298,6 +351,7 @@ class FolderTreeView(QTreeView):
     remove_root_requested = Signal(int)
     rename_requested = Signal(int)        # F2: 重命名单元
     copy_path_requested = Signal(str)     # Ctrl+C: 复制路径
+    file_selected_from_tree = Signal(int) # file_id — 树中单击文件时发射
 
     def __init__(self, model: FolderTreeModel, parent=None) -> None:
         super().__init__(parent)
@@ -315,6 +369,7 @@ class FolderTreeView(QTreeView):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.expandAll()
         self.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self.selectionModel().selectionChanged.connect(self._on_tree_file_selected)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self.doubleClicked.connect(self._on_double_clicked)
         logger.info("文件夹树视图初始化完成")
@@ -341,6 +396,16 @@ class FolderTreeView(QTreeView):
                     any_visible = True
             # 隐藏空的根节点
             self.setRowHidden(root_row, QModelIndex(), bool(keyword) and not any_visible)
+
+    def find_first_visible_unit(self) -> Optional[int]:
+        """返回第一个可见的单元 node_id，没有则返回 None。"""
+        model = self._model
+        for root_row, root in enumerate(model._roots):
+            root_idx = model.index(root_row, 0)
+            for child_row, child in enumerate(root.children):
+                if not self.isRowHidden(child_row, root_idx):
+                    return child.node_id
+        return None
 
     def select_unit(self, unit_id: int) -> None:
         """选中指定单元 ID 对应的树节点（用于右侧面板联动）。"""
@@ -386,6 +451,33 @@ class FolderTreeView(QTreeView):
             unit_ids.update(ids)
         if unit_ids:
             self.unit_selected.emit(list(unit_ids))
+
+    @Slot()
+    def _on_tree_file_selected(self, selected, deselected) -> None:
+        """检测文件节点选中并发射 file_selected_from_tree 信号。"""
+        indexes = selected.indexes()
+        if not indexes:
+            return
+        idx = indexes[0]
+        if idx.column() != 0:
+            return
+        node = idx.internalPointer()
+        if node and node.node_subtype == "file":
+            self.file_selected_from_tree.emit(node.node_id)
+
+    def select_tree_node_by_file_id(self, file_id: int) -> None:
+        """在展开的树中选中指定的文件节点。"""
+        model = self._model
+        for root_row, root in enumerate(model._roots):
+            root_idx = model.index(root_row, 0)
+            for child_row, child in enumerate(root.children):
+                if child.node_type == "unit" and child.children:
+                    for file_row, file_node in enumerate(child.children):
+                        if file_node.node_id == file_id:
+                            file_idx = model.index(file_row, 0, model.index(child_row, 0, root_idx))
+                            if file_idx.isValid():
+                                self.setCurrentIndex(file_idx)
+                                return
 
     @Slot()
     def _on_context_menu(self, pos) -> None:
