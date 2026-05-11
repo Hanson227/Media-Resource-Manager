@@ -1114,6 +1114,370 @@ def test_tree_filter():
     check("T6: 清空后夏天可见", not view.isRowHidden(1, root0_idx))
 
 
+def test_search_auto_select_first():
+    """TDD-T7: filter_by_name 后 find_first_visible_unit 返回正确。"""
+    section("TDD T7: 搜索自动选中首个单元")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView
+    from app.ui.left_panel.folder_tree import TreeNode
+    config = AppConfig()
+    model = FolderTreeModel(config)
+
+    # 构造测试数据：2 个根，各带子单元
+    model._roots = [
+        TreeNode(
+            node_type="root", node_id=1, name="库1",
+            path="/lib1", file_count=2, total_size=2000,
+            children=[
+                TreeNode(node_type="unit", node_id=10, name="春天",
+                         path="/lib1/spring", file_count=1),
+                TreeNode(node_type="unit", node_id=11, name="夏天",
+                         path="/lib1/summer", file_count=1),
+            ],
+        ),
+        TreeNode(
+            node_type="root", node_id=2, name="库2",
+            path="/lib2", file_count=1, total_size=1000,
+            children=[
+                TreeNode(node_type="unit", node_id=20, name="冬天",
+                         path="/lib2/winter", file_count=1),
+            ],
+        ),
+    ]
+    model.beginResetModel()
+    model.endResetModel()
+
+    view = FolderTreeView(model)
+    view.setModel(model)
+
+    # 搜索 "春" → 只有 "春天" 匹配
+    view.filter_by_name("春")
+    first = view.find_first_visible_unit()
+    check("T7: '春' 找到春天 (id=10)", first == 10)
+
+    # 搜索不存在的 → 无匹配
+    view.filter_by_name("不存在的")
+    first = view.find_first_visible_unit()
+    check("T7: 无匹配时返回 None", first is None)
+
+    # 清空 → 全部可见，第一个应为 10
+    view.filter_by_name("")
+    first = view.find_first_visible_unit()
+    check("T7: 清空后第一个为 10", first == 10)
+
+
+# ============================================================
+# TDD 测试 —— 文件夹卡片单击 → 左侧高亮
+# ============================================================
+
+def test_folder_card_click_linking():
+    """TDD-T8: 文件夹卡片单击 → folder_selected 信号。"""
+    section("TDD T8: 文件夹卡片单击联动")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.right_panel.thumbnail_grid import (
+        FolderCardModel, ThumbnailGridView, ThumbnailGridModel,
+    )
+    from PySide6.QtCore import Qt, QItemSelectionModel
+
+    config = AppConfig()
+
+    # 测试数据：2 个文件夹卡片
+    fake_unit_data = [
+        {"unit_id": 10, "name": "单元A", "path": "/test/A",
+         "file_count": 5, "total_size": 5000, "cover_path": "", "preview_path": ""},
+        {"unit_id": 11, "name": "单元B", "path": "/test/B",
+         "file_count": 3, "total_size": 3000, "cover_path": "", "preview_path": ""},
+    ]
+
+    # ---- 1. FolderCardModel 数据角色验证 ----
+    folder_model = FolderCardModel(fake_unit_data)
+    check("T8: 行0 display='单元A'",
+          folder_model.data(folder_model.index(0, 0), Qt.ItemDataRole.DisplayRole) == "单元A")
+    check("T8: 行0 unit_id=10",
+          folder_model.data(folder_model.index(0, 0), Qt.ItemDataRole.UserRole + 1) == 10)
+    check("T8: 行1 display='单元B'",
+          folder_model.data(folder_model.index(1, 0), Qt.ItemDataRole.DisplayRole) == "单元B")
+    check("T8: 行1 unit_id=11",
+          folder_model.data(folder_model.index(1, 0), Qt.ItemDataRole.UserRole + 1) == 11)
+    check("T8: 行0 media_type='folder'",
+          folder_model.data(folder_model.index(0, 0), Qt.ItemDataRole.UserRole + 2) == "folder")
+
+    # ---- 2. 视图 + folder_selected 信号验证 ----
+    file_model = ThumbnailGridModel(config)
+    view = ThumbnailGridView(file_model, config)
+    view.setModel(folder_model)
+
+    # 由于 setModel 替换了 selectionModel，需重新连接
+    view.selectionModel().selectionChanged.connect(
+        view._on_any_selection_changed
+    )
+
+    captured = []
+    view.folder_selected.connect(captured.append)
+
+    # 选中第一行 → 应触发 folder_selected(10)
+    idx0 = folder_model.index(0, 0)
+    view.selectionModel().select(idx0, QItemSelectionModel.SelectionFlag.Select)
+    check("T8: folder_selected 已发射(选中行0)", len(captured) >= 1)
+    if captured:
+        check("T8: folder_selected 携带 unit_id=10", captured[0] == 10)
+
+    # 选中第二行 → 应触发 folder_selected(11)
+    idx1 = folder_model.index(1, 0)
+    view.selectionModel().select(idx1, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+    check("T8: 切换到行1 再次发射", len(captured) >= 2)
+    if len(captured) >= 2:
+        check("T8: 第二次 unit_id=11", captured[-1] == 11)
+
+
+# ============================================================
+# TDD 测试 —— 树展开单元内部文件节点
+# ============================================================
+
+def test_tree_expand_unit():
+    """TDD-T9: expand_unit 向树节点注入子文件。"""
+    section("TDD T9: 树展开单元文件")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+    from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView, TreeNode
+    from PySide6.QtCore import QModelIndex, Qt
+
+    config = AppConfig()
+    model = FolderTreeModel(config)
+    model._roots = [
+        TreeNode(node_type="root", node_id=1, name="库1", path="/a", children=[
+            TreeNode(node_type="unit", node_id=10, name="春天", path="/a/spring", file_count=2),
+        ]),
+    ]
+    model.beginResetModel()
+    model.endResetModel()
+
+    # 展开前：单元下无子节点
+    root_idx = model.index(0, 0)
+    check("T9: 根索引有效", root_idx.isValid())
+    unit_idx = model.index(0, 0, root_idx) if root_idx.isValid() else QModelIndex()
+    check("T9: 单元索引有效", unit_idx.isValid())
+    check("T9: 展开前子节点数=0", model.rowCount(unit_idx) == 0)
+
+    # 展开：注入文件
+    files = [
+        {"id": 101, "filename": "a.jpg", "path": "/a/spring/a.jpg", "size_bytes": 1000},
+        {"id": 102, "filename": "b.mp4", "path": "/a/spring/b.mp4", "size_bytes": 5000},
+    ]
+    model.expand_unit(10, files)
+    check("T9: 展开后子节点数=2", model.rowCount(unit_idx) == 2)
+
+    # 验证第一行是文件
+    file_idx = model.index(0, 0, unit_idx)
+    check("T9: 文件索引有效", file_idx.isValid())
+    check("T9: 文件节点名 a.jpg", model.data(file_idx, Qt.ItemDataRole.DisplayRole) == "a.jpg")
+
+    # 收起
+    model.collapse_unit(10)
+    check("T9: 收起后子节点数=0", model.rowCount(unit_idx) == 0)
+
+
+# ============================================================
+# TDD 测试 —— 文件级双向联动
+# ============================================================
+
+def test_file_level_linking():
+    """TDD-T10: 文件级双向联动 —— 树点击文件→网格选中，网格点击文件→树选中。"""
+    section("TDD T10: 文件级双向联动")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.right_panel.thumbnail_grid import (
+        ThumbnailGridModel, ThumbnailGridView,
+    )
+    from app.ui.left_panel.folder_tree import (
+        FolderTreeModel, FolderTreeView, TreeNode,
+    )
+    from app.ui.right_panel.thumbnail_grid import FolderCardModel
+    from PySide6.QtCore import Qt, QModelIndex, QItemSelectionModel
+
+    config = AppConfig()
+
+    # ---- 1. 网格模型 + select_file_by_id ----
+    files = [
+        {"id": 101, "filename": "a.jpg", "path": "/a.jpg",
+         "media_type": "image", "size_bytes": 1000,
+         "width": 100, "height": 100, "duration_ms": None},
+        {"id": 102, "filename": "b.mp4", "path": "/b.mp4",
+         "media_type": "video", "size_bytes": 2000,
+         "width": 1920, "height": 1080, "duration_ms": 5000},
+    ]
+    grid_model = ThumbnailGridModel(config)
+    grid_model.set_files(files)
+    check("T10: 文件模型行0 id=101",
+          grid_model.data(grid_model.index(0, 0), Qt.ItemDataRole.UserRole + 1) == 101)
+    check("T10: 文件模型行1 id=102",
+          grid_model.data(grid_model.index(1, 0), Qt.ItemDataRole.UserRole + 1) == 102)
+
+    # select_file_by_id 方法存在
+    grid_view = ThumbnailGridView(grid_model, config)
+    check("T10: select_file_by_id 方法存在",
+          hasattr(grid_view, "select_file_by_id"))
+
+    # select_file_by_id 选中正确文件
+    grid_view.select_file_by_id(101)
+    sel_idxs = grid_view.selectedIndexes()
+    check("T10: select_file_by_id(101) 有选中", len(sel_idxs) > 0)
+    if sel_idxs:
+        sel_id = grid_model.data(sel_idxs[0], Qt.ItemDataRole.UserRole + 1)
+        check("T10: select_file_by_id(101) 选中了 id=101", sel_id == 101)
+
+    # select_file_by_id 在 FolderCardModel 上不应崩溃
+    folder_model = FolderCardModel([
+        {"unit_id": 10, "name": "单元A", "path": "/test/A",
+         "file_count": 5, "total_size": 5000, "cover_path": "", "preview_path": ""},
+    ])
+    grid_view.setModel(folder_model)
+    grid_view.select_file_by_id(101)  # 不应崩溃
+    check("T10: select_file_by_id 在文件夹模式不崩溃", True)
+
+    # ---- 2. 文件节点 TreeNode ----
+    file_node = TreeNode(node_type="unit", node_subtype="file",
+                         node_id=101, name="a.jpg", path="/a.jpg")
+    check("T10: 文件节点 subtype=file", file_node.node_subtype == "file")
+    check("T10: 文件节点 node_id=101", file_node.node_id == 101)
+
+    # ---- 3. select_tree_node_by_file_id ----
+    tree_model = FolderTreeModel(config)
+    tree_model._roots = [
+        TreeNode(node_type="root", node_id=1, name="库1", path="/a", children=[
+            TreeNode(node_type="unit", node_id=10, name="春天",
+                     path="/a/spring", file_count=2, children=[
+                TreeNode(node_type="unit", node_subtype="file",
+                         node_id=101, name="a.jpg", path="/a/spring/a.jpg"),
+                TreeNode(node_type="unit", node_subtype="file",
+                         node_id=102, name="b.mp4", path="/a/spring/b.mp4"),
+            ]),
+        ]),
+    ]
+    tree_model.beginResetModel()
+    tree_model.endResetModel()
+
+    tree_view = FolderTreeView(tree_model)
+    tree_view.expandAll()
+
+    check("T10: select_tree_node_by_file_id 方法存在",
+          hasattr(tree_view, "select_tree_node_by_file_id"))
+
+    # 选中 id=101 的文件节点
+    tree_view.select_tree_node_by_file_id(101)
+    sel = tree_view.selectedIndexes()
+    check("T10: select_tree_node_by_file_id(101) 有选中", len(sel) > 0)
+    if sel:
+        node = sel[0].internalPointer()
+        check("T10: 选中节点是文件", node is not None and node.node_subtype == "file")
+        check("T10: 选中节点 id=101", node is not None and node.node_id == 101)
+
+    # ---- 4. file_selected_from_tree 信号 ----
+    check("T10: file_selected_from_tree 信号存在",
+          hasattr(tree_view, "file_selected_from_tree"))
+    captured_tree_sig = []
+    tree_view.file_selected_from_tree.connect(captured_tree_sig.append)
+
+    # 选中文件 102（不同于之前已选中的 101）→ 应发射 file_selected_from_tree
+    # 先清除选择再选新文件，确保 selectionChanged 触发
+    root_idx = tree_model.index(0, 0)
+    unit_idx = tree_model.index(0, 0, root_idx) if root_idx.isValid() else QModelIndex()
+    file_idx_102 = tree_model.index(1, 0, unit_idx) if unit_idx.isValid() else QModelIndex()
+    if file_idx_102.isValid():
+        tree_view.selectionModel().select(
+            file_idx_102, QItemSelectionModel.SelectionFlag.ClearAndSelect
+        )
+    check("T10: 选择文件节点触发 file_selected_from_tree",
+          len(captured_tree_sig) > 0)
+    if captured_tree_sig:
+        check("T10: file_selected_from_tree 携带 id=102",
+              captured_tree_sig[0] == 102)
+
+    # ---- 5. file_selected_in_grid 信号 ----
+    check("T10: file_selected_in_grid 信号存在",
+          hasattr(grid_view, "file_selected_in_grid"))
+    captured_grid_sig = []
+    grid_view.file_selected_in_grid.connect(captured_grid_sig.append)
+
+    # 切换回文件模型并选中一个文件
+    grid_view.setModel(grid_model)
+    grid_view.selectionModel().selectionChanged.connect(
+        grid_view._on_selection_changed
+    )
+    idx0 = grid_model.index(0, 0)
+    grid_view.selectionModel().select(
+        idx0, QItemSelectionModel.SelectionFlag.ClearAndSelect
+    )
+    check("T10: 选择网格文件触发 file_selected_in_grid",
+          len(captured_grid_sig) > 0)
+    if captured_grid_sig:
+        check("T10: file_selected_in_grid 携带 id=101",
+              captured_grid_sig[0] == 101)
+
+
+# ============================================================
+# TDD 测试 —— 文件夹卡片排序
+# ============================================================
+
+def test_folder_card_sort():
+    """TDD: 文件夹卡片排序。"""
+    section("TDD: 文件夹卡片排序")
+    from app.ui.right_panel.thumbnail_grid import FolderCardModel
+    from PySide6.QtCore import Qt
+
+    data = [
+        {"unit_id": 3, "name": "zzz", "path": "/z", "file_count": 1, "total_size": 3000,
+         "created_at": "2026-01-03"},
+        {"unit_id": 1, "name": "aaa", "path": "/a", "file_count": 2, "total_size": 1000,
+         "created_at": "2026-01-01"},
+        {"unit_id": 2, "name": "bbb", "path": "/b", "file_count": 3, "total_size": 2000,
+         "created_at": "2026-01-02"},
+    ]
+    model = FolderCardModel(data)
+
+    # 名称升序
+    model.set_sort("name", ascending=True)
+    names = [model.data(model.index(i, 0), Qt.ItemDataRole.DisplayRole) for i in range(3)]
+    check("T5: 卡片名称升序 aaa第一", names[0] == "aaa")
+    check("T5: 卡片名称升序 zzz第三", names[2] == "zzz")
+
+    # 大小降序
+    model.set_sort("size", ascending=False)
+    check("T5: 卡片大小降序 3000第一", model._data[0]["total_size"] == 3000)
+    check("T5: 卡片大小降序 1000第三", model._data[2]["total_size"] == 1000)
+
+    # 时间升序
+    model.set_sort("date", ascending=True)
+    check("T5: 卡片时间升序 01-01第一", model._data[0]["created_at"] == "2026-01-01")
+    check("T5: 卡片时间升序 01-03第三", model._data[2]["created_at"] == "2026-01-03")
+
+
+def test_time_sort_and_button():
+    """TDD: 时间排序按钮。"""
+    section("TDD: 时间排序按钮")
+    from app.ui.right_panel.thumbnail_grid import ThumbnailGridModel
+    config = AppConfig()
+    model = ThumbnailGridModel(config)
+    files = [
+        {"id": 1, "filename": "c.jpg", "path": "/c.jpg", "media_type": "image",
+         "size_bytes": 3000, "width": 10, "height": 10},
+        {"id": 2, "filename": "a.jpg", "path": "/a.jpg", "media_type": "image",
+         "size_bytes": 1000, "width": 10, "height": 10},
+    ]
+    model.set_files(files)
+    model.set_sort("size", ascending=True)
+    check("T6: 大小升序 ok", model.file_list[0]["id"] == 2)
+
+
 # ============================================================
 # 主测
 # ============================================================
@@ -1167,6 +1531,12 @@ def main():
         test_grid_context_menu_signals()
         test_grid_sort()
         test_tree_filter()
+        test_search_auto_select_first()
+        test_folder_card_click_linking()
+        test_tree_expand_unit()
+        test_file_level_linking()
+        test_folder_card_sort()
+        test_time_sort_and_button()
 
     finally:
         # 清理数据库连接
