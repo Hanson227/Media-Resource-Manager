@@ -60,6 +60,7 @@ class MainWindow(QMainWindow):
         self._scan_worker: Optional[ScanWorker] = None
         self._hash_worker: Optional[HashWorker] = None
         self._dedup_worker: Optional[DedupWorker] = None
+        self._current_expanded_unit_id: Optional[int] = None  # accordion: 当前展开文件层的单元 ID
 
         # 搜索防抖定时器 — 每次按键重置，150ms 空闲后触发放行
         self._filter_timer = QTimer()
@@ -321,10 +322,11 @@ class MainWindow(QMainWindow):
         # ---- 文件树 → 缩略图网格 ----
         self._tree_view.unit_selected.connect(self._on_unit_selected)
         self._tree_view.unit_double_clicked.connect(self._on_unit_double_clicked)
+        self._tree_view.folder_single_clicked.connect(self._on_folder_single_clicked)
 
         # ---- 网格文件夹卡片 → 进入单元 ----
         self._grid_view.folder_entered.connect(self._on_unit_double_clicked)
-        self._grid_view.folder_selected.connect(self._tree_view.select_unit)
+        self._grid_view.folder_selected.connect(self._tree_view.select_unit_silent)
         self._grid_view.back_requested.connect(self._on_breadcrumb_back)
 
         # ---- 空格键预览 ----
@@ -426,14 +428,26 @@ class MainWindow(QMainWindow):
 
     @Slot(int)
     def _on_unit_double_clicked(self, unit_id: int) -> None:
-        """双击单元 → 直接加载文件列表。"""
+        """双击进入文件夹：手风琴展开 + 加载文件 + 自动选中首文件。"""
+        # ---- Accordion: 同一根下之前的展开单元自动收起 ----
+        if (self._current_expanded_unit_id is not None
+                and self._current_expanded_unit_id != unit_id):
+            model_ref = self._tree_view.model()
+            prev_node = model_ref.get_node_by_unit_id(self._current_expanded_unit_id)
+            new_node = model_ref.get_node_by_unit_id(unit_id)
+            if (prev_node and new_node
+                    and prev_node.library_root_id == new_node.library_root_id):
+                try:
+                    model_ref.collapse_unit(self._current_expanded_unit_id)
+                except Exception:
+                    pass
+
+        # ---- 加载文件 ----
         self._current_unit_id = unit_id
         self._grid_view.load_unit(unit_id)
-        # 左树同步高亮（当操作来自右侧面板时）
-        self._tree_view.select_unit(unit_id)
         self._breadcrumb.show()
 
-        # 加载树的子文件节点
+        # ---- 展开树文件子节点（不 expandAll） ----
         try:
             with DatabaseManager.session() as session:
                 files = q.get_files_by_unit(session, unit_id)
@@ -442,10 +456,30 @@ class MainWindow(QMainWindow):
                      "path": f.path, "size_bytes": f.size_bytes}
                     for f in files
                 ]
-            self._tree_view.model().expand_unit(unit_id, file_dicts)
+            tree_model = self._tree_view.model()
+            tree_model.expand_unit(unit_id, file_dicts)
+            # 找到单元节点并展开
+            for root_row, root in enumerate(tree_model._roots):
+                root_idx = tree_model.index(root_row, 0)
+                for child_row, child in enumerate(root.children):
+                    if child.node_id == unit_id and child.node_type == "unit" and child.node_subtype != "file":
+                        unit_idx = tree_model.index(child_row, 0, root_idx)
+                        self._tree_view.expand(unit_idx)
+                        break
         except Exception as e:
             logger.error(f"展开单元文件树失败: {e}")
 
+        # ---- 自动选中第一个文件 ----
+        if self._grid_model.file_list:
+            first_id = self._grid_model.file_list[0]["id"]
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(50, lambda fid=first_id: self._grid_view.select_file_by_id(fid))
+            QTimer.singleShot(50, lambda fid=first_id: self._tree_view.select_tree_node_by_file_id(fid))
+
+        # ---- 更新 accordion 状态 ----
+        self._current_expanded_unit_id = unit_id
+
+        # ---- 更新头/脚信息 ----
         try:
             with DatabaseManager.session() as session:
                 unit = q.get_unit_by_id(session, unit_id)
@@ -457,6 +491,37 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"加载单元详情失败: {e}")
 
+    @Slot(int)
+    def _on_folder_single_clicked(self, unit_id: int) -> None:
+        """树中单击文件夹 → 显示文件夹卡片并滚动到该卡片。"""
+        self._breadcrumb.hide()
+
+        # 收起之前展开的文件层（accordion）
+        if self._current_expanded_unit_id is not None:
+            try:
+                self._tree_view.model().collapse_unit(self._current_expanded_unit_id)
+            except Exception:
+                pass
+        self._current_expanded_unit_id = None
+        self._current_unit_id = None
+
+        # 找到包含该文件夹的根，显示其所有文件夹卡片
+        model = self._tree_view.model()
+        root_unit_ids = None
+        for row in range(model.rowCount()):
+            root_idx = model.index(row, 0)
+            ids = model.get_selected_units(root_idx)
+            if unit_id in ids:
+                root_unit_ids = ids
+                break
+
+        if root_unit_ids:
+            self._show_folder_cards(root_unit_ids)
+            self._grid_view.select_folder_card_by_unit_id(unit_id)
+        else:
+            self._show_folder_cards([unit_id])
+            self._grid_view.select_folder_card_by_unit_id(unit_id)
+
     @Slot()
     def _on_breadcrumb_back(self) -> None:
         """点击面包屑 → 返回当前单元所属媒体库的文件夹卡片。"""
@@ -465,14 +530,17 @@ class MainWindow(QMainWindow):
         self._breadcrumb.hide()
         model = self._tree_view.model()
 
-        # 收起树的文件子节点
+        # 收起树的文件子节点，并展开根层级显示所有单元
         unit_id = self._current_unit_id
         if unit_id:
             try:
                 model.collapse_unit(unit_id)
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self._tree_view.expandToDepth(1))
             except Exception as e:
                 logger.error(f"收起单元文件树失败: {e}")
             self._current_unit_id = None
+            self._current_expanded_unit_id = None
 
         # 遍历所有根，找到包含当前单元的根
         for row in range(model.rowCount()):
@@ -490,55 +558,20 @@ class MainWindow(QMainWindow):
 
     @Slot(list)
     def _on_unit_selected(self, unit_ids: list[int]) -> None:
-        """树选择变化 → 右侧面板更新。
-
-        - 选中根目录（多个 unit_id）→ 显示文件夹卡片
-        - 选中单个单元 → 显示该单元的文件列表
-        """
+        """根/收藏节点单击 → 显示文件夹卡片。"""
         if not unit_ids:
             return
 
-        if len(unit_ids) > 1:
-            self._breadcrumb.hide()
-            # 收起之前展开的单元文件节点
-            if self._current_unit_id:
-                try:
-                    self._tree_view.model().collapse_unit(self._current_unit_id)
-                except Exception:
-                    pass
-                self._current_unit_id = None
-            self._show_folder_cards(unit_ids)
-            return
+        self._breadcrumb.hide()
+        if self._current_expanded_unit_id is not None:
+            try:
+                self._tree_view.model().collapse_unit(self._current_expanded_unit_id)
+            except Exception:
+                pass
+        self._current_expanded_unit_id = None
+        self._current_unit_id = None
 
-        # 单个单元：显示文件
-        unit_id = unit_ids[0]
-        self._current_unit_id = unit_id
-        self._breadcrumb.show()
-        self._grid_view.load_unit(unit_id)
-
-        # 加载树的子文件节点
-        try:
-            with DatabaseManager.session() as session:
-                files = q.get_files_by_unit(session, unit_id)
-                file_dicts = [
-                    {"id": f.id, "filename": f.filename,
-                     "path": f.path, "size_bytes": f.size_bytes}
-                    for f in files
-                ]
-            self._tree_view.model().expand_unit(unit_id, file_dicts)
-        except Exception as e:
-            logger.error(f"展开单元文件树失败: {e}")
-
-        try:
-            with DatabaseManager.session() as session:
-                unit = q.get_unit_by_id(session, unit_id)
-                if unit:
-                    self._right_header.setText(f"资源单元: {unit.name}")
-                    self._right_footer.setText(
-                        f"{unit.file_count} 个项目 | 共 {format_size(unit.total_size)}"
-                    )
-        except Exception as e:
-            logger.error(f"加载单元详情失败: {e}")
+        self._show_folder_cards(unit_ids)
 
     @Slot(int, list)
     def _on_merge_units(self, parent_id: int, child_ids: list[int]) -> None:
@@ -690,6 +723,7 @@ class MainWindow(QMainWindow):
                 session.flush()
                 logger.info(f"已标记排除: {name} (id={unit_id}, status={unit.status})")
             self._grid_view.clear()
+            self._current_expanded_unit_id = None
             self._tree_view.refresh_model()
             root_idx = self._tree_view.model().index(0, 0)
             if root_idx.isValid():
@@ -1124,6 +1158,7 @@ class MainWindow(QMainWindow):
             first = self._tree_view.find_first_visible_unit()
             if first:
                 self._on_unit_selected([first])
+                self._tree_view.select_unit_silent(first)
 
     # ============================================================
     # 刷新
