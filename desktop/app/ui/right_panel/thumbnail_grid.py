@@ -280,6 +280,20 @@ class FolderCardModel(QAbstractListModel):
             return self._pixmaps.get(row)
         return None
 
+    def set_sort(self, field: str, ascending: bool = True) -> None:
+        """按字段排序: 'name'/'size'/'date'。"""
+        if not self._data:
+            return
+        self.beginResetModel()
+        rev = not ascending
+        if field == "name":
+            self._data.sort(key=lambda x: x.get("name", "").lower(), reverse=rev)
+        elif field == "size":
+            self._data.sort(key=lambda x: x.get("total_size", 0), reverse=rev)
+        elif field == "date":
+            self._data.sort(key=lambda x: x.get("created_at", ""), reverse=rev)
+        self.endResetModel()
+
     def add_thumb(self, row: int, pixmap: QPixmap) -> None:
         self._pixmaps[row] = pixmap
         idx = self.index(row, 0)
@@ -295,10 +309,12 @@ class ThumbnailGridView(QListView):
 
     file_double_clicked = Signal(int)
     file_selected = Signal(int)
+    folder_selected = Signal(int)  # 单击文件夹卡片 → 左侧高亮
     folder_entered = Signal(int)  # 双击文件夹卡片 → 进入该单元
     back_requested = Signal()     # 空白区域双击 → 返回上一级
     preview_requested = Signal(int, str, str)  # file_id, file_path, media_type
     cover_from_file_requested = Signal(str)    # 右键图片 → 设为此单元封面
+    file_selected_in_grid = Signal(int)        # file_id — 网格中单击文件时发射
 
     def __init__(self, model: ThumbnailGridModel, config: AppConfig,
                  parent=None) -> None:
@@ -327,6 +343,7 @@ class ThumbnailGridView(QListView):
 
         self.doubleClicked.connect(self._on_double_clicked)
         self.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self.selectionModel().selectionChanged.connect(self._on_any_selection_changed)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self._saved_scroll = 0  # 返回文件夹卡片时恢复的滚动位置
@@ -381,6 +398,18 @@ class ThumbnailGridView(QListView):
         self._cancel_all_workers()
         self.setModel(self._file_model)
         self._file_model.set_files([])
+
+    def select_file_by_id(self, file_id: int) -> None:
+        """选中指定 ID 的文件缩略图。"""
+        model = self.model()
+        if isinstance(model, FolderCardModel):
+            return
+        for row in range(model.rowCount()):
+            idx = model.index(row, 0)
+            if model.data(idx, Qt.ItemDataRole.UserRole + 1) == file_id:
+                self.setCurrentIndex(idx)
+                self.scrollTo(idx)
+                return
 
     def refresh(self) -> None:
         self.update()
@@ -442,6 +471,20 @@ class ThumbnailGridView(QListView):
         fid = model.data(idxs[0], Qt.ItemDataRole.UserRole + 1)
         if fid:
             self.file_selected.emit(fid)
+            if not isinstance(model, FolderCardModel):
+                self.file_selected_in_grid.emit(fid)
+
+    @Slot()
+    def _on_any_selection_changed(self, selected, deselected) -> None:
+        """监听选中变化：文件夹卡片模式 → 发射 folder_selected。"""
+        indexes = selected.indexes()
+        if not indexes:
+            return
+        model = self.model()
+        if isinstance(model, FolderCardModel):
+            unit_id = model.data(indexes[0], Qt.ItemDataRole.UserRole + 1)
+            if unit_id:
+                self.folder_selected.emit(unit_id)
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
