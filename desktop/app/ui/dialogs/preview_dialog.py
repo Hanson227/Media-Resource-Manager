@@ -5,10 +5,8 @@ Quick Look 预览对话框 —— 空格键快速预览图片和视频。
 图片：QPixmap 自适应缩放
 视频：QMediaPlayer（含音频），备选 OpenCV 逐帧
 键盘：
-  ← →    视频快进/快退（默认 5 秒）或切换文件（非视频）
+  ← →    短按跳转 N%，长按 2x 倍速播放
   ↑ ↓    切换上一个/下一个文件
-  长按 ←  加速播放（2 秒后增至 2 倍步长）
-  长按 →  加速播放（2 秒后增至 2 倍步长）
   Space   关闭
   Escape  关闭
 """
@@ -39,16 +37,52 @@ except ImportError:
     logger.info("QtMultimedia 不可用，视频预览将回退到无音频模式")
 
 
+class _KeyHoldTimer:
+    """按键长按检测：长按时控制播放速度。"""
+
+    def __init__(self, player_getter, target_rate: float):
+        self._get_player = player_getter
+        self._target_rate = target_rate
+        self._active = False
+
+    def start(self) -> None:
+        player = self._get_player()
+        if not player:
+            return
+        self._active = True
+        player.setPlaybackRate(self._target_rate)
+
+    def stop(self) -> None:
+        if not self._active:
+            return
+        self._active = False
+        player = self._get_player()
+        if player:
+            player.setPlaybackRate(1.0)
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+
 class QuickLookPreviewDialog(QDialog):
     """空格快速预览对话框。"""
 
     def __init__(self, file_list: list[dict], current_index: int = 0,
-                 seek_step_sec: int = 5, parent=None) -> None:
+                 seek_percent: int = 5, parent=None) -> None:
         super().__init__(parent)
         self._file_list = file_list
         self._current_index = current_index
-        self._seek_step_sec = seek_step_sec
+        self._seek_percent = seek_percent
         self._seeking = False
+        self._hold_timer = QTimer()
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.setInterval(300)  # 300ms 区分短按和长按
+        self._hold_key = 0  # 0=none, Qt.Key_Left, Qt.Key_Right
+
+        # 长按变速（左=0.5x慢放，右=2.0x快放）
+        self._left_hold = _KeyHoldTimer(lambda: self._player, target_rate=0.5)
+        self._right_hold = _KeyHoldTimer(lambda: self._player, target_rate=2.0)
 
         # QMediaPlayer
         self._player = None
@@ -145,7 +179,7 @@ class QuickLookPreviewDialog(QDialog):
         )
         bottom_layout.addWidget(self._info_label)
         bottom_layout.addStretch()
-        hint_label = QLabel("← → 跳转 5%  |  ↑ ↓ 切换文件  |  Space/Esc 关闭")
+        hint_label = QLabel("← → 短按跳转 长按变速  |  ↑ ↓ 切换文件  |  Space/Esc 关闭")
         hint_label.setStyleSheet(
             f"color: {OVERLAY_0}; font-size: 11px; background: transparent;"
         )
@@ -400,7 +434,7 @@ class QuickLookPreviewDialog(QDialog):
             if duration <= 0:
                 self._navigate(-1 if direction < 0 else 1)
                 return
-            step_ms = max(3000, int(duration * 0.05))
+            step_ms = max(3000, int(duration * self._seek_percent / 100))
             target = self._player.position() + direction * step_ms
             target = max(0, min(target, duration))
             self._player.setPosition(target)
@@ -409,7 +443,7 @@ class QuickLookPreviewDialog(QDialog):
             if duration_frames <= 0:
                 self._navigate(-1 if direction < 0 else 1)
                 return
-            step_frames = max(int(self._fps * 3), int(duration_frames * 0.05))
+            step_frames = max(int(self._fps * 3), int(duration_frames * self._seek_percent / 100))
             current_frame = self._cap.get(self._cv2.CAP_PROP_POS_FRAMES)
             target_frame = current_frame + direction * step_frames
             target_frame = max(0, min(target_frame, duration_frames - 1))
@@ -421,27 +455,54 @@ class QuickLookPreviewDialog(QDialog):
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
         if key in (Qt.Key.Key_Space, Qt.Key.Key_Escape):
+            self._hold_timer.stop()
             self._stop_video()
             self.close()
         elif key == Qt.Key.Key_Up:
+            self._hold_timer.stop()
             self._navigate(-1)
         elif key == Qt.Key.Key_Down:
+            self._hold_timer.stop()
             self._navigate(1)
         elif key == Qt.Key.Key_Left:
+            self._hold_timer.stop()
             if not self._player and self._cap is None:
                 self._navigate(-1)
             else:
+                self._hold_key = Qt.Key.Key_Left
                 self._seek_video_proportional(-1)
+                self._hold_timer.timeout.connect(self._on_hold_triggered, Qt.ConnectionType.SingleShotConnection)
+                self._hold_timer.start()
         elif key == Qt.Key.Key_Right:
+            self._hold_timer.stop()
             if not self._player and self._cap is None:
                 self._navigate(1)
             else:
+                self._hold_key = Qt.Key.Key_Right
                 self._seek_video_proportional(1)
+                self._hold_timer.timeout.connect(self._on_hold_triggered, Qt.ConnectionType.SingleShotConnection)
+                self._hold_timer.start()
         else:
             super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event) -> None:
+        key = event.key()
+        if key == Qt.Key.Key_Left:
+            self._hold_key = 0
+            self._hold_timer.stop()
+            self._left_hold.stop()
+        elif key == Qt.Key.Key_Right:
+            self._hold_key = 0
+            self._hold_timer.stop()
+            self._right_hold.stop()
         super().keyReleaseEvent(event)
+
+    def _on_hold_triggered(self) -> None:
+        """长按触发：启动倍速播放。"""
+        if self._hold_key == Qt.Key.Key_Left:
+            self._left_hold.start()
+        elif self._hold_key == Qt.Key.Key_Right:
+            self._right_hold.start()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
