@@ -155,13 +155,38 @@ class FolderTreeModel(QAbstractItemModel):
                     return child
         return None
 
+    def _find_unit_parent_index(self, unit_node: TreeNode) -> QModelIndex:
+        """查找用于 beginInsertRows/beginRemoveRows 的父级 QModelIndex。
+
+        对文件节点返回单元索引，对单元节点返回单元自身的索引（作为文件子节点的 parent）。
+        """
+        if unit_node.node_subtype == "file":
+            # 文件节点 → 父节点是单元
+            for r_idx, root in enumerate(self._roots):
+                for c_idx, child in enumerate(root.children):
+                    if child.node_type == "unit" and child.children:
+                        for fn in child.children:
+                            if fn.node_id == unit_node.node_id:
+                                return self.createIndex(c_idx, 0, child)
+            return QModelIndex()
+        # 单元节点 → 返回单元自身的 QModelIndex（作为文件子节点的父节点）
+        for r_idx, root in enumerate(self._roots):
+            for c_idx, child in enumerate(root.children):
+                if child.node_id == unit_node.node_id:
+                    return self.createIndex(c_idx, 0, child)
+        return QModelIndex()
+
     def expand_unit(self, unit_id: int, files: list) -> None:
-        """加载单元下的文件作为树节点子项。"""
+        """加载单元下的文件作为树节点子项（使用 beginInsertRows）。"""
         node = self.get_node_by_unit_id(unit_id)
         if not node:
             return
-        self.beginResetModel()
-        node.children = [
+        if node.children:
+            return  # 已展开，不做重复操作
+        parent = self._find_unit_parent_index(node)
+        if not parent.isValid():
+            return
+        new_children = [
             TreeNode(
                 node_type="unit",
                 node_subtype="file",
@@ -172,15 +197,22 @@ class FolderTreeModel(QAbstractItemModel):
             )
             for f in files[:200]
         ]
-        self.endResetModel()
+        self.beginInsertRows(parent, 0, len(new_children) - 1)
+        node.children = new_children
+        self.endInsertRows()
 
     def collapse_unit(self, unit_id: int) -> None:
-        """卸载文件子节点。"""
+        """卸载文件子节点（使用 beginRemoveRows）。"""
         node = self.get_node_by_unit_id(unit_id)
-        if node:
-            self.beginResetModel()
-            node.children = []
-            self.endResetModel()
+        if not node or not node.children:
+            return
+        parent = self._find_unit_parent_index(node)
+        if not parent.isValid():
+            return
+        count = len(node.children)
+        self.beginRemoveRows(parent, 0, count - 1)
+        node.children = []
+        self.endRemoveRows()
 
     # ============================================================
     # QAbstractItemModel 实现
@@ -263,7 +295,8 @@ class FolderTreeModel(QAbstractItemModel):
                     if node.status == "merged":
                         return ""
                     from app.utils.file_helpers import format_size
-                    return f"{node.file_count} 个 · {format_size(node.total_size)}"
+                    date_s = f" {node.created_at[:10]} │" if node.created_at else ""
+                    return f"{date_s}  {node.file_count} 个 · {format_size(node.total_size)}"
                 elif node.node_type == "root":
                     active = sum(1 for c in node.children if c.status == "active")
                     return f"{active} 个片段" if active else ""
@@ -469,6 +502,7 @@ class FolderTreeView(QTreeView):
 
     def select_tree_node_by_file_id(self, file_id: int) -> None:
         """在展开的树中选中指定的文件节点。"""
+        self.expandAll()
         model = self._model
         for root_row, root in enumerate(model._roots):
             root_idx = model.index(root_row, 0)
@@ -487,6 +521,7 @@ class FolderTreeView(QTreeView):
                                 if sel:
                                     sel.blockSignals(True)
                                 self.setCurrentIndex(file_idx)
+                                self.scrollTo(file_idx)
                                 if sel:
                                     sel.blockSignals(False)
                                 return
