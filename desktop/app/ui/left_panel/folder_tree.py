@@ -373,6 +373,7 @@ class FolderTreeView(QTreeView):
     """
 
     unit_selected = Signal(list)
+    folder_single_clicked = Signal(int)   # 单击文件夹节点 → 显示文件夹卡片（不进入）
     unit_double_clicked = Signal(int)
     merge_requested = Signal(int, list)
     split_requested = Signal(int)
@@ -404,7 +405,6 @@ class FolderTreeView(QTreeView):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.expandAll()
         self.selectionModel().selectionChanged.connect(self._on_selection_changed)
-        self.selectionModel().selectionChanged.connect(self._on_tree_file_selected)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self.doubleClicked.connect(self._on_double_clicked)
         logger.info("文件夹树视图初始化完成")
@@ -453,6 +453,26 @@ class FolderTreeView(QTreeView):
                     self.setCurrentIndex(child_idx)
                     return
 
+    def select_unit_silent(self, unit_id: int) -> None:
+        """高亮树节点但不发射 unit_selected 信号。
+        用于右侧文件夹卡片单击联动（仅需高亮同步，不需加载文件）。"""
+        model = self._model
+        sel = self.selectionModel()
+        if sel:
+            sel.blockSignals(True)
+        try:
+            for root_row, root in enumerate(model._roots):
+                for child_row, child in enumerate(root.children):
+                    if child.node_id == unit_id:
+                        root_idx = model.index(root_row, 0)
+                        child_idx = model.index(child_row, 0, root_idx)
+                        self.setCurrentIndex(child_idx)
+                        self.scrollTo(child_idx)
+                        return
+        finally:
+            if sel:
+                sel.blockSignals(False)
+
     def selected_unit_ids(self) -> list[int]:
         """获取当前选中项对应的所有资源单元 ID（不触发信号）。"""
         unit_ids: set[int] = set()
@@ -475,16 +495,38 @@ class FolderTreeView(QTreeView):
 
     @Slot()
     def _on_selection_changed(self) -> None:
+        """树选择变化：按节点类型分发不同信号。
+
+        - 文件节点 → file_selected_from_tree(file_id)
+        - 文件夹节点 → folder_single_clicked(unit_id)
+        - 根/收藏节点 → unit_selected(list[unit_ids])
+        """
         indexes = self.selectedIndexes()
         if not indexes:
             return
-        unit_ids: set[int] = set()
-        for idx in indexes:
-            if idx.column() != 0:
-                continue
-            ids = self._model.get_selected_units(idx)
-            unit_ids.update(ids)
-        if unit_ids:
+        idx = next((i for i in indexes if i.column() == 0), None)
+        if idx is None:
+            return
+
+        node = idx.internalPointer()
+        if not node:
+            return
+
+        # 文件节点 → 仅发射文件选中信号
+        if node.node_type == "unit" and node.node_subtype == "file":
+            self.file_selected_from_tree.emit(node.node_id)
+            return
+
+        # 获取文件夹/根的 unit IDs
+        unit_ids = self._model.get_selected_units(idx)
+        if not unit_ids:
+            return
+
+        if node.node_type == "unit":
+            # 文件夹节点 → 发射 folder_single_clicked（显示文件夹卡片）
+            self.folder_single_clicked.emit(unit_ids[0])
+        elif node.node_type in ("root", "favorites"):
+            # 根节点 → 发射 unit_selected（显示文件夹卡片）
             self.unit_selected.emit(list(unit_ids))
 
     @Slot()
@@ -500,9 +542,9 @@ class FolderTreeView(QTreeView):
         if node and node.node_subtype == "file":
             self.file_selected_from_tree.emit(node.node_id)
 
-    def select_tree_node_by_file_id(self, file_id: int) -> None:
-        """在展开的树中选中指定的文件节点。"""
-        self.expandAll()
+    def select_tree_node_by_file_id(self, file_id: int) -> bool:
+        """选中指定文件 ID 对应的树节点。只展开目标路径，不 expandAll。
+        返回 True 表示找到并选中，False 表示未找到。"""
         model = self._model
         for root_row, root in enumerate(model._roots):
             root_idx = model.index(root_row, 0)
@@ -510,21 +552,24 @@ class FolderTreeView(QTreeView):
                 continue
             for child_row, child in enumerate(root.children):
                 if child.node_type == "unit" and child.children:
-                    for file_row, file_node in enumerate(child.children):
-                        if file_node.node_id == file_id:
+                    for f_row, f_node in enumerate(child.children):
+                        if f_node.node_id == file_id:
+                            # 仅展开目标路径
+                            self.expand(root_idx)
                             unit_idx = model.index(child_row, 0, root_idx)
-                            if not unit_idx.isValid():
-                                continue
-                            file_idx = model.index(file_row, 0, unit_idx)
-                            if file_idx.isValid():
-                                sel = self.selectionModel()
-                                if sel:
-                                    sel.blockSignals(True)
-                                self.setCurrentIndex(file_idx)
-                                self.scrollTo(file_idx)
-                                if sel:
-                                    sel.blockSignals(False)
-                                return
+                            if unit_idx.isValid():
+                                self.expand(unit_idx)
+                                file_idx = model.index(f_row, 0, unit_idx)
+                                if file_idx.isValid():
+                                    sel = self.selectionModel()
+                                    if sel:
+                                        sel.blockSignals(True)
+                                    self.setCurrentIndex(file_idx)
+                                    self.scrollTo(file_idx)
+                                    if sel:
+                                        sel.blockSignals(False)
+                                    return True
+        return False
 
     @Slot()
     def _on_context_menu(self, pos) -> None:
