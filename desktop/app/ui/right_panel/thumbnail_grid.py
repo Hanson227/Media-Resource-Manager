@@ -407,8 +407,13 @@ class ThumbnailGridView(QListView):
         for row in range(model.rowCount()):
             idx = model.index(row, 0)
             if model.data(idx, Qt.ItemDataRole.UserRole + 1) == file_id:
+                sel = self.selectionModel()
+                if sel:
+                    sel.blockSignals(True)
                 self.setCurrentIndex(idx)
                 self.scrollTo(idx)
+                if sel:
+                    sel.blockSignals(False)
                 return
 
     def refresh(self) -> None:
