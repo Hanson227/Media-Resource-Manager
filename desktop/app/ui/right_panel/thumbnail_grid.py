@@ -412,6 +412,24 @@ class ThumbnailGridView(QListView):
                     sel.blockSignals(True)
                 self.setCurrentIndex(idx)
                 self.scrollTo(idx)
+                self.setFocus()  # 确保键盘焦点在网格，空格预览生效
+                if sel:
+                    sel.blockSignals(False)
+                return
+
+    def select_folder_card_by_unit_id(self, unit_id: int) -> None:
+        """在文件夹卡片模式中选中指定 unit_id 的卡片并滚动到可视位置。"""
+        model = self.model()
+        if not isinstance(model, FolderCardModel):
+            return
+        for row in range(model.rowCount()):
+            idx = model.index(row, 0)
+            if model.data(idx, Qt.ItemDataRole.UserRole + 1) == unit_id:
+                sel = self.selectionModel()
+                if sel:
+                    sel.blockSignals(True)
+                self.setCurrentIndex(idx)
+                self.scrollTo(idx)
                 if sel:
                     sel.blockSignals(False)
                 return
