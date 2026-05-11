@@ -472,7 +472,7 @@ class MainWindow(QMainWindow):
         # ---- 自动选中第一个文件 ----
         if self._grid_model.file_list:
             first_id = self._grid_model.file_list[0]["id"]
-            from PySide6.QtCore import QTimer
+            # 50ms 延迟确保 load_unit 后的模型切换完成布局
             QTimer.singleShot(50, lambda fid=first_id: self._grid_view.select_file_by_id(fid))
             QTimer.singleShot(50, lambda fid=first_id: self._tree_view.select_tree_node_by_file_id(fid))
 
@@ -535,7 +535,6 @@ class MainWindow(QMainWindow):
         if unit_id:
             try:
                 model.collapse_unit(unit_id)
-                from PySide6.QtCore import QTimer
                 QTimer.singleShot(0, lambda: self._tree_view.expandToDepth(1))
             except Exception as e:
                 logger.error(f"收起单元文件树失败: {e}")
@@ -547,14 +546,28 @@ class MainWindow(QMainWindow):
             root_idx = model.index(row, 0)
             unit_ids = model.get_selected_units(root_idx)
             if unit_id and unit_id in unit_ids:
-                self._tree_view.setCurrentIndex(root_idx)
-                # 强制刷新为文件夹卡片（即使根已选中也生效）
+                # 阻塞信号避免 setCurrentIndex 触发 unit_selected 导致重复加载
+                sel = self._tree_view.selectionModel()
+                if sel:
+                    sel.blockSignals(True)
+                try:
+                    self._tree_view.setCurrentIndex(root_idx)
+                finally:
+                    if sel:
+                        sel.blockSignals(False)
                 self._show_folder_cards(unit_ids)
                 return
         # 回退：选第一个根
         root_idx = model.index(0, 0)
         if root_idx.isValid():
-            self._tree_view.setCurrentIndex(root_idx)
+            sel = self._tree_view.selectionModel()
+            if sel:
+                sel.blockSignals(True)
+            try:
+                self._tree_view.setCurrentIndex(root_idx)
+            finally:
+                if sel:
+                    sel.blockSignals(False)
 
     @Slot(list)
     def _on_unit_selected(self, unit_ids: list[int]) -> None:
@@ -803,6 +816,7 @@ class MainWindow(QMainWindow):
 
         try:
             self._grid_view.clear()
+            self._current_expanded_unit_id = None
             # 先清理缓存，再删数据库
             from app.services.cleanup_service import CleanupService
             CleanupService.remove_root_thumbnails(root_id)
@@ -1021,6 +1035,7 @@ class MainWindow(QMainWindow):
                 self._hash_worker.wait(3000)
 
             reset_db(self._config.db_path)
+            self._current_expanded_unit_id = None
             self._tree_view.refresh_model()
             self._grid_view.load_unit(0)  # 清空网格
             self._right_header.setText("资源单元视图")
