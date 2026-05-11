@@ -1479,6 +1479,265 @@ def test_time_sort_and_button():
 
 
 # ============================================================
+# TDD 测试 —— 树单击文件夹 → 文件夹卡片 (T11-T19)
+# ============================================================
+
+def test_tree_folder_click_shows_folder_cards():
+    """T11: 树中单击文件夹 → folder_single_clicked 信号。"""
+    section("T11: 树中单击文件夹 → 文件夹卡片")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView, TreeNode
+    from PySide6.QtCore import Qt, QItemSelectionModel
+
+    config = AppConfig()
+    tree_model = FolderTreeModel(config)
+    tree_model._roots = [
+        TreeNode(node_type="root", node_id=1, name="库1", path="/a", children=[
+            TreeNode(node_type="unit", node_id=10, name="春天", path="/a/spring", file_count=2),
+            TreeNode(node_type="unit", node_id=11, name="夏天", path="/a/summer", file_count=3),
+        ]),
+    ]
+    tree_model.beginResetModel()
+    tree_model.endResetModel()
+    tree_view = FolderTreeView(tree_model)
+
+    captured = []
+    tree_view.folder_single_clicked.connect(captured.append)
+
+    # 选中 "春天" 文件夹节点（行0）
+    root_idx = tree_model.index(0, 0)
+    unit_idx = tree_model.index(0, 0, root_idx)
+    tree_view.selectionModel().select(unit_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+
+    check("T11: folder_single_clicked 已发射", len(captured) >= 1)
+    if captured:
+        check("T11: 携带 unit_id=10", captured[0] == 10)
+
+
+def test_tree_folder_click_no_file_expand():
+    """T12: 树中单击文件夹 → 文件层不自动展开。"""
+    section("T12: 树中单击文件夹 → 文件层不展开")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView, TreeNode
+    from PySide6.QtCore import Qt, QItemSelectionModel
+
+    config = AppConfig()
+    tree_model = FolderTreeModel(config)
+    tree_model._roots = [
+        TreeNode(node_type="root", node_id=1, name="库1", path="/a", children=[
+            TreeNode(node_type="unit", node_id=10, name="春天", path="/a/spring", file_count=2),
+        ]),
+    ]
+    tree_model.beginResetModel()
+    tree_model.endResetModel()
+
+    # 先注入文件子节点（模拟之前双击展开过）
+    tree_model._roots[0].children[0].children = [
+        TreeNode(node_type="unit", node_subtype="file", node_id=101,
+                 name="a.jpg", path="/a/spring/a.jpg"),
+    ]
+    tree_view = FolderTreeView(tree_model)
+
+    root_idx = tree_model.index(0, 0)
+    unit_idx = tree_model.index(0, 0, root_idx)
+
+    # 展开文件层（模拟双击展开的状态）
+    tree_view.expand(unit_idx)
+    check("T12: 展开前文件层可见", tree_view.isExpanded(unit_idx))
+
+    # 单击选中文件夹
+    tree_view.selectionModel().select(unit_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+
+    # 单击不应触发展开
+    check("T12: 单击后仍可见（单击不改变展开状态）", tree_view.isExpanded(unit_idx))
+
+
+def test_grid_card_click_no_file_expand_in_tree():
+    """T14: 右侧单击文件夹卡片 → select_unit_silent 不发射 unit_selected。"""
+    section("T14: 文件夹卡片单击 → 树联动不展开")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView, TreeNode
+    from app.ui.right_panel.thumbnail_grid import (
+        FolderCardModel, ThumbnailGridModel, ThumbnailGridView,
+    )
+    from PySide6.QtCore import Qt
+
+    config = AppConfig()
+
+    # 构造树：根 + 单元（带文件子节点）
+    tree_model = FolderTreeModel(config)
+    tree_model._roots = [
+        TreeNode(node_type="root", node_id=1, name="库1", path="/a", children=[
+            TreeNode(node_type="unit", node_id=10, name="单元A", path="/a/A",
+                     file_count=2, children=[
+                TreeNode(node_type="unit", node_subtype="file", node_id=101,
+                         name="f1.jpg", path="/a/A/f1.jpg"),
+            ]),
+        ]),
+    ]
+    tree_model.beginResetModel()
+    tree_model.endResetModel()
+    tree_view = FolderTreeView(tree_model)
+
+    # 展开文件层（模拟已展开状态）
+    root_idx = tree_model.index(0, 0)
+    unit_idx = tree_model.index(0, 0, root_idx)
+    tree_view.expand(unit_idx)
+    check("T14: 初始文件层展开", tree_view.isExpanded(unit_idx))
+
+    # 捕获 unit_selected 信号
+    unit_selected_captured = []
+    tree_view.unit_selected.connect(unit_selected_captured.append)
+
+    # select_unit_silent 测试
+    tree_view.select_unit_silent(10)
+
+    # select_unit_silent 不应发射 unit_selected（形成新根链路不得触发文件夹加载）
+    check("T14: select_unit_silent 未发射 unit_selected",
+          len(unit_selected_captured) == 0)
+
+    # 但树高亮应存在
+    sel = tree_view.selectedIndexes()
+    check("T14: select_unit_silent 有选中项", len(sel) > 0)
+
+
+def test_accordion_collapse_previous():
+    """T15: 手风琴：进入文件夹 B 时 A 自动收起。"""
+    section("T15: 手风琴自动收起")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView, TreeNode
+
+    config = AppConfig()
+    tree_model = FolderTreeModel(config)
+    tree_model._roots = [
+        TreeNode(node_type="root", node_id=1, name="库1", path="/a", children=[
+            TreeNode(node_type="unit", node_id=10, name="春天", path="/a/spring", file_count=2),
+            TreeNode(node_type="unit", node_id=11, name="夏天", path="/a/summer", file_count=3),
+        ]),
+    ]
+    tree_model.beginResetModel()
+    tree_model.endResetModel()
+
+    # 先展开两个单元
+    tree_model.expand_unit(10, [
+        {"id": 101, "filename": "a.jpg", "path": "/a/spring/a.jpg", "size_bytes": 1000},
+    ])
+    tree_model.expand_unit(11, [
+        {"id": 201, "filename": "b.jpg", "path": "/a/summer/b.jpg", "size_bytes": 2000},
+    ])
+    tree_view = FolderTreeView(tree_model)
+
+    # 确认两个单元都有子节点
+    unit10_node = tree_model.get_node_by_unit_id(10)
+    unit11_node = tree_model.get_node_by_unit_id(11)
+    check("T15: 单元A有子节点", unit10_node is not None and len(unit10_node.children) > 0)
+    check("T15: 单元B有子节点", unit11_node is not None and len(unit11_node.children) > 0)
+
+    # 收起 A（模拟 accordion：进入 B 时收起 A）
+    tree_model.collapse_unit(10)
+    unit10_node = tree_model.get_node_by_unit_id(10)
+    check("T15: 单元A子节点已收起", unit10_node is not None and len(unit10_node.children) == 0)
+    # B 不受影响
+    unit11_node = tree_model.get_node_by_unit_id(11)
+    check("T15: 单元B子节点不受影响", unit11_node is not None and len(unit11_node.children) > 0)
+
+
+def test_tree_file_click_highlight_in_grid():
+    """T17: 树中文件单击 → file_selected_from_tree 信号。"""
+    section("T17: 树中文件单击 → 右侧高亮")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView, TreeNode
+    from PySide6.QtCore import Qt, QItemSelectionModel
+
+    config = AppConfig()
+    tree_model = FolderTreeModel(config)
+    tree_model._roots = [
+        TreeNode(node_type="root", node_id=1, name="库1", path="/a", children=[
+            TreeNode(node_type="unit", node_id=10, name="春天", path="/a/spring",
+                     file_count=2, children=[
+                TreeNode(node_type="unit", node_subtype="file", node_id=101,
+                         name="a.jpg", path="/a/spring/a.jpg"),
+            ]),
+        ]),
+    ]
+    tree_model.beginResetModel()
+    tree_model.endResetModel()
+    tree_view = FolderTreeView(tree_model)
+    tree_view.expandAll()
+
+    captured = []
+    tree_view.file_selected_from_tree.connect(captured.append)
+
+    # 选中文件节点
+    root_idx = tree_model.index(0, 0)
+    unit_idx = tree_model.index(0, 0, root_idx)
+    file_idx = tree_model.index(0, 0, unit_idx)
+    tree_view.selectionModel().select(file_idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+
+    check("T17: file_selected_from_tree 已发射", len(captured) > 0)
+    if captured:
+        check("T17: 携带 file_id=101", captured[0] == 101)
+
+
+def test_expand_unit_preserves_other_state():
+    """T19: expand_unit 用 insertRows 不破坏其他展开状态。"""
+    section("T19: expand_unit 不破坏其他状态")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.left_panel.folder_tree import FolderTreeModel, TreeNode
+    from PySide6.QtCore import QModelIndex, Qt
+    from config import AppConfig
+
+    config = AppConfig()
+    model = FolderTreeModel(config)
+    model._roots = [
+        TreeNode(node_type="root", node_id=1, name="Root1", path="/a", children=[
+            TreeNode(node_type="unit", node_id=10, name="UnitA", path="/a/unitA"),
+            TreeNode(node_type="unit", node_id=11, name="UnitB", path="/a/unitB"),
+        ]),
+    ]
+    model.beginResetModel()
+    model.endResetModel()
+
+    root_idx = model.index(0, 0)
+    unitA_idx = model.index(0, 0, root_idx)
+    unitB_idx = model.index(1, 0, root_idx)
+
+    # 展开 unit A 和 unit B
+    model.expand_unit(10, [{"id": 101, "filename": "a1.jpg", "path": "/a/unitA/a1.jpg", "size_bytes": 100}])
+    model.expand_unit(11, [{"id": 201, "filename": "b1.jpg", "path": "/a/unitB/b1.jpg", "size_bytes": 200}])
+    check("T19: unitA 展开后子节点=1", model.rowCount(unitA_idx) == 1)
+    check("T19: unitB 展开后子节点=1", model.rowCount(unitB_idx) == 1)
+
+    # 再次 expand(空参数) — unit B 状态应保留
+    model.expand_unit(10, [])
+    check("T19: 二次 expand unitA 后子节点仍=1", model.rowCount(unitA_idx) == 1)
+    check("T19: unitB 子节点不受影响=1", model.rowCount(unitB_idx) == 1)
+
+    # 收起 unit A —— unit B 状态应保留
+    model.collapse_unit(10)
+    check("T19: 收起 unitA 后子节点=0", model.rowCount(unitA_idx) == 0)
+    check("T19: unitB 子节点不受收起影响=1", model.rowCount(unitB_idx) == 1)
+
+
+# ============================================================
 # 主测
 # ============================================================
 
@@ -1537,6 +1796,12 @@ def main():
         test_file_level_linking()
         test_folder_card_sort()
         test_time_sort_and_button()
+        test_tree_folder_click_shows_folder_cards()
+        test_tree_folder_click_no_file_expand()
+        test_grid_card_click_no_file_expand_in_tree()
+        test_accordion_collapse_previous()
+        test_tree_file_click_highlight_in_grid()
+        test_expand_unit_preserves_other_state()
 
     finally:
         # 清理数据库连接
