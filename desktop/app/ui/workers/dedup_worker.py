@@ -164,6 +164,9 @@ class DedupWorker(QThread):
             match_types=dup.match_types_str,
         )
 
+        # 清理旧匹配（upsert 可能返回已有 result，旧匹配需要替换）
+        q.delete_file_matches_for_result(db_session, result.id)
+
         # 写入每条文件匹配
         for fm in dup.file_matches:
             q.insert_file_match(
