@@ -183,6 +183,8 @@ class FolderTreeModel(QAbstractItemModel):
             return
         if node.children:
             return  # 已展开，不做重复操作
+        if not files:
+            return
         parent = self._find_unit_parent_index(node)
         if not parent.isValid():
             return

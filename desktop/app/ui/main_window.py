@@ -538,8 +538,9 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, lambda: self._tree_view.expandToDepth(1))
             except Exception as e:
                 logger.error(f"收起单元文件树失败: {e}")
-            self._current_unit_id = None
-            self._current_expanded_unit_id = None
+            finally:
+                self._current_unit_id = None
+                self._current_expanded_unit_id = None
 
         # 遍历所有根，找到包含当前单元的根
         for row in range(model.rowCount()):
@@ -568,6 +569,10 @@ class MainWindow(QMainWindow):
             finally:
                 if sel:
                     sel.blockSignals(False)
+            # 补偿信号阻塞：手动显示文件夹卡片
+            unit_ids = model.get_selected_units(root_idx)
+            if unit_ids:
+                self._show_folder_cards(unit_ids)
 
     @Slot(list)
     def _on_unit_selected(self, unit_ids: list[int]) -> None:
@@ -736,6 +741,8 @@ class MainWindow(QMainWindow):
                 session.flush()
                 logger.info(f"已标记排除: {name} (id={unit_id}, status={unit.status})")
             self._grid_view.clear()
+            self._breadcrumb.hide()
+            self._current_unit_id = None
             self._current_expanded_unit_id = None
             self._tree_view.refresh_model()
             root_idx = self._tree_view.model().index(0, 0)
@@ -816,6 +823,7 @@ class MainWindow(QMainWindow):
 
         try:
             self._grid_view.clear()
+            self._current_unit_id = None
             self._current_expanded_unit_id = None
             # 先清理缓存，再删数据库
             from app.services.cleanup_service import CleanupService
@@ -1035,6 +1043,7 @@ class MainWindow(QMainWindow):
                 self._hash_worker.wait(3000)
 
             reset_db(self._config.db_path)
+            self._current_unit_id = None
             self._current_expanded_unit_id = None
             self._tree_view.refresh_model()
             self._grid_view.load_unit(0)  # 清空网格
