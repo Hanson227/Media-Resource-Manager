@@ -322,7 +322,7 @@ class MainWindow(QMainWindow):
         # ---- 文件树 → 缩略图网格 ----
         self._tree_view.unit_selected.connect(self._on_unit_selected)
         self._tree_view.unit_double_clicked.connect(self._on_unit_double_clicked)
-        self._tree_view.folder_single_clicked.connect(self._on_folder_single_clicked)
+        
 
         # ---- 网格文件夹卡片 → 进入单元 ----
         self._grid_view.folder_entered.connect(self._on_unit_double_clicked)
@@ -493,36 +493,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"加载单元详情失败: {e}")
 
-    @Slot(int)
-    def _on_folder_single_clicked(self, unit_id: int) -> None:
-        """树中单击文件夹 → 显示文件夹卡片并滚动到该卡片。"""
-        self._breadcrumb.hide()
-
-        # 收起之前展开的文件层（accordion）
-        if self._current_expanded_unit_id is not None:
-            try:
-                self._tree_view.model().collapse_unit(self._current_expanded_unit_id)
-            except Exception:
-                pass
-        self._current_expanded_unit_id = None
-        self._current_unit_id = None
-
-        # 找到包含该文件夹的根，显示其所有文件夹卡片
-        model = self._tree_view.model()
-        root_unit_ids = None
-        for row in range(model.rowCount()):
-            root_idx = model.index(row, 0)
-            ids = model.get_selected_units(root_idx)
-            if unit_id in ids:
-                root_unit_ids = ids
-                break
-
-        if root_unit_ids:
-            self._show_folder_cards(root_unit_ids)
-            self._grid_view.select_folder_card_by_unit_id(unit_id)
-        else:
-            self._show_folder_cards([unit_id])
-            self._grid_view.select_folder_card_by_unit_id(unit_id)
 
     @Slot()
     def _on_breadcrumb_back(self) -> None:

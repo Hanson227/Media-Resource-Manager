@@ -375,8 +375,7 @@ class FolderTreeView(QTreeView):
     """
 
     unit_selected = Signal(list)
-    folder_single_clicked = Signal(int)   # 单击文件夹节点 → 显示文件夹卡片（不进入）
-    unit_double_clicked = Signal(int)
+    unit_double_clicked = Signal(int)     # 单击/双击文件夹节点 → 进入文件夹
     merge_requested = Signal(int, list)
     split_requested = Signal(int)
     mark_requested = Signal(str)
@@ -525,8 +524,8 @@ class FolderTreeView(QTreeView):
             return
 
         if node.node_type == "unit":
-            # 文件夹节点 → 发射 folder_single_clicked（显示文件夹卡片）
-            self.folder_single_clicked.emit(unit_ids[0])
+            # 文件夹节点 → 直接进入文件夹（加载文件列表）
+            self.unit_double_clicked.emit(unit_ids[0])
         elif node.node_type in ("root", "favorites"):
             # 根节点 → 发射 unit_selected（显示文件夹卡片）
             self.unit_selected.emit(list(unit_ids))
