@@ -160,6 +160,7 @@ class FolderTreeModel(QAbstractItemModel):
         node = self.get_node_by_unit_id(unit_id)
         if not node:
             return
+        self.beginResetModel()
         node.children = [
             TreeNode(
                 node_type="unit",
@@ -171,14 +172,15 @@ class FolderTreeModel(QAbstractItemModel):
             )
             for f in files[:200]
         ]
-        self.layoutChanged.emit()
+        self.endResetModel()
 
     def collapse_unit(self, unit_id: int) -> None:
         """卸载文件子节点。"""
         node = self.get_node_by_unit_id(unit_id)
         if node:
+            self.beginResetModel()
             node.children = []
-            self.layoutChanged.emit()
+            self.endResetModel()
 
     # ============================================================
     # QAbstractItemModel 实现
@@ -470,13 +472,23 @@ class FolderTreeView(QTreeView):
         model = self._model
         for root_row, root in enumerate(model._roots):
             root_idx = model.index(root_row, 0)
+            if not root_idx.isValid():
+                continue
             for child_row, child in enumerate(root.children):
                 if child.node_type == "unit" and child.children:
                     for file_row, file_node in enumerate(child.children):
                         if file_node.node_id == file_id:
-                            file_idx = model.index(file_row, 0, model.index(child_row, 0, root_idx))
+                            unit_idx = model.index(child_row, 0, root_idx)
+                            if not unit_idx.isValid():
+                                continue
+                            file_idx = model.index(file_row, 0, unit_idx)
                             if file_idx.isValid():
+                                sel = self.selectionModel()
+                                if sel:
+                                    sel.blockSignals(True)
                                 self.setCurrentIndex(file_idx)
+                                if sel:
+                                    sel.blockSignals(False)
                                 return
 
     @Slot()

@@ -1153,10 +1153,9 @@ class MainWindow(QMainWindow):
             # 多根目录：逐个串行扫描，避免 worker 覆盖
             self._start_scan(paths[0])
             for path in paths[1:]:
-                # 等前一个扫描完成再启动下一个
                 if self._scan_worker:
                     self._scan_worker.finished.connect(
-                        lambda p=path: self._start_scan(p),
+                        lambda *args, _p=path: self._start_scan(_p),
                         Qt.ConnectionType.SingleShotConnection,
                     )
 
