@@ -130,8 +130,8 @@ class AppConfig:
     """API 监听端口。"""
 
     # ========== 预览 ==========
-    preview_seek_step: int = 5
-    """预览对话框中左右方向键跳转视频的步长（秒）。"""
+    preview_seek_percent: int = 5
+    """预览对话框中左右方向键每次跳转的视频时长百分比。"""
 
     # ========== SMB 共享 ==========
     smb_share_name_prefix: str = "Media_"
@@ -218,7 +218,7 @@ class AppConfig:
             "api_host": self.api_host,
             "api_port": self.api_port,
             "smb_share_name_prefix": self.smb_share_name_prefix,
-            "preview_seek_step": self.preview_seek_step,
+            "preview_seek_percent": self.preview_seek_percent,
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

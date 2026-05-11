@@ -961,7 +961,7 @@ class MainWindow(QMainWindow):
 
         dlg = QuickLookPreviewDialog(
             file_list, current_index,
-            seek_step_sec=self._config.preview_seek_step,
+            seek_percent=self._config.preview_seek_percent,
             parent=self,
         )
         screen = self.screen().availableGeometry()
