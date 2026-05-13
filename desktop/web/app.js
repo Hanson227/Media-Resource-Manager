@@ -576,6 +576,11 @@ const PreviewPage = {
     onMeta() { if (this.videoEl) this.duration = this.videoEl.duration || 0; },
     /* ---- Gestures ---- */
     onGestureStart(e) {
+      // If video is not playing, delegate to navigation swipe
+      if (this.mediaType === 'video' && !this.playing) {
+        this.onNavSwipeStart(e);
+        return;
+      }
       const t = e.changedTouches && e.changedTouches[0];
       if (!t) return;
       this.gestureStartX = t.clientX;
@@ -604,10 +609,15 @@ const PreviewPage = {
         this.controlsHidden = true;
       }, 200);
     },
-    onGestureEnd() {
+    onGestureEnd(e) {
       clearTimeout(this.gestureTimer);
       this.gestureTimer = null;
       if (this.rewindTimer) { clearInterval(this.rewindTimer); this.rewindTimer = null; }
+      // If video is not playing, delegate to navigation swipe
+      if (this.mediaType === 'video' && !this.playing) {
+        this.onNavSwipeEnd(e);
+        return;
+      }
       // Restore playback rate
       if (this.gestureActive && this.videoEl) { this.videoEl.playbackRate = this.playbackRate; }
       // Handle tap (no long-press, no swipe)
@@ -637,6 +647,11 @@ const PreviewPage = {
       this.startHideTimer();
     },
     onGestureMove(e) {
+      // If video is not playing, delegate to navigation swipe
+      if (this.mediaType === 'video' && !this.playing) {
+        this.onNavSwipeMove(e);
+        return;
+      }
       const t = e.changedTouches && e.changedTouches[0];
       if (!t) return;
       const dx = t.clientX - this.gestureStartX;
