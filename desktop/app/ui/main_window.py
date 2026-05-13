@@ -471,8 +471,11 @@ class MainWindow(QMainWindow):
         self._current_unit_id = unit_id
         self._grid_view.load_unit(unit_id)
         self._breadcrumb.show()
+<<<<<<< HEAD
         # 显示标签筛选栏
         self._tag_bar.reload_tags()
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
 
         # ---- 展开树文件子节点（不 expandAll） ----
         try:
@@ -1174,7 +1177,10 @@ class MainWindow(QMainWindow):
                         "file_count": u.file_count or 0,
                         "total_size": u.total_size or 0,
                         "preview_path": preview_path,
+<<<<<<< HEAD
                         "preview_file_id": preview_file_id,
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
                         "created_at": u.created_at.isoformat() if u.created_at else None,
                     })
                     total_files += u.file_count or 0
@@ -1198,11 +1204,14 @@ class MainWindow(QMainWindow):
     def _on_filter_changed(self, index: int) -> None:
         self._apply_current_filter()
 
+<<<<<<< HEAD
     @Slot(list)
     def _on_tag_filter_changed(self, tag_ids: list[int]) -> None:
         """按标签筛选文件。"""
         self._grid_model.set_tag_filter(tag_ids)
 
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
     def _on_sort(self, field: str) -> None:
         """切换排序。再次点击同字段切换升降序。"""
         current = self._grid_view.model()

@@ -116,7 +116,11 @@ const UnitsPage = {
                   <span v-if="!u.cover_file_id || coverFailed[u.id]" class="mdi mdi-folder-image"></span>
                 </div>
                 <div class="info">
+<<<<<<< HEAD
                   <div class="name">{{ u.name }}<span v-if="u.is_starred" class="star-icon">⭐</span></div>
+=======
+                  <div class="name">{{ u.name }}</div>
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
                   <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}</div>
                 </div>
               </div>
@@ -274,6 +278,7 @@ const UnitFilesPage = {
           <input v-model="searchQuery" type="text" placeholder="搜索文件名..." class="search-input">
           <button v-if="searchQuery" class="search-clear" @click="searchQuery = ''"><span class="mdi mdi-close"></span></button>
         </div>
+<<<<<<< HEAD
         <div class="tag-filter-bar" v-if="allTags.length > 0">
           <button v-for="t in allTags" :key="t.id" class="tag-chip"
             :class="{ active: activeTagIds.includes(t.id) }"
@@ -282,6 +287,8 @@ const UnitFilesPage = {
             {{ t.name }}
           </button>
         </div>
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
         <div class="feed-grid">
           <div v-for="f in sortedFiles" :key="f.id" class="feed-item" @click="preview(f)">
             <div class="thumb-wrap">
@@ -312,6 +319,7 @@ const UnitFilesPage = {
     sortOrder: localStorage.getItem('file_sort_order') || 'asc',
     searchQuery: '',
     refreshing: false,
+<<<<<<< HEAD
     allTags: [],
     activeTagIds: [],
     tagMapping: {},
@@ -330,6 +338,14 @@ const UnitFilesPage = {
         });
       }
       return result;
+=======
+  }},
+  computed: {
+    filteredFiles() {
+      if (!this.searchQuery) return this.files;
+      const q = this.searchQuery.toLowerCase();
+      return this.files.filter(f => f.filename.toLowerCase().includes(q));
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
     },
     sortedFiles() {
       const arr = [...this.filteredFiles];
@@ -384,11 +400,14 @@ const UnitFilesPage = {
       if (this.sortBy !== field) return 'mdi-unfold-more-horizontal';
       return this.sortOrder === 'asc' ? 'mdi-sort-ascending' : 'mdi-sort-descending';
     },
+<<<<<<< HEAD
     toggleTag(tagId) {
       const idx = this.activeTagIds.indexOf(tagId);
       if (idx >= 0) this.activeTagIds.splice(idx, 1);
       else this.activeTagIds.push(tagId);
     },
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
     async refresh() {
       if (this.refreshing) return;
       this.refreshing = true;
@@ -408,6 +427,7 @@ const UnitFilesPage = {
     this.$emit('loading', true);
     try {
       const id = this.$route.params.id;
+<<<<<<< HEAD
       const [data, tagsData, mapData] = await Promise.all([
         api(this.serverUrl, '/api/units/' + id + '/files'),
         api(this.serverUrl, '/api/tags'),
@@ -424,6 +444,11 @@ const UnitFilesPage = {
         }
       }
       this.tagMapping = mapping;
+=======
+      const data = await api(this.serverUrl, '/api/units/' + id + '/files');
+      this.unitName = data.unit_name || '';
+      this.files = data.files || [];
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
     } catch(e) {
       this.files = [];
     } finally {

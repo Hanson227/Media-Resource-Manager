@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TreeNode:
     """树节点的纯数据容器，不从 SQLAlchemy 继承。"""
-    node_type: str           # "root" | "unit"
+    node_type: str           # "root" | "unit" | "favorites"
     node_id: int             # 数据库 ID
     name: str                # 显示名称
     path: str                # 文件夹/文件路径
@@ -79,6 +79,33 @@ class FolderTreeModel(QAbstractItemModel):
                 roots = q.get_all_roots(session)
                 self._roots = []
 
+<<<<<<< HEAD
+=======
+                # 收藏虚拟根节点（仅在有收藏时显示）
+                if starred_units:
+                    fav_node = TreeNode(
+                        node_type="favorites",
+                        node_id=-1,
+                        name=f"★ 收藏  ({len(starred_units)} 个片段)",
+                        path="",
+                    )
+                    for unit in starred_units:
+                        fav_node.children.append(TreeNode(
+                            node_type="unit",
+                            node_id=unit.id,
+                            name=unit.name,
+                            path=unit.path,
+                            file_count=unit.file_count or 0,
+                            total_size=unit.total_size or 0,
+                            is_manual=unit.is_manual or False,
+                            is_starred=True,
+                            status=unit.status or "active",
+                            library_root_id=-1,
+                            created_at=unit.created_at.isoformat() if unit.created_at else None,
+                        ))
+                    self._roots.append(fav_node)
+
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
                 for root in roots:
                     units = q.get_units_by_root(session, root.id)
                     root_name = Path(root.path).name or root.path
@@ -204,7 +231,11 @@ class FolderTreeModel(QAbstractItemModel):
         else:
             pnode = parent.internalPointer()
             if pnode:
+<<<<<<< HEAD
                 if pnode.node_type in ("root",) and row < len(pnode.children):
+=======
+                if pnode.node_type in ("root", "favorites") and row < len(pnode.children):
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
                     return self.createIndex(row, column, pnode.children[row])
                 if pnode.node_type == "unit" and pnode.children and row < len(pnode.children):
                     return self.createIndex(row, column, pnode.children[row])
@@ -239,6 +270,8 @@ class FolderTreeModel(QAbstractItemModel):
             return len(node.children)
         if node and node.node_type == "unit" and node.children:
             return len(node.children)
+        if node and node.node_type == "unit" and node.children:
+            return len(node.children)
         return 0
 
     def columnCount(self, parent=QModelIndex()) -> int:
@@ -254,10 +287,17 @@ class FolderTreeModel(QAbstractItemModel):
         col = index.column()
         if role == Qt.ItemDataRole.DisplayRole:
             if col == self.COL_NAME:
+<<<<<<< HEAD
                 suffix = ""
                 if node.node_type == "unit" and node.node_subtype != "file":
                     if node.is_starred:
                         suffix = " ⭐"
+=======
+                prefix = ""
+                if node.node_type == "unit" and node.node_subtype != "file":
+                    if node.is_starred or node.is_manual:
+                        prefix = "★ "
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
                     elif node.status == "merged":
                         suffix = " ▷"
                 return f"{node.name}{suffix}"
@@ -274,6 +314,11 @@ class FolderTreeModel(QAbstractItemModel):
                 elif node.node_type == "root":
                     active = sum(1 for c in node.children if c.status == "active")
                     return f"{active} 个片段" if active else ""
+<<<<<<< HEAD
+=======
+                elif node.node_type == "favorites":
+                    return f"{len(node.children)} 个收藏"
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
                 return ""
 
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -302,6 +347,11 @@ class FolderTreeModel(QAbstractItemModel):
     def _build_tooltip_text(node: TreeNode) -> str:
         if node.node_type == "root":
             return f"媒体库根目录: {node.path}"
+<<<<<<< HEAD
+=======
+        if node.node_type == "favorites":
+            return "收藏的文件夹，可快速访问常用位置"
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
         if node.node_subtype == "file":
             from app.utils.file_helpers import format_size
             return (
@@ -495,7 +545,11 @@ class FolderTreeView(QTreeView):
         if node.node_type == "unit":
             # 文件夹节点 → 直接进入文件夹（加载文件列表）
             self.unit_double_clicked.emit(unit_ids[0])
+<<<<<<< HEAD
         elif node.node_type == "root":
+=======
+        elif node.node_type in ("root", "favorites"):
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
             # 根节点 → 发射 unit_selected（显示文件夹卡片）
             self.unit_selected.emit(list(unit_ids))
 

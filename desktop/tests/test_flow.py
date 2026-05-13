@@ -285,6 +285,7 @@ def test_save_to_db(scan_result: ScanResult, root: Path):
         check(f"数据库中有 8 个文件 (实际: {total_files})", total_files == 8)
 
 
+<<<<<<< HEAD
 def test_path_revalidation():
     """测试 3.2: 扫描时路径重新校验 — 文件夹移动后旧路径标记排除。"""
     section("测试 3.2: 扫描路径重新校验")
@@ -309,6 +310,8 @@ def test_path_revalidation():
         check("原有活跃单元仍在", any(u.id != fake_unit.id for u in active))
 
 
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
 def test_scanner_nested_promotion():
     """测试 3.5: 扫描器嵌套单子目录提升 + .thumbnails 清理。"""
     section("测试 3.5: 扫描器嵌套优化")
@@ -783,6 +786,7 @@ def test_message_center():
     check("全部已读成功", ok_all)
 
 
+<<<<<<< HEAD
 def test_tags():
     """测试 9.5: 标签 CRUD。"""
     section("测试 9.5: 标签 CRUD")
@@ -863,6 +867,8 @@ def test_heic_converter():
     check("HEIC 导入正常", True)
 
 
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
 def test_thumbnails(root: Path):
     section("测试 6.5: 缩略图生成")
     config = AppConfig()
@@ -893,6 +899,7 @@ def test_thumbnails(root: Path):
     infos = gen.generate_batch(all_imgs[:4], cache_dir)
     check(f"批量生成了 {len(infos)} 个缩略图", len(infos) == min(4, len(all_imgs)))
 
+<<<<<<< HEAD
     # 校验缓存过期：修改源文件后应重新生成
     import time
     orig_mtime = img_path.stat().st_mtime
@@ -920,6 +927,8 @@ def test_thumbnails(root: Path):
     )
     check("不同路径 hash 不同", h1 != h3)
 
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
 def test_api_app():
     section("测试 10: FastAPI 应用创建")
     from config import AppConfig
@@ -1868,6 +1877,7 @@ def test_expand_unit_preserves_other_state():
     check("T19: unitB 子节点不受收起影响=1", model.rowCount(unitB_idx) == 1)
 
 
+<<<<<<< HEAD
 
 def test_file_unit_delete_db():
     """T20: 文件/文件夹删除 DB 层 — delete_media_file + delete_resource_unit。"""
@@ -1989,6 +1999,11 @@ def test_tag_assign_ui():
         qq.delete_tag(session, tag_b_id)
         qq.set_file_tags(session, fid, [])
 
+=======
+# ============================================================
+# 主测
+# ============================================================
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
 
 def main():
     global _passed, _failed
@@ -2018,20 +2033,29 @@ def main():
         test_db_integrity()
         result = test_scanner(temp_root)
         test_save_to_db(result, temp_root)
+<<<<<<< HEAD
         test_path_revalidation()
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
         test_scanner_nested_promotion()
         test_refresh_workflow()
         test_hash_engine(temp_root)
         test_hash_batch(temp_root)
         test_thumbnails(temp_root)
+<<<<<<< HEAD
         test_heic_converter()
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
         test_dedup_engine()
         test_save_dedup_results()
         test_tree_model()
         test_context_menu_lambda_safety()
         test_ui_signal_integration()
         test_message_center()
+<<<<<<< HEAD
         test_tags()
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
         test_api_app()
         test_unit_response_fields()
         test_thumbnail_binary()
@@ -2054,8 +2078,11 @@ def main():
         test_accordion_collapse_previous()
         test_tree_file_click_highlight_in_grid()
         test_expand_unit_preserves_other_state()
+<<<<<<< HEAD
         test_file_unit_delete_db()
         test_tag_assign_ui()
+=======
+>>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
 
     finally:
         # 清理数据库连接
