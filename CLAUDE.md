@@ -111,6 +111,18 @@ desktop/app/
     media_types.py       #   Extension-to-type mapping, is_media_file() helper
 ```
 
+## PySide6 Signal 陷阱
+
+- **`selectionChanged.connect()` 会累积** — 每次 `connect` 都新增一个 handler。切换 model 后必须先 `disconnect` 再 `reconnect`，否则同一次点击会触发 N 次
+- **`blockSignals(True)` 不只是阻止信号** — 在 `QTreeView` 上会连带阻止选中状态的视觉刷新。防信号循环优先用 guard flag（`_syncing: bool`）而不是 `blockSignals`
+- **`setAnimated(True)` + `scrollTo` 不兼容** — 展开动画期间 `scrollTo` 定位到错误位置。程序化展开选中前先 `setAnimated(False)`，完事再恢复
+- **`rglob()` 在 Windows 不区分大小写** — `rglob("*.HEIC")` 和 `rglob("*.heic")` 匹配相同文件。多 pattern 扫描需要用 `set()` 去重
+
+## 历史重写注意事项
+
+- `git filter-branch` 可能复活遗留的合并冲突标记（`<<<<<<<` / `>>>>>>>`）。跑完后必须 `grep -rn "<<<<<<"` 检查所有文件，否则 SyntaxError 潜伏在代码中
+- 受影响文件可能通过 `ast.parse()` 语法检查但 JS 文件需要额外验证
+
 ## Key Design Patterns
 
 - **Frozen dataclasses** for all result/value types (ScanResult, FileHashes, UnitComparisonResult, etc.) — immutability first
@@ -157,3 +169,8 @@ Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desk
 
 4. **三次失败换思路** — 同一个 bug 修两次没好，第三次必须写根因分析文档，
    做架构性质疑（比如这次是"API 不生成缩略图"，而不是"前端显示不对"）。
+
+### UI 视觉验证
+
+- test_flow.py 测不到 UI 视觉效果（选中状态、滚动定位、刷新延迟）
+- 涉及信号链、选中、动画的改动，必须打开软件人工验证视觉行为
