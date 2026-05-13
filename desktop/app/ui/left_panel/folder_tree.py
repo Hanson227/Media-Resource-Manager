@@ -80,6 +80,7 @@ class FolderTreeModel(QAbstractItemModel):
                 self._roots = []
 
                 # 收藏虚拟根节点（仅在有收藏时显示）
+                starred_units = q.get_starred_units(session)
                 if starred_units:
                     fav_node = TreeNode(
                         node_type="favorites",
