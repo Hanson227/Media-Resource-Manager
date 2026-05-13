@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Web 前端页面级功能测试 —— 基于 Playwright 的 Vue SPA 浏览器测试。
 
@@ -13,10 +14,18 @@ Web 前端页面级功能测试 —— 基于 Playwright 的 Vue SPA 浏览器�
 """
 
 import sys
+import io
 import json
 import time
 import threading
 from pathlib import Path
+
+# 编码修复
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -160,11 +169,8 @@ def test_units_page_shows_data(page):
     check("根目录组已渲染", count > 0)
 
     if count > 0:
-        # 展开根目录
-        root_groups.first.locator(".root-header").click()
-        page.wait_for_timeout(500)
-
-        # 验证有单元卡片
+        # 等待数据渲染完毕（单元卡片可能已在 DOM 中，因 group 默认展开）
+        cards_visible = page.locator(".unit-card").first.wait_for(state="attached", timeout=5000)
         unit_cards = page.locator(".unit-card")
         card_count = unit_cards.count()
         check("单元卡片已渲染", card_count > 0)
@@ -200,17 +206,13 @@ def test_unit_files_page(page):
         check("无根目录可测试", True)
         return
 
-    # 展开
-    root_group.locator(".root-header").click()
-    page.wait_for_timeout(500)
-
-    # 点击第一个单元
-    first_card = page.locator(".unit-card").first
-    if first_card.count() == 0:
+    # 等待单元卡片加载后再点击进入
+    unit_card = page.locator(".unit-card").first
+    if unit_card.count() == 0:
         check("无单元可进入", True)
         return
 
-    first_card.click()
+    unit_card.click()
     page.wait_for_timeout(1000)
 
     # 验证进入了文件列表页
@@ -387,8 +389,8 @@ def main():
             page.goto(f"http://127.0.0.1:{_PORT}/")
             page.evaluate(f"""
                 () => {{
-                    localStorage.setItem('server_url', 'http://127.0.0.1:{_PORT}');
-                    localStorage.setItem('pin_unlocked', 'true');
+                    localStorage.setItem('media_server_url', 'http://127.0.0.1:{_PORT}');
+                    localStorage.setItem('media_pin', '');
                 }}
             """)
             page.wait_for_timeout(300)

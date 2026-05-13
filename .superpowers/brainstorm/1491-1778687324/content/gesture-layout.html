@@ -1,0 +1,75 @@
+<h2>预览页手势导航方案</h2>
+<p class="subtitle">图片/视频全屏预览时的左右滑屏逻辑</p>
+
+<div class="split" style="grid-template-columns: 1fr 1fr 1fr; gap: 16px;">
+
+  <!-- Image -->
+  <div class="mockup">
+    <div class="mockup-header">🖼️ 图片预览</div>
+    <div class="mockup-body" style="position:relative; min-height: 300px; background: #1a1a2e; display: flex; align-items: center; justify-content: center;">
+      <div style="position:absolute;left:0;top:0;bottom:0;width:40%;background:rgba(129,140,248,0.15);border-right:2px dashed rgba(129,140,248,0.4);display:flex;align-items:center;justify-content:center;font-size:24px;color:rgba(255,255,255,0.6);">◀</div>
+      <div style="color:rgba(255,255,255,0.3);font-size:40px;">📷</div>
+      <div style="position:absolute;right:0;top:0;bottom:0;width:40%;background:rgba(129,140,248,0.15);border-left:2px dashed rgba(129,140,248,0.4);display:flex;align-items:center;justify-content:center;font-size:24px;color:rgba(255,255,255,0.6);">▶</div>
+      <div style="position:absolute;bottom:8px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.6);padding:4px 12px;border-radius:12px;font-size:12px;color:rgba(255,255,255,0.8);">1 / 15</div>
+    </div>
+    <div style="padding:8px;font-size:12px;color:var(--text-secondary);background:rgba(0,0,0,0.3);">
+      ✅ 左/右滑动 → 上一张/下一张<br>
+      ✅ <strong>始终可用</strong>，不受播放状态影响
+    </div>
+  </div>
+
+  <!-- Video Paused -->
+  <div class="mockup">
+    <div class="mockup-header">🎬 视频 (暂停/未播放)</div>
+    <div class="mockup-body" style="position:relative; min-height: 300px; background: #1a1a2e; display: flex; align-items: center; justify-content: center;">
+      <div style="position:absolute;left:0;top:0;bottom:0;width:40%;background:rgba(129,140,248,0.15);border-right:2px dashed rgba(129,140,248,0.4);display:flex;align-items:center;justify-content:center;font-size:24px;color:rgba(255,255,255,0.6);">◀</div>
+      <div style="color:rgba(255,255,255,0.3);font-size:40px;">⏸️</div>
+      <div style="position:absolute;right:0;top:0;bottom:0;width:40%;background:rgba(129,140,248,0.15);border-left:2px dashed rgba(129,140,248,0.4);display:flex;align-items:center;justify-content:center;font-size:24px;color:rgba(255,255,255,0.6);">▶</div>
+      <div style="position:absolute;bottom:8px;display:flex;gap:4px;align-items:center;background:rgba(0,0,0,0.6);padding:4px 12px;border-radius:12px;font-size:12px;color:rgba(255,255,255,0.8);">
+        <span class="mdi mdi-pause-circle-outline"></span> 暂停中
+      </div>
+    </div>
+    <div style="padding:8px;font-size:12px;color:var(--text-secondary);background:rgba(0,0,0,0.3);">
+      ✅ 左/右滑动 → <strong>切换</strong>上一个/下一个文件<br>
+      ⏹️ 视频已暂停或尚未播放
+    </div>
+  </div>
+
+  <!-- Video Playing -->
+  <div class="mockup">
+    <div class="mockup-header">🎬 视频 (播放中)</div>
+    <div class="mockup-body" style="position:relative; min-height: 300px; background: #1a1a2e; display: flex; align-items: center; justify-content: center;">
+      <div style="position:absolute;left:0;top:0;bottom:0;width:25%;background:rgba(255,107,107,0.1);border-right:2px dashed rgba(255,107,107,0.3);display:flex;align-items:center;justify-content:center;font-size:14px;color:rgba(255,107,107,0.5);">↩<wbr>退</div>
+      <div style="color:rgba(255,255,255,0.3);font-size:40px;">▶️</div>
+      <div style="position:absolute;right:0;top:0;bottom:0;width:25%;background:rgba(129,140,248,0.1);border-left:2px dashed rgba(129,140,248,0.3);display:flex;align-items:center;justify-content:center;font-size:14px;color:rgba(129,140,248,0.5);">进<wbr>🚀</div>
+      <div style="position:absolute;bottom:8px;display:flex;gap:4px;align-items:center;background:rgba(0,0,0,0.6);padding:4px 12px;border-radius:12px;font-size:12px;color:rgba(0,255,0,0.9);">
+        <span class="mdi mdi-play-circle-outline"></span> 播放中
+      </div>
+    </div>
+    <div style="padding:8px;font-size:12px;color:var(--text-secondary);background:rgba(0,0,0,0.3);">
+      ⛔ 左/右滑动 → <strong>快进/快退</strong>（当前行为）<br>
+      ❌ <strong>不切换文件</strong>
+    </div>
+  </div>
+
+</div>
+
+<div class="section">
+  <h3>核心规则</h3>
+  <table style="width:100%;border-collapse:collapse;font-size:13px;">
+    <tr><th style="text-align:left;padding:6px;border-bottom:1px solid var(--border);">媒体类型</th><th style="text-align:left;padding:6px;border-bottom:1px solid var(--border);">播放状态</th><th style="text-align:left;padding:6px;border-bottom:1px solid var(--border);">滑动行为</th></tr>
+    <tr><td style="padding:6px;border-bottom:1px solid var(--border);">图片</td><td style="padding:6px;border-bottom:1px solid var(--border);">—</td><td style="padding:6px;border-bottom:1px solid var(--border);">✅ 切换上一张/下一张</td></tr>
+    <tr><td style="padding:6px;border-bottom:1px solid var(--border);">视频</td><td style="padding:6px;border-bottom:1px solid var(--border);">暂停/未播放/已结束</td><td style="padding:6px;border-bottom:1px solid var(--border);">✅ 切换上一个/下一个文件</td></tr>
+    <tr><td style="padding:6px;">视频</td><td style="padding:6px;">播放中</td><td style="padding:6px;">⛔ 保持现有 seek 行为，不切换</td></tr>
+  </table>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="proceed" onclick="toggleSelect(this)">
+    <div class="letter">✓</div>
+    <div class="content">
+      <h3>方案确认，开始设计</h3>
+      <p>规则清晰，直接进入详细设计阶段</p>
+    </div>
+  </div>
+</div>
