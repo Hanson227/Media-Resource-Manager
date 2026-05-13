@@ -736,6 +736,35 @@ const PreviewPage = {
         else this.prevImage();
       }
     },
+    navigateToFile(newIndex) {
+      if (this._navigating) return;
+      if (newIndex < 0 || newIndex >= this.fileList.length) {
+        this.showNavFeedback(newIndex < 0 ? '已是第一个文件' : '已是最后一个文件');
+        return;
+      }
+      this._navigating = true;
+      const file = this.fileList[newIndex];
+      if (!file) { this._navigating = false; return; }
+      this.fileIndex = newIndex;
+      this.filename = file.filename;
+      this.mediaType = file.media_type || 'image';
+      this.streamUrl = this.serverUrl + '/api/files/' + file.id + '/stream';
+      // Reset video state when switching
+      this.playing = false;
+      this.currentTime = 0;
+      this.duration = 0;
+      this.progressPct = 0;
+      // Update URL without reload
+      history.replaceState({ files: this.fileList, fileIndex: newIndex }, '', '#/preview/' + file.id);
+      // Spring back after transition
+      this.gestureOffsetX = 0;
+      setTimeout(() => { this._navigating = false; }, 300);
+    },
+    showNavFeedback(msg) {
+      this.navigateFeedback = msg;
+      if (this.navigateFeedbackTimer) clearTimeout(this.navigateFeedbackTimer);
+      this.navigateFeedbackTimer = setTimeout(() => { this.navigateFeedback = ''; }, 800);
+    },
     prevImage() {
       if (this.fileIndex <= 0 || this.fileList.length < 2) return;
       this.navigateToImage(this.fileIndex - 1);
