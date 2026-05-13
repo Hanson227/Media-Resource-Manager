@@ -387,6 +387,35 @@ def test_scanner_nested_promotion():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_zero_byte_file():
+    """测试 3.6: 零字节文件不被扫描入库。"""
+    section("测试 3.6: 零字节文件过滤")
+    import tempfile
+    from app.core.scanner import MediaScanner
+    config = AppConfig()
+    scanner = MediaScanner(
+        extensions=config.media_extensions,
+        exclude_patterns=config.exclude_patterns,
+    )
+    tmp = Path(tempfile.mkdtemp(prefix="zero_byte_test_"))
+    unit_dir = tmp / "测试单元"
+    unit_dir.mkdir()
+    # 创建正常文件
+    from PIL import Image
+    Image.new("RGB", (10, 10), color=(255, 0, 0)).save(unit_dir / "正常.jpg")
+    # 创建零字节文件
+    (unit_dir / "空文件.png").touch()
+    (unit_dir / "空文件2.jpg").touch()
+    result = scanner.scan_root(tmp)
+    # 零字节文件应被跳过
+    check("零字节 PNG 被跳过", not any(f.filename == "空文件.png" for u in result.units for f in u.files))
+    check("零字节 JPG 被跳过", not any(f.filename == "空文件2.jpg" for u in result.units for f in u.files))
+    # 正常文件仍在
+    check("正常文件仍在", any(f.filename == "正常.jpg" for u in result.units for f in u.files))
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_refresh_workflow():
     """测试 3.7: 刷新流程方法名一致性。
 
@@ -2020,6 +2049,7 @@ def main():
         test_save_to_db(result, temp_root)
         test_path_revalidation()
         test_scanner_nested_promotion()
+        test_zero_byte_file()
         test_refresh_workflow()
         test_hash_engine(temp_root)
         test_hash_batch(temp_root)
