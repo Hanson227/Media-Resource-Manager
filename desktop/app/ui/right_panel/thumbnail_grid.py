@@ -12,13 +12,8 @@ from typing import Optional
 from PySide6.QtCore import (
     Qt, QAbstractListModel, QModelIndex, Signal, Slot, QSize, QThread,
 )
-from PySide6.QtGui import QPixmap
-<<<<<<< HEAD
-from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QListView, QAbstractItemView, QMenu
-=======
-from PySide6.QtWidgets import QListView, QAbstractItemView
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
+from PySide6.QtGui import QAction, QPixmap
+from PySide6.QtWidgets import QListView, QAbstractItemView, QMenu, QMenu
 
 from config import AppConfig
 from app.db.engine import DatabaseManager
@@ -39,26 +34,18 @@ class ThumbLoadWorker(QThread):
     all_done = Signal(int)
 
     def __init__(self, files: list[dict], cache_dir: Path,
-<<<<<<< HEAD
                  config: AppConfig, visible_range: tuple[int, int] = (0, 0),
                  parent=None) -> None:
         super().__init__(parent)
         self._files = files
         self._cache_dir = Path(cache_dir)
         self._visible_range = visible_range
-=======
-                 config: AppConfig, parent=None) -> None:
-        super().__init__(parent)
-        self._files = files
-        self._cache_dir = Path(cache_dir)
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
         self._generator = ThumbnailGenerator(
             max_size=config.thumbnail_max_size,
         )
 
     def run(self) -> None:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-<<<<<<< HEAD
         total = len(self._files)
         first, last = self._visible_range
         # 构建可见优先的加载顺序
@@ -72,12 +59,6 @@ class ThumbLoadWorker(QThread):
                 break
             is_visible = idx in visible_set
             fdict = self._files[idx]
-=======
-        count = 0
-        for fdict in self._files:
-            if self.isInterruptionRequested():
-                break
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
             fid = fdict["id"]
             fpath = Path(fdict["path"])
             if not fpath.is_file():
@@ -87,7 +68,6 @@ class ThumbLoadWorker(QThread):
             if cache_file.exists():
                 self.thumb_ready.emit(fid, str(cache_file))
                 count += 1
-<<<<<<< HEAD
             else:
                 try:
                     thumb_info = self._generator.generate(fpath, self._cache_dir, file_id=fid)
@@ -103,18 +83,6 @@ class ThumbLoadWorker(QThread):
                 processed_visible += 1
             elif processed_visible > 0 and (idx % 15 == 0):
                 self.msleep(8)
-=======
-                continue
-
-            try:
-                thumb_info = self._generator.generate(fpath, self._cache_dir, file_id=fid)
-                if thumb_info.thumbnail_path.exists():
-                    self.thumb_ready.emit(fid, str(thumb_info.thumbnail_path))
-                    count += 1
-            except Exception:
-                if self.isInterruptionRequested():
-                    break
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
 
         self.all_done.emit(count)
 
@@ -140,12 +108,8 @@ class FolderPreviewWorker(QThread):
             if not src.is_file():
                 continue
             try:
-<<<<<<< HEAD
                 fid = d.get("preview_file_id")
                 info = self._gen.generate(src, self._cache_dir, file_id=fid)
-=======
-                info = self._gen.generate(src, self._cache_dir, file_id=hash(str(src)))
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
                 if info.thumbnail_path.exists():
                     self.preview_ready.emit(row, str(info.thumbnail_path))
             except Exception:
@@ -167,25 +131,18 @@ class ThumbnailGridModel(QAbstractListModel):
         self._media_filter: str = ""
         self._sort_field: str = ""     # ""=默认文件名顺序, "name"=名称, "size"=大小
         self._sort_asc: bool = True
-<<<<<<< HEAD
         self._tag_filter_ids: list[int] = []  # 选中的 tag_id 列表
         self._tag_mappings: dict[int, list[int]] = {}  # file_id → [tag_id, ...]
-=======
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
 
     def set_files(self, files: list) -> None:
         self.beginResetModel()
         self._files = []
         self._full_files = []
         self._thumb_cache.clear()
-<<<<<<< HEAD
         self._tag_mappings.clear()
         file_ids = []
         for f in files:
             fid = f.id if hasattr(f, 'id') else f.get("id")
-=======
-        for f in files:
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
             duration = getattr(f, "duration_ms", None) if hasattr(f, 'id') else f.get("duration_ms")
             entry = (
                 {"id": f.id, "filename": f.filename, "path": f.path,
@@ -196,7 +153,6 @@ class ThumbnailGridModel(QAbstractListModel):
                 if hasattr(f, 'id') else f
             )
             self._full_files.append(entry)
-<<<<<<< HEAD
             if fid:
                 file_ids.append(fid)
         # 批量加载标签映射
@@ -211,8 +167,6 @@ class ThumbnailGridModel(QAbstractListModel):
                             self._tag_mappings[fid] = [t["id"] for t in all_mapped[fid]]
             except Exception:
                 pass
-=======
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
         self._sort_in_place()
         self._apply_filter_in_place()
         self.endResetModel()
@@ -247,15 +201,12 @@ class ThumbnailGridModel(QAbstractListModel):
             filtered = [f for f in filtered if f.get("media_type") == "image"]
         elif self._media_filter == "video":
             filtered = [f for f in filtered if f.get("media_type") == "video"]
-<<<<<<< HEAD
         # 标签筛选：选中的标签取 AND 交集
         if self._tag_filter_ids:
             filtered = [
                 f for f in filtered
                 if all(tid in self._tag_mappings.get(f["id"], []) for tid in self._tag_filter_ids)
             ]
-=======
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
         self._files = filtered
 
     def apply_filter(self, search_text: str | None = None,
@@ -269,7 +220,6 @@ class ThumbnailGridModel(QAbstractListModel):
         self._apply_filter_in_place()
         self.endResetModel()
 
-<<<<<<< HEAD
     def set_tag_filter(self, tag_ids: list[int]) -> None:
         """按标签筛选文件。"""
         self._tag_filter_ids = tag_ids
@@ -295,8 +245,6 @@ class ThumbnailGridModel(QAbstractListModel):
         self._apply_filter_in_place()
         self.endResetModel()
 
-=======
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
     @Slot(int, str)
     def on_thumb_ready(self, file_id: int, thumb_path: str) -> None:
         pixmap = QPixmap(thumb_path)
@@ -570,7 +518,6 @@ class ThumbnailGridView(QListView):
 
     # ---- 内部 ----
 
-<<<<<<< HEAD
     def _compute_visible_range(self) -> tuple[int, int]:
         """返回当前视口中可见的模型行索引范围 (first_row, last_row)。"""
         model = self.model()
@@ -585,8 +532,6 @@ class ThumbnailGridView(QListView):
         last = bot_idx.row() if bot_idx.isValid() else n
         return (max(0, first), min(n, last))
 
-=======
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
     def _start_thumb_worker(self, unit_path: str) -> None:
         files = self._file_model.file_list
         if not files:
@@ -594,12 +539,8 @@ class ThumbnailGridView(QListView):
         cache_dir = self._config.thumbnail_cache_dir
         if not cache_dir:
             cache_dir = Path(unit_path) / ".thumbnails" if unit_path else Path(".thumbnails")
-<<<<<<< HEAD
         visible_range = self._compute_visible_range()
         self._thumb_worker = ThumbLoadWorker(files, cache_dir, self._config, visible_range=visible_range)
-=======
-        self._thumb_worker = ThumbLoadWorker(files, cache_dir, self._config)
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
         self._thumb_worker.thumb_ready.connect(self._file_model.on_thumb_ready)
         self._thumb_worker.start()
 
@@ -728,7 +669,6 @@ class ThumbnailGridView(QListView):
                 lambda *args, fp=file_path: self.cover_from_file_requested.emit(fp)
             )
 
-<<<<<<< HEAD
         # HEIC 转换
         ext = os.path.splitext(file_path)[1].lower()
         if ext in (".heic", ".heif"):
@@ -836,6 +776,3 @@ class ThumbnailGridView(QListView):
                 f"文件已移至回收站，但数据库记录删除失败: {e}。\n请稍后手动重新扫描以清理。")
 
         self.refresh()
-=======
-        menu.exec(self.viewport().mapToGlobal(pos))
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d

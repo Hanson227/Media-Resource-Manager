@@ -18,11 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import AppConfig
-<<<<<<< HEAD
 from app.api.routes import files, units, dedup, messages, events, tags
-=======
-from app.api.routes import files, units, dedup, messages, events
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +61,7 @@ def create_app(config: AppConfig) -> FastAPI:
     app.include_router(dedup.router)
     app.include_router(messages.router)
     app.include_router(events.router)
-<<<<<<< HEAD
     app.include_router(tags.router)
-=======
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
 
     # 健康检查
     @app.get("/api/health")
