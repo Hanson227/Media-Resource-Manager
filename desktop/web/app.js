@@ -856,6 +856,7 @@ const PreviewPage = {
     if (this.rewindTimer) clearInterval(this.rewindTimer);
     if (this.gestureTimer) clearTimeout(this.gestureTimer);
     if (this.tapTimer) clearTimeout(this.tapTimer);
+    if (this.navigateFeedbackTimer) clearTimeout(this.navigateFeedbackTimer);
   }
 };
 
