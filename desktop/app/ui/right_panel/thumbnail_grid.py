@@ -559,14 +559,14 @@ class ThumbnailGridView(QListView):
         sm = self.selectionModel()
         if sm is None:
             return
-        try:
-            sm.selectionChanged.disconnect(self._on_selection_changed)
-        except TypeError:
-            pass
-        try:
-            sm.selectionChanged.disconnect(self._on_any_selection_changed)
-        except TypeError:
-            pass
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for slot in (self._on_selection_changed, self._on_any_selection_changed):
+                try:
+                    sm.selectionChanged.disconnect(slot)
+                except TypeError:
+                    pass
         sm.selectionChanged.connect(self._on_selection_changed)
         sm.selectionChanged.connect(self._on_any_selection_changed)
 
