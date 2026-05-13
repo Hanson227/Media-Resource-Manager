@@ -893,8 +893,32 @@ class MainWindow(QMainWindow):
     def _on_reload_current_unit(self) -> None:
         """重新加载当前单元（删除文件后刷新网格+树）。"""
         uid = self._current_unit_id
-        if uid is not None:
-            self._load_unit(uid)
+        if uid is None:
+            return
+        # 重新加载网格
+        self._grid_view.load_unit(uid)
+        # 重新加载树文件节点
+        try:
+            with DatabaseManager.session() as session:
+                files = q.get_files_by_unit(session, uid)
+                all_mapped = q.get_all_mapped_files(session)
+                file_dicts = []
+                for f in files:
+                    tags_list = all_mapped.get(f.id, [])
+                    tags_str = ", ".join(t["name"] for t in tags_list) if tags_list else ""
+                    indexed = f.indexed_at.isoformat() if f.indexed_at else ""
+                    file_dicts.append({
+                        "id": f.id, "filename": f.filename,
+                        "path": f.path, "size_bytes": f.size_bytes,
+                        "created_at": indexed[:10],
+                        "tags_str": tags_str,
+                    })
+            tree_model = self._tree_view.model()
+            # 先折叠再展开，确保文件节点刷新
+            tree_model.collapse_unit(uid)
+            tree_model.expand_unit(uid, file_dicts)
+        except Exception as e:
+            logger.error(f"重新加载单元文件树失败: {e}")
 
     # ============================================================
     # 查重流程
@@ -1065,11 +1089,15 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_heic_convert(self) -> None:
-        """打开 HEIC 批量转换对话框。"""
+        """打开 HEIC 批量转换对话框（不触发全库扫描，仅刷新当前视图）。"""
         from app.ui.dialogs.heic_batch_convert import HeicBatchConvertDialog
         dlg = HeicBatchConvertDialog(self)
         dlg.exec()
-        self._on_refresh_all()
+        # 仅刷新当前单元（文件已被替换为 JPG，不用全库扫描）
+        if self._current_unit_id is not None:
+            self._on_reload_current_unit()
+        else:
+            self._on_refresh_all()
 
     @Slot()
     def _on_manage_tags(self) -> None:
@@ -1334,16 +1362,32 @@ class MainWindow(QMainWindow):
         # 先停止所有后台线程
         self._cancel_all_workers()
 
+        # 清理：标记路径已不存在的根目录和单元（即使扫描因根路径缺失而跳过）
+        try:
+            with DatabaseManager.session() as session:
+                for root in q.get_all_roots(session):
+                    if not Path(root.path).is_dir():
+                        logger.info(f"根目录已不存在，标记排除: {root.path}")
+                        q.set_root_enabled(session, root.id, False)
+                    # 清理根下路径不存在的单元
+                    for stale in q.get_units_by_root(session, root.id):
+                        if stale.status == "active" and not Path(stale.path).is_dir():
+                            logger.info(f"单元路径已不存在，标记排除: {stale.name}")
+                            q.mark_unit_excluded(session, stale.id)
+        except Exception as e:
+            logger.error(f"预清理失败: {e}")
+
         try:
             with DatabaseManager.session() as session:
                 roots = q.get_all_roots(session)
-                paths = [r.path for r in roots]
+                paths = [r.path for r in roots if r.enabled]
         except Exception as e:
             logger.error(f"获取根目录失败: {e}")
+            self._tree_view.refresh_model()
             return
 
         if not paths:
-            QMessageBox.information(self, "提示", "请先添加媒体库根目录。")
+            self._tree_view.refresh_model()
             return
 
         if len(paths) == 1:
