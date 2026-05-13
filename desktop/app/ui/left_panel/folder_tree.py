@@ -45,6 +45,7 @@ class TreeNode:
     children: list["TreeNode"] = None
     node_subtype: str = ""   # "" 普通 / "file" 文件节点
     created_at: Optional[str] = None  # ISO 时间
+    tags_str: str = ""                # 文件标签（逗号分隔，仅文件节点）
 
     def __post_init__(self):
         if self.children is None:
@@ -64,7 +65,9 @@ class FolderTreeModel(QAbstractItemModel):
     """
 
     COL_NAME = 0
-    COL_META = 1
+    COL_SIZE = 1
+    COL_DATE = 2
+    COL_TAGS = 3
 
     def __init__(self, config: AppConfig, parent=None) -> None:
         super().__init__(parent)
@@ -196,6 +199,8 @@ class FolderTreeModel(QAbstractItemModel):
                 name=f["filename"],
                 path=f["path"],
                 total_size=f.get("size_bytes", 0),
+                created_at=f.get("created_at", ""),
+                tags_str=f.get("tags_str", ""),
             )
             for f in files[:200]
         ]
@@ -268,7 +273,7 @@ class FolderTreeModel(QAbstractItemModel):
         return 0
 
     def columnCount(self, parent=QModelIndex()) -> int:
-        return 2
+        return 4
 
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
@@ -287,19 +292,27 @@ class FolderTreeModel(QAbstractItemModel):
                     elif node.status == "merged":
                         suffix = " ▷"
                 return f"{node.name}{suffix}"
-            elif col == self.COL_META:
+            elif col == self.COL_SIZE:
+                from app.utils.file_helpers import format_size
                 if node.node_subtype == "file":
-                    from app.utils.file_helpers import format_size
                     return format_size(node.total_size)
                 if node.node_type == "unit":
                     if node.status == "merged":
                         return ""
-                    from app.utils.file_helpers import format_size
-                    date_s = f" {node.created_at[:10]} │" if node.created_at else ""
-                    return f"{date_s}  {node.file_count} 个 · {format_size(node.total_size)}"
+                    return f"{node.file_count} 个 · {format_size(node.total_size)}"
                 elif node.node_type == "root":
                     active = sum(1 for c in node.children if c.status == "active")
-                    return f"{active} 个片段" if active else ""
+                    return f"{active} 个" if active else ""
+                return ""
+            elif col == self.COL_DATE:
+                if node.node_subtype == "file" and node.created_at:
+                    return node.created_at[:10]
+                if node.node_type == "unit" and node.created_at:
+                    return node.created_at[:10]
+                return ""
+            elif col == self.COL_TAGS:
+                if node.node_subtype == "file" and node.tags_str:
+                    return node.tags_str
                 return ""
 
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -317,7 +330,9 @@ class FolderTreeModel(QAbstractItemModel):
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            return "名称" if section == 0 else "详情"
+            labels = {self.COL_NAME: "名称", self.COL_SIZE: "大小",
+                      self.COL_DATE: "日期", self.COL_TAGS: "标签"}
+            return labels.get(section, "")
         return None
 
     # ============================================================
@@ -389,11 +404,19 @@ class FolderTreeView(QTreeView):
         super().__init__(parent)
         self._model = model
         self.setModel(model)
-        self.setHeaderHidden(True)
         header = self.header()
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(model.COL_NAME, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(model.COL_META, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(model.COL_NAME, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(model.COL_SIZE, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(model.COL_DATE, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(model.COL_TAGS, QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        # 默认列宽
+        header.resizeSection(model.COL_NAME, 200)
+        header.resizeSection(model.COL_SIZE, 90)
+        header.resizeSection(model.COL_DATE, 100)
+        header.resizeSection(model.COL_TAGS, 120)
+        header.setSectionsMovable(True)
         self.setAnimated(True)
         self.setExpandsOnDoubleClick(True)
         self.setIndentation(16)
