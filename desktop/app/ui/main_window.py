@@ -510,11 +510,15 @@ class MainWindow(QMainWindow):
                 for f in files:
                     tags_list = all_mapped.get(f.id, [])
                     tags_str = ", ".join(t["name"] for t in tags_list) if tags_list else ""
-                    indexed = f.indexed_at.isoformat() if f.indexed_at else ""
+                    try:
+                        ts = Path(f.path).stat().st_ctime
+                        file_date = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                    except OSError:
+                        file_date = ""
                     file_dicts.append({
                         "id": f.id, "filename": f.filename,
                         "path": f.path, "size_bytes": f.size_bytes,
-                        "created_at": indexed[:10],
+                        "created_at": file_date,
                         "tags_str": tags_str,
                     })
         except Exception as e:
