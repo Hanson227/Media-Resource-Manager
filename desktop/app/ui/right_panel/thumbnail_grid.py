@@ -555,10 +555,18 @@ class ThumbnailGridView(QListView):
         self._folder_worker = None
 
     def _reconnect_selection_signals(self) -> None:
-        """setModel 会替换 selectionModel，需要重新连接信号。"""
+        """setModel 会替换 selectionModel，需要重新连接信号（先断开防重复）。"""
         sm = self.selectionModel()
         if sm is None:
             return
+        try:
+            sm.selectionChanged.disconnect(self._on_selection_changed)
+        except TypeError:
+            pass
+        try:
+            sm.selectionChanged.disconnect(self._on_any_selection_changed)
+        except TypeError:
+            pass
         sm.selectionChanged.connect(self._on_selection_changed)
         sm.selectionChanged.connect(self._on_any_selection_changed)
 
@@ -591,17 +599,12 @@ class ThumbnailGridView(QListView):
     def _on_selection_changed(self) -> None:
         idxs = self.selectedIndexes()
         if not idxs:
-            logger.debug(f"网格选中变化: 无选中索引")
             return
         model = self.model()
-        is_folder = isinstance(model, FolderCardModel)
         fid = model.data(idxs[0], Qt.ItemDataRole.UserRole + 1)
-        fname = model.data(idxs[0], Qt.ItemDataRole.UserRole)
-        logger.info(f"网格选中变化: file_id={fid} name={fname} isFolderCard={is_folder}")
         if fid:
             self.file_selected.emit(fid)
-            if not is_folder:
-                logger.debug(f"→ 发射 file_selected_in_grid({fid})")
+            if not isinstance(model, FolderCardModel):
                 self.file_selected_in_grid.emit(fid)
 
     @Slot()
