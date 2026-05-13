@@ -469,11 +469,11 @@ const PreviewPage = {
         <template v-if="mediaType === 'image'">
           <img :src="streamUrl" :alt="filename" style="max-width:100%;max-height:100%;object-fit:contain">
           <div class="image-nav-hint" v-if="fileList.length > 1">
-            <span class="mdi mdi-chevron-left" @click.stop="prevImage"></span>
+            <span class="mdi mdi-chevron-left" @click.stop="navigateToFile(fileIndex - 1)"></span>
             <span class="pos">{{ fileIndex + 1 }} / {{ fileList.length }}</span>
-            <span class="mdi mdi-chevron-right" @click.stop="nextImage"></span>
+            <span class="mdi mdi-chevron-right" @click.stop="navigateToFile(fileIndex + 1)"></span>
           </div>
-          <div class="gesture-zone" @touchstart.prevent="onImageSwipeStart($event)" @touchend="onImageSwipeEnd" @touchmove.prevent="onImageSwipeMove($event)"></div>
+          <div class="gesture-zone" @touchstart.prevent="onNavSwipeStart($event)" @touchend="onNavSwipeEnd" @touchmove.prevent="onNavSwipeMove($event)"></div>
         </template>
         <template v-else-if="mediaType === 'video'">
           <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop :src="streamUrl"></video>
@@ -544,8 +544,7 @@ const PreviewPage = {
       lastTapTime: 0, tapTimer: null,
       // Seek state
       seeking: false, seekHintPct: 0, seekHintTime: 0,
-      // Image swipe
-      imageSwipeStartX: 0,
+      // Image swipe — removed, using unified _navStartX
       // Navigation swipe state
       navigateFeedback: '',
       navigateFeedbackTimer: null,
@@ -720,21 +719,37 @@ const PreviewPage = {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    /* ---- Image Swipe ---- */
-    onImageSwipeStart(e) {
-      this.imageSwipeStartX = (e.changedTouches && e.changedTouches[0].clientX) || 0;
+    /* ---- Unified Navigation Swipe (image + video paused) ---- */
+    onNavSwipeStart(e) {
+      const t = e.changedTouches && e.changedTouches[0];
+      if (!t) return;
+      this._navStartX = t.clientX;
+      this._navStartY = t.clientY;
+      this.gestureOffsetX = 0;
+      this._navSwiping = false;
     },
-    onImageSwipeMove(e) {
-      // no-op, track for end
-    },
-    onImageSwipeEnd(e) {
-      if (this.fileList.length < 2) return;
-      const cx = (e.changedTouches && e.changedTouches[0].clientX) || 0;
-      const dx = cx - this.imageSwipeStartX;
-      if (Math.abs(dx) > 40) {
-        if (dx < 0) this.nextImage();
-        else this.prevImage();
+    onNavSwipeMove(e) {
+      if (this._navigating || this.fileList.length < 2) return;
+      const t = e.changedTouches && e.changedTouches[0];
+      if (!t) return;
+      const dx = t.clientX - this._navStartX;
+      const dy = t.clientY - this._navStartY;
+      // Only activate horizontal swipe if more horizontal than vertical
+      if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {
+        this._navSwiping = true;
+        // Clamp offset for resistance feel
+        this.gestureOffsetX = Math.max(-40, Math.min(40, dx));
       }
+    },
+    onNavSwipeEnd(e) {
+      if (!this._navSwiping || this.fileList.length < 2) { this.gestureOffsetX = 0; return; }
+      const t = e.changedTouches && e.changedTouches[0];
+      if (!t) { this.gestureOffsetX = 0; return; }
+      const dx = t.clientX - this._navStartX;
+      if (dx < -40) this.navigateToFile(this.fileIndex + 1);
+      else if (dx > 40) this.navigateToFile(this.fileIndex - 1);
+      else this.gestureOffsetX = 0;  // spring back
+      this._navSwiping = false;
     },
     navigateToFile(newIndex) {
       if (this._navigating) return;
@@ -764,14 +779,6 @@ const PreviewPage = {
       this.navigateFeedback = msg;
       if (this.navigateFeedbackTimer) clearTimeout(this.navigateFeedbackTimer);
       this.navigateFeedbackTimer = setTimeout(() => { this.navigateFeedback = ''; }, 800);
-    },
-    prevImage() {
-      if (this.fileIndex <= 0 || this.fileList.length < 2) return;
-      this.navigateToImage(this.fileIndex - 1);
-    },
-    nextImage() {
-      if (this.fileIndex >= this.fileList.length - 1) return;
-      this.navigateToImage(this.fileIndex + 1);
     },
     navigateToImage(idx) {
       const file = this.fileList[idx];
