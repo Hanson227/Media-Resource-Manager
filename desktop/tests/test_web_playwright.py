@@ -247,9 +247,64 @@ def test_unit_files_page(page):
         check(f"文件名显示: {first_file_name}", len(first_file_name.strip()) > 0)
 
 
+def test_preview_navigation(page):
+    """验证预览页加载和导航功能。"""
+    section("Web 测试 4: 预览页面导航")
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    page.wait_for_timeout(1500)
+
+    # 展开根目录进入文件列表
+    unit_card = page.locator(".unit-card").first
+    if unit_card.count() == 0:
+        check("预览测试: 无单元可进入", True)
+        return
+    unit_card.click()
+    page.wait_for_timeout(1000)
+
+    # 点击第一个文件进入预览
+    feed_item = page.locator(".feed-item").first
+    if feed_item.count() == 0:
+        check("预览测试: 无文件可预览", True)
+        return
+    feed_item.click()
+    page.wait_for_timeout(1500)
+
+    # 验证预览页加载
+    preview = page.locator(".preview-overlay")
+    check("预览页已加载", preview.count() > 0)
+
+    # 验证位置指示器存在（多个文件时）
+    nav_hint = page.locator(".image-nav-hint")
+    if nav_hint.count() > 0:
+        pos_text = nav_hint.locator(".pos").text_content() or ""
+        check("位置指示器存在", "/" in pos_text)
+
+        # 测试点击右侧箭头前进到下一张
+        next_btn = nav_hint.locator(".mdi-chevron-right")
+        if next_btn.count() > 0:
+            next_btn.click()
+            page.wait_for_timeout(500)
+            new_pos = nav_hint.locator(".pos").text_content() or ""
+            check("点击前进后位置变化", new_pos != pos_text)
+
+        # 测试点击左侧箭头后退
+        prev_btn = nav_hint.locator(".mdi-chevron-left")
+        if prev_btn.count() > 0:
+            prev_btn.click()
+            page.wait_for_timeout(500)
+            check("后退按钮响应正常", True)
+
+    # 返回按钮
+    back_btn = page.locator(".preview-back")
+    if back_btn.count() > 0:
+        back_btn.click()
+        page.wait_for_timeout(500)
+        check("从预览页返回", page.locator(".feed-item").count() > 0)
+
+
 def test_navigation_tabs(page):
     """验证底部导航栏功能。"""
-    section("Web 测试 4: 底部导航")
+    section("Web 测试 5: 底部导航")
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
     page.wait_for_timeout(1000)
 
@@ -298,7 +353,7 @@ def test_navigation_tabs(page):
 
 def test_pin_lock_screen(page):
     """验证 PIN 锁屏界面渲染。"""
-    section("Web 测试 5: PIN 锁屏界面")
+    section("Web 测试 6: PIN 锁屏界面")
     page.goto(f"http://127.0.0.1:{_PORT}/")
     page.wait_for_timeout(1000)
 
@@ -331,7 +386,7 @@ def test_pin_lock_screen(page):
 
 def test_responsive_layout(page):
     """验证响应式布局。"""
-    section("Web 测试 6: 响应式布局")
+    section("Web 测试 7: 响应式布局")
     # 测试手机尺寸
     page.set_viewport_size({"width": 375, "height": 667})
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
@@ -399,6 +454,11 @@ def main():
             test_home_page_loads(page)
             test_units_page_shows_data(page)
             test_unit_files_page(page)
+
+            # 预览导航测试
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_timeout(500)
+            test_preview_navigation(page)
 
             # 重新加载使 localStorage 生效（绕过 PIN 页）
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")

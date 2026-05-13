@@ -87,7 +87,16 @@ def create_app(config: AppConfig) -> FastAPI:
             }
 
         # SPA 路由兜底：所有非 API 路径返回 index.html
-        app.mount("/", StaticFiles(directory=str(web_dir), html=True), name="web")
+        # 静态文件启用 no-cache 防止浏览器缓存旧版 JS/CSS
+        class NoCacheStaticFiles(StaticFiles):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+            async def get_response(self, path: str, scope):
+                resp = await super().get_response(path, scope)
+                if path.endswith((".js", ".css", ".html")):
+                    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                return resp
+        app.mount("/", NoCacheStaticFiles(directory=str(web_dir), html=True), name="web")
     else:
         # 没有 web 目录时回退
         @app.get("/")
