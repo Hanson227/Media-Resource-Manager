@@ -546,6 +546,11 @@ const PreviewPage = {
       seeking: false, seekHintPct: 0, seekHintTime: 0,
       // Image swipe
       imageSwipeStartX: 0,
+      // Navigation swipe state
+      navigateFeedback: '',
+      navigateFeedbackTimer: null,
+      gestureOffsetX: 0,
+      _navigating: false,
     };
   },
   computed: {
