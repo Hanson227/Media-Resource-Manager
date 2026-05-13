@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Web 前端页面级功能测试 —— 基于 Playwright 的 Vue SPA 浏览器测试。
 
@@ -375,7 +376,7 @@ def main():
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            browser = pw.chromium.launch(channel="chrome", headless=True)
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 device_scale_factor=1,

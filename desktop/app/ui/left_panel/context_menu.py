@@ -37,6 +37,7 @@ class FolderTreeContextMenu(QMenu):
     exclude_requested = Signal(int)
     cover_requested = Signal(int)       # 设置封面 (unit_id)
     clear_cover_requested = Signal(int) # 清除封面 (unit_id)
+    delete_requested = Signal(int)      # 删除资源单元 (unit_id)
     remove_root_requested = Signal(int)
     refresh_requested = Signal()
 
@@ -126,6 +127,12 @@ class FolderTreeContextMenu(QMenu):
         exclude_action.setToolTip(f"将「{node.name}」标记为已排除，不再参与扫描和查重")
         exclude_action.triggered.connect(lambda *args, uid=unit_id: self.exclude_requested.emit(uid))
         self.addAction(exclude_action)
+
+        # 删除文件夹
+        delete_action = QAction(f"删除「{node.name}」", self)
+        delete_action.setToolTip("将文件夹移至回收站，并从媒体库中移除所有相关记录")
+        delete_action.triggered.connect(lambda *args, uid=unit_id: self.delete_requested.emit(uid))
+        self.addAction(delete_action)
 
         self.addSeparator()
 
