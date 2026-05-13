@@ -44,7 +44,7 @@ def _get_ctime(path: str) -> str:
 @dataclass
 class TreeNode:
     """树节点的纯数据容器，不从 SQLAlchemy 继承。"""
-    node_type: str           # "root" | "unit" | "favorites"
+    node_type: str           # "root" | "unit"
     node_id: int             # 数据库 ID
     name: str                # 显示名称
     path: str                # 文件夹/文件路径
@@ -94,38 +94,17 @@ class FolderTreeModel(QAbstractItemModel):
                 roots = q.get_all_roots(session)
                 self._roots = []
 
-                # 收藏虚拟根节点（仅在有收藏时显示）
-                starred_units = q.get_starred_units(session)
-                if starred_units:
-                    fav_node = TreeNode(
-                        node_type="favorites",
-                        node_id=-1,
-                        name=f"★ 收藏  ({len(starred_units)} 个片段)",
-                        path="",
-                    )
-                    for unit in starred_units:
-                        fav_node.children.append(TreeNode(
-                            node_type="unit",
-                            node_id=unit.id,
-                            name=unit.name,
-                            path=unit.path,
-                            file_count=unit.file_count or 0,
-                            total_size=unit.total_size or 0,
-                            is_manual=unit.is_manual or False,
-                            is_starred=True,
-                            status=unit.status or "active",
-                            library_root_id=-1,
-                            created_at=_get_ctime(unit.path),
-                        ))
-                    self._roots.append(fav_node)
-
                 for root in roots:
                     units = q.get_units_by_root(session, root.id)
+                    # 收藏的单元排在顶部
+                    units.sort(key=lambda u: (0 if u.is_starred else 1, u.name or ""))
                     root_name = Path(root.path).name or root.path
+                    star_count = sum(1 for u in units if u.is_starred)
+                    star_suffix = f" ⭐{star_count}" if star_count else ""
                     root_node = TreeNode(
                         node_type="root",
                         node_id=root.id,
-                        name=f"{root_name}  ({len(units)} 个片段)",
+                        name=f"{root_name}  ({len(units)} 个片段{star_suffix})",
                         path=root.path,
                     )
                     for unit in units:
