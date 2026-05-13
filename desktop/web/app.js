@@ -168,12 +168,21 @@ const UnitsPage = {
     },
     sortedUnits(units) {
       const arr = [...units];
+      // 收藏的排在顶部
+      arr.sort((a, b) => (a.is_starred === b.is_starred ? 0 : a.is_starred ? -1 : 1));
+      // 其次按当前排序条件
       if (this.sortBy === 'name') {
-        arr.sort((a, b) => this.sortOrder === 'asc'
-          ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name));
+        arr.sort((a, b) => {
+          if (a.is_starred !== b.is_starred) return a.is_starred ? -1 : 1;
+          return this.sortOrder === 'asc'
+            ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name);
+        });
       } else {
-        arr.sort((a, b) => this.sortOrder === 'asc'
-          ? (a.total_size || 0) - (b.total_size || 0) : (b.total_size || 0) - (a.total_size || 0));
+        arr.sort((a, b) => {
+          if (a.is_starred !== b.is_starred) return a.is_starred ? -1 : 1;
+          return this.sortOrder === 'asc'
+            ? (a.total_size || 0) - (b.total_size || 0) : (b.total_size || 0) - (a.total_size || 0);
+        });
       }
       return arr;
     },
@@ -368,7 +377,7 @@ const UnitFilesPage = {
       const idx = this.files.indexOf(file);
       this.$router.push({
         path: '/preview/' + file.id,
-        state: { files: this.files, fileIndex: idx },
+        state: { files: JSON.parse(JSON.stringify(this.files)), fileIndex: idx },
       });
     },
     setSort(field) {
@@ -469,7 +478,7 @@ const PreviewPage = {
       <div class="preview-content" @click="onTap">
         <template v-if="mediaType === 'image'">
           <img :src="streamUrl" :alt="filename"
-            class="gesture-follow" :class="{ dragging: _navSwiping }"
+            class="gesture-follow" :class="{ dragging: navSwiping }"
             :style="{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', transform: 'translateX(' + gestureOffsetX + 'px)' }">
           <div class="image-nav-hint" v-if="fileList.length > 1">
             <span class="mdi mdi-chevron-left" @click.stop="navigateToFile(fileIndex - 1)"></span>
@@ -480,7 +489,7 @@ const PreviewPage = {
         </template>
         <template v-else-if="mediaType === 'video'">
           <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop :src="streamUrl"
-  class="gesture-follow" :class="{ dragging: _navSwiping }"
+  class="gesture-follow" :class="{ dragging: navSwiping }"
   :style="{ transform: 'translateX(' + gestureOffsetX + 'px)' }"></video>
 
           <!-- Gesture Zone -->
@@ -559,6 +568,7 @@ const PreviewPage = {
       navigateFeedbackTimer: null,
       gestureOffsetX: 0,
       _navigating: false,
+      navSwiping: false,
     };
   },
   computed: {
@@ -750,7 +760,7 @@ const PreviewPage = {
       this._navStartX = t.clientX;
       this._navStartY = t.clientY;
       this.gestureOffsetX = 0;
-      this._navSwiping = false;
+      this.navSwiping = false;
     },
     onNavSwipeMove(e) {
       if (this._navigating || this.fileList.length < 2) return;
@@ -760,20 +770,20 @@ const PreviewPage = {
       const dy = t.clientY - this._navStartY;
       // Only activate horizontal swipe if more horizontal than vertical
       if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {
-        this._navSwiping = true;
+        this.navSwiping = true;
         // Clamp offset for resistance feel
         this.gestureOffsetX = Math.max(-40, Math.min(40, dx));
       }
     },
     onNavSwipeEnd(e) {
-      if (!this._navSwiping || this.fileList.length < 2) { this.gestureOffsetX = 0; return; }
+      if (!this.navSwiping || this.fileList.length < 2) { this.gestureOffsetX = 0; return; }
       const t = e.changedTouches && e.changedTouches[0];
       if (!t) { this.gestureOffsetX = 0; return; }
       const dx = t.clientX - this._navStartX;
       if (dx < -40) this.navigateToFile(this.fileIndex + 1);
       else if (dx > 40) this.navigateToFile(this.fileIndex - 1);
       else this.gestureOffsetX = 0;  // spring back
-      this._navSwiping = false;
+      this.navSwiping = false;
     },
     navigateToFile(newIndex) {
       if (this._navigating) return;
@@ -793,8 +803,8 @@ const PreviewPage = {
       this.currentTime = 0;
       this.duration = 0;
       this.progressPct = 0;
-      // Update URL without reload
-      history.replaceState({ files: this.fileList, fileIndex: newIndex }, '', '#/preview/' + file.id);
+      // Update URL without reload — deep-clone to avoid Vue reactive proxy $el
+      history.replaceState({ files: JSON.parse(JSON.stringify(this.fileList)), fileIndex: newIndex }, '', '#/preview/' + file.id);
       // Spring back after transition
       this.gestureOffsetX = 0;
       setTimeout(() => { this._navigating = false; }, 300);
@@ -803,16 +813,6 @@ const PreviewPage = {
       this.navigateFeedback = msg;
       if (this.navigateFeedbackTimer) clearTimeout(this.navigateFeedbackTimer);
       this.navigateFeedbackTimer = setTimeout(() => { this.navigateFeedback = ''; }, 800);
-    },
-    navigateToImage(idx) {
-      const file = this.fileList[idx];
-      if (!file) return;
-      this.fileIndex = idx;
-      this.filename = file.filename;
-      this.mediaType = file.media_type || 'image';
-      this.streamUrl = this.serverUrl + '/api/files/' + file.id + '/stream';
-      // Update URL without reloading
-      history.replaceState({ files: this.fileList, fileIndex: idx }, '', '#/preview/' + file.id);
     },
     /* ---- Controls auto-hide ---- */
     startHideTimer(delay) {
