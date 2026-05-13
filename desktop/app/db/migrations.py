@@ -19,7 +19,7 @@ from app.db.models import Base
 logger = logging.getLogger(__name__)
 
 # 当前数据库 Schema 版本号
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 def init_db(db_path: Optional[Path] = None) -> None:
@@ -90,6 +90,35 @@ def migrate_db() -> None:
                 logger.info("迁移 v1→v2: 添加 resource_units.cover_path 列")
         _set_schema_version(engine, 2)
         current = 2
+
+    if current < 3:
+        inspector = inspect(engine)
+        tables = [t for t in inspector.get_table_names()]
+        if "file_tags" not in tables:
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE file_tags (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name VARCHAR(64) NOT NULL UNIQUE,
+                        color VARCHAR(7),
+                        created_at DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+                    );
+                """))
+                conn.execute(text("""
+                    CREATE TABLE file_tag_mappings (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        file_id INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
+                        tag_id INTEGER NOT NULL REFERENCES file_tags(id) ON DELETE CASCADE,
+                        created_at DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+                        UNIQUE(file_id, tag_id)
+                    );
+                """))
+                conn.execute(text("CREATE INDEX ix_file_tag_mappings_file ON file_tag_mappings(file_id);"))
+                conn.execute(text("CREATE INDEX ix_file_tag_mappings_tag ON file_tag_mappings(tag_id);"))
+                conn.commit()
+                logger.info("迁移 v2→v3: 创建 file_tags 和 file_tag_mappings 表")
+        _set_schema_version(engine, 3)
+        current = 3
 
     logger.info(f"数据库迁移完成，当前版本: v{current}")
 

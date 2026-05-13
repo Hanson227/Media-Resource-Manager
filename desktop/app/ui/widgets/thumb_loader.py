@@ -46,8 +46,8 @@ class ThumbLoader(QObject):
         )
         # 内存缓存 {cache_key: QPixmap}
         self._pixmap_cache: dict[str, QPixmap] = {}
-        # 最大内存缓存条目
-        self._max_cache_size = 500
+        # 最大内存缓存条目（按 256px 缩略图计，~2000 张 ≈ 200MB）
+        self._max_cache_size = 2000
 
     def get_thumbnail(self, file_id: int, cache_dir: Path,
                       source_path: Optional[Path] = None) -> QPixmap:

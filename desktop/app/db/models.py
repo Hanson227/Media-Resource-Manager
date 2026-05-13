@@ -14,7 +14,7 @@ from sqlalchemy import (
     DateTime, Text, BLOB, ForeignKey, Index, UniqueConstraint,
     CheckConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy.orm import DeclarativeBase, relationship, backref
 
 
 class Base(DeclarativeBase):
@@ -471,3 +471,54 @@ class ScanSession(Base):
 
     def __repr__(self) -> str:
         return f"<ScanSession id={self.id} status={self.status} files={self.files_scanned}>"
+
+
+# ============================================================
+# 11. 文件标签表
+# ============================================================
+class FileTag(Base):
+    """文件分类标签，如"正面大笑""侧面走路"等。"""
+
+    __tablename__ = "file_tags"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    """自增主键。"""
+
+    name = Column(String(64), nullable=False, unique=True)
+    """标签名称，如"正面大笑"。"""
+
+    color = Column(String(7), nullable=True)
+    """标签颜色（十六进制），如"#FF6B6B"。"""
+
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+    def __repr__(self) -> str:
+        return f"<FileTag id={self.id} name='{self.name}'>"
+
+
+# ============================================================
+# 12. 文件-标签关联表
+# ============================================================
+class FileTagMapping(Base):
+    """多对多：文件与标签的关联关系。"""
+
+    __tablename__ = "file_tag_mappings"
+    __table_args__ = (
+        UniqueConstraint("file_id", "tag_id", name="uq_file_tag_mapping"),
+        Index("ix_file_tag_mappings_file", "file_id"),
+        Index("ix_file_tag_mappings_tag", "tag_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    """自增主键。"""
+
+    file_id = Column(Integer, ForeignKey("media_files.id", ondelete="CASCADE"), nullable=False)
+    """关联的媒体文件 ID。"""
+
+    tag_id = Column(Integer, ForeignKey("file_tags.id", ondelete="CASCADE"), nullable=False)
+    """关联的标签 ID。"""
+
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+    def __repr__(self) -> str:
+        return f"<FileTagMapping file_id={self.file_id} tag_id={self.tag_id}>"

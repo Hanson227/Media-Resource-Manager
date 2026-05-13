@@ -7,6 +7,8 @@
 缓存：存储在各资源单元的 .thumbnails/ 子目录中
 """
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,14 +113,18 @@ class ThumbnailGenerator:
 
         # 确定缓存路径
         if file_id is None:
-            file_id = hash(str(source_path))
+            # 使用 MD5 摘要代替 hash()，避免 PYTHONHASHSEED 随机化导致跨进程不稳定
+            file_id = int.from_bytes(
+                hashlib.md5(str(source_path).encode("utf-8")).digest()[:8],
+                byteorder="big", signed=True,
+            )
         cache_path = self.get_thumbnail_path(file_id, cache_dir)
 
         # 确保缓存目录存在
         cache_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 检查缓存
-        if cache_path.is_file():
+        # 检查缓存（同时校验源文件匹配）
+        if cache_path.is_file() and self._check_cache_valid(cache_path, source_path):
             try:
                 with Image.open(cache_path) as im:
                     w, h = im.size
@@ -147,6 +153,12 @@ class ThumbnailGenerator:
             method = "opencv_mid"
         else:
             raise UnsupportedFormatError(str(source_path), "无法生成缩略图")
+
+        # 缓存元数据写入（生成后才写，确保sidecar与缩略图一致）
+        try:
+            self._write_cache_meta(cache_path, source_path)
+        except Exception as e:
+            logger.warning(f"写入缩略图元数据失败: {cache_path} - {e}")
 
         return ThumbnailInfo(
             source_path=source_path,
@@ -200,6 +212,40 @@ class ThumbnailGenerator:
     # ============================================================
     # 内部方法
     # ============================================================
+
+    @staticmethod
+    def _get_meta_path(thumbnail_path: Path) -> Path:
+        """返回缓存元数据文件路径（同目录，扩展名附加 .meta）。"""
+        return thumbnail_path.with_name(thumbnail_path.name + ".meta")
+
+    @staticmethod
+    def _check_cache_valid(thumbnail_path: Path, source_path: Path) -> bool:
+        """校验缓存是否与源文件匹配（通过 sidecar meta 对比 mtime 和 size）。"""
+        meta_path = ThumbnailGenerator._get_meta_path(thumbnail_path)
+        if not meta_path.is_file():
+            return False
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            st = source_path.stat()
+            return (
+                meta.get("source_path") == str(source_path)
+                and meta.get("source_mtime") == st.st_mtime
+                and meta.get("source_size") == st.st_size
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _write_cache_meta(thumbnail_path: Path, source_path: Path) -> None:
+        """写入缓存元数据 sidecar，记录源文件路径、mtime 和 size。"""
+        st = source_path.stat()
+        meta = {
+            "source_path": str(source_path),
+            "source_mtime": st.st_mtime,
+            "source_size": st.st_size,
+        }
+        meta_path = ThumbnailGenerator._get_meta_path(thumbnail_path)
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
     def _generate_image_thumb(self, source: Path, dest: Path) -> tuple[int, int]:
         """生成图片缩略图（Pillow）。"""

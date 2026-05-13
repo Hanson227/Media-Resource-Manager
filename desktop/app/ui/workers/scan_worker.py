@@ -150,6 +150,12 @@ class ScanWorker(QThread):
 
                     self.unit_found.emit(unit.name, unit.file_count)
 
+                # 清理：标记当前根下路径已不存在的单元为 excluded
+                for stale_unit in q.get_units_by_root(session, root.id):
+                    if stale_unit.status == "active" and not Path(stale_unit.path).is_dir():
+                        logger.info(f"单元路径已不存在，标记排除: {stale_unit.name} ({stale_unit.path})")
+                        q.mark_unit_excluded(session, stale_unit.id)
+
                 # 更新扫描会话
                 q.update_scan_session(session, scan_id,
                     files_scanned=result.total_files,
