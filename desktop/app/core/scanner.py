@@ -402,6 +402,8 @@ class MediaScanner:
                             continue
                         try:
                             stat = entry.stat()
+                            if stat.st_size == 0:
+                                continue  # 跳过空文件（无效/残留文件）
                             mt = get_media_type(entry.suffix)
                             media_type = mt.value if mt else "unknown"
                             df = DiscoveredFile(
