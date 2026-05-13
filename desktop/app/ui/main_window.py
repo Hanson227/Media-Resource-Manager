@@ -354,6 +354,7 @@ class MainWindow(QMainWindow):
         # ---- 文件级联动 ----
         self._tree_view.file_selected_from_tree.connect(self._grid_view.select_file_by_id)
         self._grid_view.file_selected_in_grid.connect(self._on_file_selected_in_grid)
+        self._grid_view.file_deleted.connect(self._on_reload_current_unit)
 
         # ---- 右键菜单：合并/拆分 ----
         self._tree_view.merge_requested.connect(self._on_merge_units)
@@ -864,18 +865,36 @@ class MainWindow(QMainWindow):
                     return
                 unit_id = mf.resource_unit_id
                 files = q.get_files_by_unit(session, unit_id)
-                file_dicts = [
-                    {"id": f.id, "filename": f.filename,
-                     "path": f.path, "size_bytes": f.size_bytes}
-                    for f in files
-                ]
+                all_mapped = q.get_all_mapped_files(session)
+                file_dicts = []
+                for f in files:
+                    tags_list = all_mapped.get(f.id, [])
+                    tags_str = ", ".join(t["name"] for t in tags_list) if tags_list else ""
+                    indexed = f.indexed_at.isoformat() if f.indexed_at else ""
+                    file_dicts.append({
+                        "id": f.id, "filename": f.filename,
+                        "path": f.path, "size_bytes": f.size_bytes,
+                        "created_at": indexed[:10],
+                        "tags_str": tags_str,
+                    })
         except Exception as e:
             logger.warning(f"网格→树同步查询失败: {e}")
             return
 
+        # 展开目标 unit 后选中文件
         tree_model = self._tree_view.model()
-        tree_model.expand_unit(unit_id, file_dicts)
+        # 确保单元没有已展开的子节点再展开（防止重复展开）
+        unit_node = tree_model.get_node_by_unit_id(unit_id)
+        if unit_node is not None and not unit_node.children:
+            tree_model.expand_unit(unit_id, file_dicts)
         self._tree_view.select_tree_node_by_file_id(file_id)
+
+    @Slot()
+    def _on_reload_current_unit(self) -> None:
+        """重新加载当前单元（删除文件后刷新网格+树）。"""
+        uid = self._current_unit_id
+        if uid is not None:
+            self._load_unit(uid)
 
     # ============================================================
     # 查重流程
@@ -1366,7 +1385,7 @@ class MainWindow(QMainWindow):
 
         # Alt+↑ / Backspace → 返回上一级
         if key == Qt.Key.Key_Backspace or (key == Qt.Key.Key_Up and mod & Qt.KeyboardModifier.AltModifier):
-            if self._breadcrumb.isVisible():
+            if self._breadcrumb.isVisible() or self._current_unit_id is not None:
                 self._on_breadcrumb_back()
                 event.accept()
                 return
