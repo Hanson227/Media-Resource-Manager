@@ -421,7 +421,7 @@ class FolderTreeView(QTreeView):
         self.setAnimated(True)
         self.setExpandsOnDoubleClick(True)
         self.setIndentation(16)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.expandAll()
         self.selectionModel().selectionChanged.connect(self._on_selection_changed)
