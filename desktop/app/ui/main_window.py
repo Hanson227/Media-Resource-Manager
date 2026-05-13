@@ -478,11 +478,20 @@ class MainWindow(QMainWindow):
         try:
             with DatabaseManager.session() as session:
                 files = q.get_files_by_unit(session, unit_id)
-                file_dicts = [
-                    {"id": f.id, "filename": f.filename,
-                     "path": f.path, "size_bytes": f.size_bytes}
-                    for f in files
-                ]
+                # 批量加载标签映射
+                all_mapped = q.get_all_mapped_files(session)
+                file_dicts = []
+                for f in files:
+                    fid = f.id
+                    tags_list = all_mapped.get(fid, [])
+                    tags_str = ", ".join(t["name"] for t in tags_list) if tags_list else ""
+                    indexed = f.indexed_at.isoformat() if f.indexed_at else ""
+                    file_dicts.append({
+                        "id": fid, "filename": f.filename,
+                        "path": f.path, "size_bytes": f.size_bytes,
+                        "created_at": indexed[:10],
+                        "tags_str": tags_str,
+                    })
             tree_model = self._tree_view.model()
             tree_model.expand_unit(unit_id, file_dicts)
             # 找到单元节点并展开
