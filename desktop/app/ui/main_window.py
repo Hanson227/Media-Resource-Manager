@@ -502,10 +502,12 @@ class MainWindow(QMainWindow):
 
     def _load_tree_files(self, unit_id: int) -> list[dict]:
         """加载单元文件到树节点（含标签+日期）。返回 file_dicts。"""
+        logger.info(f"加载树文件: unit_id={unit_id}")
         try:
             with DatabaseManager.session() as session:
                 files = q.get_files_by_unit(session, unit_id)
                 all_mapped = q.get_all_mapped_files(session)
+                logger.info(f"  查询到 {len(files)} 个文件, {len(all_mapped)} 个标签映射")
                 file_dicts = []
                 for f in files:
                     tags_list = all_mapped.get(f.id, [])
@@ -538,11 +540,16 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_file_selected_in_grid(self, file_id: int) -> None:
         """右侧网格点击文件 → 左侧树同步高亮。树未展开则自动加载后选中。"""
-        if self._tree_view.select_tree_node_by_file_id(file_id):
+        logger.info(f"网格→树同步: file_id={file_id} current_unit={self._current_unit_id}")
+        found = self._tree_view.select_tree_node_by_file_id(file_id)
+        logger.info(f"→ 直接查找: {'✓ 找到' if found else '✗ 未找到'}")
+        if found:
             return
         if self._current_unit_id is not None:
+            logger.info(f"→ 重新加载树并重试, unit={self._current_unit_id}")
             self._load_tree_files(self._current_unit_id)
-            self._tree_view.select_tree_node_by_file_id(file_id)
+            retry = self._tree_view.select_tree_node_by_file_id(file_id)
+            logger.info(f"→ 重试: {'✓ 找到' if retry else '✗ 仍未找到'}")
 
     @Slot()
     def _on_reload_current_unit(self) -> None:

@@ -589,6 +589,11 @@ class FolderTreeView(QTreeView):
                                         if sel:
                                             sel.blockSignals(False)
                                     return True
+        # Debug: log tree state when not found
+        for r, root in enumerate(model._roots):
+            for c, child in enumerate(root.children):
+                fc = len(child.children) if child.children else 0
+                logger.debug(f"  树: root={r} unit={c} id={child.node_id} children={fc}")
         return False
 
     @Slot()
