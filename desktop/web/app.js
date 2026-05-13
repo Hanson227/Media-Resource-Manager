@@ -116,11 +116,7 @@ const UnitsPage = {
                   <span v-if="!u.cover_file_id || coverFailed[u.id]" class="mdi mdi-folder-image"></span>
                 </div>
                 <div class="info">
-<<<<<<< HEAD
                   <div class="name">{{ u.name }}<span v-if="u.is_starred" class="star-icon">⭐</span></div>
-=======
-                  <div class="name">{{ u.name }}</div>
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
                   <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}</div>
                 </div>
               </div>
@@ -278,7 +274,6 @@ const UnitFilesPage = {
           <input v-model="searchQuery" type="text" placeholder="搜索文件名..." class="search-input">
           <button v-if="searchQuery" class="search-clear" @click="searchQuery = ''"><span class="mdi mdi-close"></span></button>
         </div>
-<<<<<<< HEAD
         <div class="tag-filter-bar" v-if="allTags.length > 0">
           <button v-for="t in allTags" :key="t.id" class="tag-chip"
             :class="{ active: activeTagIds.includes(t.id) }"
@@ -287,65 +282,6 @@ const UnitFilesPage = {
             {{ t.name }}
           </button>
         </div>
-=======
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
-        <div class="feed-grid">
-          <div v-for="f in sortedFiles" :key="f.id" class="feed-item" @click="preview(f)">
-            <div class="thumb-wrap">
-              <img :src="thumbUrl(f.id)" loading="lazy"
-                @load="onImgLoad(f.id)" @error="onImgError($event, f.id)"
-                :alt="f.filename"
-                :class="{ loaded: loaded.has(f.id) }">
-              <span v-if="!loaded.has(f.id)" class="fallback-icon">
-                <span class="mdi" :class="f.media_type === 'video' ? 'mdi-filmstrip-box-multiple' : 'mdi-file-image-outline'"></span>
-              </span>
-              <span v-if="f.media_type === 'video'" class="vid-badge"><span class="mdi mdi-play"></span></span>
-              <span v-if="f.media_type === 'video' && f.duration_ms" class="dur-badge">{{ fmtDuration(f.duration_ms) }}</span>
-            </div>
-            <div class="file-info">
-              <div class="name">{{ f.filename }}</div>
-              <div class="meta">{{ formatSize(f.size_bytes) }}</div>
-            </div>
-          </div>
-        </div>
-      </template>
-    </div>
-  `,
-  props: ['serverUrl'],
-  emits: ['loading'],
-  data() { return {
-    loading: true, unitName: '', files: [], loaded: new Set(), errored: new Set(),
-    sortBy: localStorage.getItem('file_sort_by') || 'name',
-    sortOrder: localStorage.getItem('file_sort_order') || 'asc',
-    searchQuery: '',
-    refreshing: false,
-<<<<<<< HEAD
-    allTags: [],
-    activeTagIds: [],
-    tagMapping: {},
-  }},
-  computed: {
-    filteredFiles() {
-      let result = this.files;
-      if (this.searchQuery) {
-        const q = this.searchQuery.toLowerCase();
-        result = result.filter(f => f.filename.toLowerCase().includes(q));
-      }
-      if (this.activeTagIds.length > 0) {
-        result = result.filter(f => {
-          const ftags = this.tagMapping[f.id] || [];
-          return this.activeTagIds.every(tid => ftags.includes(tid));
-        });
-      }
-      return result;
-=======
-  }},
-  computed: {
-    filteredFiles() {
-      if (!this.searchQuery) return this.files;
-      const q = this.searchQuery.toLowerCase();
-      return this.files.filter(f => f.filename.toLowerCase().includes(q));
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
     },
     sortedFiles() {
       const arr = [...this.filteredFiles];
@@ -400,55 +336,11 @@ const UnitFilesPage = {
       if (this.sortBy !== field) return 'mdi-unfold-more-horizontal';
       return this.sortOrder === 'asc' ? 'mdi-sort-ascending' : 'mdi-sort-descending';
     },
-<<<<<<< HEAD
     toggleTag(tagId) {
       const idx = this.activeTagIds.indexOf(tagId);
       if (idx >= 0) this.activeTagIds.splice(idx, 1);
       else this.activeTagIds.push(tagId);
     },
-=======
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
-    async refresh() {
-      if (this.refreshing) return;
-      this.refreshing = true;
-      try {
-        const id = this.$route.params.id;
-        const data = await api(this.serverUrl, '/api/units/' + id + '/files');
-        this.unitName = data.unit_name || '';
-        this.files = data.files || [];
-      } catch(e) {
-        // refresh failed
-      } finally {
-        this.refreshing = false;
-      }
-    },
-  },
-  async mounted() {
-    this.$emit('loading', true);
-    try {
-      const id = this.$route.params.id;
-<<<<<<< HEAD
-      const [data, tagsData, mapData] = await Promise.all([
-        api(this.serverUrl, '/api/units/' + id + '/files'),
-        api(this.serverUrl, '/api/tags'),
-        api(this.serverUrl, '/api/tags/mapped-files'),
-      ]);
-      this.unitName = data.unit_name || '';
-      this.files = data.files || [];
-      this.allTags = tagsData.tags || [];
-      // Build file_id → tag_ids mapping
-      const mapping = {};
-      if (mapData.mappings) {
-        for (const [fidStr, tags] of Object.entries(mapData.mappings)) {
-          mapping[parseInt(fidStr)] = tags.map(t => t.id);
-        }
-      }
-      this.tagMapping = mapping;
-=======
-      const data = await api(this.serverUrl, '/api/units/' + id + '/files');
-      this.unitName = data.unit_name || '';
-      this.files = data.files || [];
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
     } catch(e) {
       this.files = [];
     } finally {

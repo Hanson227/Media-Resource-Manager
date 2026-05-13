@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 # HEIC/HEIF 文件头特征（前 12 字节的 ftyp box）
 _HEIC_FTYP_SIGNATURES = {
-    b"ftypheic", b"ftypheix", b"ftyphevc", b"ftypheim",
-    b"ftypheis", b"ftypmif1", b"ftypmsf1",
+    b"heic", b"heix", b"hevc", b"heim",
+    b"heis", b"mif1", b"msf1",
 }
 
 

@@ -524,7 +524,6 @@ body {
   font-size: 16px; cursor: pointer; padding: 2px;
 }
 
-<<<<<<< HEAD
 /* ========== Tag Filter Bar ========== */
 .tag-filter-bar {
   display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 12px;
@@ -538,8 +537,6 @@ body {
 .tag-chip.active { color: #fff; font-weight: 600; }
 .tag-chip:hover { border-color: var(--text-secondary); color: var(--text-primary); }
 
-=======
->>>>>>> ee40201bd3c2eb63da2a5b5d41e02f6d9083b61d
 /* ========== Offline Banner ========== */
 .offline-banner {
   position: sticky; top: 0; z-index: 50;

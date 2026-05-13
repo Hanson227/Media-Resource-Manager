@@ -191,11 +191,6 @@ class MainWindow(QMainWindow):
         dedup_btn.setToolTip("对选中的资源单元执行查重 (Ctrl+D)")
         toolbar.addWidget(dedup_btn)
 
-        heic_btn = QPushButton("HEIC")
-        heic_btn.clicked.connect(self._on_heic_convert)
-        heic_btn.setToolTip("将选中的 HEIC 文件批量转换为 JPG")
-        toolbar.addWidget(heic_btn)
-
         toolbar.addSeparator()
 
         self._search_input = QLineEdit()
@@ -358,7 +353,7 @@ class MainWindow(QMainWindow):
 
         # ---- 文件级联动 ----
         self._tree_view.file_selected_from_tree.connect(self._grid_view.select_file_by_id)
-        self._grid_view.file_selected_in_grid.connect(self._tree_view.select_tree_node_by_file_id)
+        self._grid_view.file_selected_in_grid.connect(self._on_file_selected_in_grid)
 
         # ---- 右键菜单：合并/拆分 ----
         self._tree_view.merge_requested.connect(self._on_merge_units)
@@ -852,6 +847,35 @@ class MainWindow(QMainWindow):
             self._status_bar.set_status("媒体库已删除")
         except Exception as e:
             QMessageBox.critical(self, "删除失败", str(e))
+
+    @Slot(int)
+    def _on_file_selected_in_grid(self, file_id: int) -> None:
+        """右侧网格点击文件 → 左侧树同步高亮。若树未展开则先展开。"""
+        # 先尝试直接查找（已展开的单元）
+        if self._tree_view.select_tree_node_by_file_id(file_id):
+            return
+
+        # 未找到 → 查出文件所属的 unit，展开后再试
+        try:
+            with DatabaseManager.session() as session:
+                from app.db.models import MediaFile
+                mf = session.query(MediaFile).filter(MediaFile.id == file_id).first()
+                if not mf:
+                    return
+                unit_id = mf.resource_unit_id
+                files = q.get_files_by_unit(session, unit_id)
+                file_dicts = [
+                    {"id": f.id, "filename": f.filename,
+                     "path": f.path, "size_bytes": f.size_bytes}
+                    for f in files
+                ]
+        except Exception as e:
+            logger.warning(f"网格→树同步查询失败: {e}")
+            return
+
+        tree_model = self._tree_view.model()
+        tree_model.expand_unit(unit_id, file_dicts)
+        self._tree_view.select_tree_node_by_file_id(file_id)
 
     # ============================================================
     # 查重流程
