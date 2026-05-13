@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QLineEdit, QColorDialog,
     QMessageBox, QGroupBox, QFormLayout,
 )
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPixmap, QPainter, QIcon
 
 from app.db.engine import DatabaseManager
 from app.db import queries as q
@@ -90,6 +90,13 @@ class TagManageDialog(QDialog):
 
         self._load_tags()
 
+    @staticmethod
+    def _make_color_icon(hex_color: str) -> QIcon:
+        """生成 16x16 的纯色图标。"""
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(QColor(hex_color))
+        return QIcon(pixmap)
+
     def _load_tags(self) -> None:
         """从数据库加载标签列表。"""
         self._list.clear()
@@ -103,7 +110,8 @@ class TagManageDialog(QDialog):
         for tag in tags:
             item = QListWidgetItem()
             color = tag.color or "#888888"
-            item.setText(f"{tag.name}  ({color})")
+            item.setText(tag.name)
+            item.setIcon(self._make_color_icon(color))
             item.setData(Qt.ItemDataRole.UserRole, tag.id)
             item.setData(Qt.ItemDataRole.UserRole + 1, tag.name)
             item.setData(Qt.ItemDataRole.UserRole + 2, color)
