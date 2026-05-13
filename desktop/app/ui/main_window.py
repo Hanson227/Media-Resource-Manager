@@ -470,36 +470,8 @@ class MainWindow(QMainWindow):
         # 显示标签筛选栏
         self._tag_bar.reload_tags()
 
-        # ---- 展开树文件子节点（不 expandAll） ----
-        try:
-            with DatabaseManager.session() as session:
-                files = q.get_files_by_unit(session, unit_id)
-                # 批量加载标签映射
-                all_mapped = q.get_all_mapped_files(session)
-                file_dicts = []
-                for f in files:
-                    fid = f.id
-                    tags_list = all_mapped.get(fid, [])
-                    tags_str = ", ".join(t["name"] for t in tags_list) if tags_list else ""
-                    indexed = f.indexed_at.isoformat() if f.indexed_at else ""
-                    file_dicts.append({
-                        "id": fid, "filename": f.filename,
-                        "path": f.path, "size_bytes": f.size_bytes,
-                        "created_at": indexed[:10],
-                        "tags_str": tags_str,
-                    })
-            tree_model = self._tree_view.model()
-            tree_model.expand_unit(unit_id, file_dicts)
-            # 找到单元节点并展开
-            for root_row, root in enumerate(tree_model._roots):
-                root_idx = tree_model.index(root_row, 0)
-                for child_row, child in enumerate(root.children):
-                    if child.node_id == unit_id and child.node_type == "unit" and child.node_subtype != "file":
-                        unit_idx = tree_model.index(child_row, 0, root_idx)
-                        self._tree_view.expand(unit_idx)
-                        break
-        except Exception as e:
-            logger.error(f"展开单元文件树失败: {e}")
+        # ---- 展开树文件子节点 ----
+        self._load_tree_files(unit_id)
 
         # ---- 自动选中第一个文件（仅网格高亮，树保持文件夹高亮） ----
         if self._grid_model.file_list:
@@ -524,6 +496,67 @@ class MainWindow(QMainWindow):
 
 
     @Slot()
+    # ============================================================
+    # 双向联动：网格 ↔ 树同步
+    # ============================================================
+
+    def _load_tree_files(self, unit_id: int) -> list[dict]:
+        """加载单元文件到树节点（含标签+日期）。返回 file_dicts。"""
+        try:
+            with DatabaseManager.session() as session:
+                files = q.get_files_by_unit(session, unit_id)
+                all_mapped = q.get_all_mapped_files(session)
+                file_dicts = []
+                for f in files:
+                    tags_list = all_mapped.get(f.id, [])
+                    tags_str = ", ".join(t["name"] for t in tags_list) if tags_list else ""
+                    indexed = f.indexed_at.isoformat() if f.indexed_at else ""
+                    file_dicts.append({
+                        "id": f.id, "filename": f.filename,
+                        "path": f.path, "size_bytes": f.size_bytes,
+                        "created_at": indexed[:10],
+                        "tags_str": tags_str,
+                    })
+        except Exception as e:
+            logger.error(f"加载树文件节点失败: {e}")
+            return []
+
+        tree_model = self._tree_view.model()
+        # 先折叠旧数据再展开（刷新文件节点）
+        tree_model.collapse_unit(unit_id)
+        tree_model.expand_unit(unit_id, file_dicts)
+        # 找到单元节点并展开
+        for root_row, root in enumerate(tree_model._roots):
+            root_idx = tree_model.index(root_row, 0)
+            for child_row, child in enumerate(root.children):
+                if child.node_id == unit_id and child.node_type == "unit" and child.node_subtype != "file":
+                    unit_idx = tree_model.index(child_row, 0, root_idx)
+                    self._tree_view.expand(unit_idx)
+                    break
+        return file_dicts
+
+    @Slot(int)
+    def _on_file_selected_in_grid(self, file_id: int) -> None:
+        """右侧网格点击文件 → 左侧树同步高亮。树未展开则自动加载后选中。"""
+        if self._tree_view.select_tree_node_by_file_id(file_id):
+            return
+        if self._current_unit_id is not None:
+            self._load_tree_files(self._current_unit_id)
+            self._tree_view.select_tree_node_by_file_id(file_id)
+
+    @Slot()
+    def _on_reload_current_unit(self) -> None:
+        """重新加载当前单元（删除文件后刷新网格+树）。"""
+        uid = self._current_unit_id
+        if uid is None:
+            return
+        self._grid_view.load_unit(uid)
+        self._load_tree_files(uid)
+
+    # ============================================================
+    # 面包屑导航
+    # ============================================================
+
     def _on_breadcrumb_back(self) -> None:
         """点击面包屑 → 返回当前单元所属媒体库的文件夹卡片。"""
         if not self._breadcrumb.isVisible():
@@ -848,77 +881,6 @@ class MainWindow(QMainWindow):
             self._status_bar.set_status("媒体库已删除")
         except Exception as e:
             QMessageBox.critical(self, "删除失败", str(e))
-
-    @Slot(int)
-    def _on_file_selected_in_grid(self, file_id: int) -> None:
-        """右侧网格点击文件 → 左侧树同步高亮。若树未展开则先展开。"""
-        # 先尝试直接查找（已展开的单元）
-        if self._tree_view.select_tree_node_by_file_id(file_id):
-            return
-
-        # 未找到 → 查出文件所属的 unit，展开后再试
-        try:
-            with DatabaseManager.session() as session:
-                from app.db.models import MediaFile
-                mf = session.query(MediaFile).filter(MediaFile.id == file_id).first()
-                if not mf:
-                    return
-                unit_id = mf.resource_unit_id
-                files = q.get_files_by_unit(session, unit_id)
-                all_mapped = q.get_all_mapped_files(session)
-                file_dicts = []
-                for f in files:
-                    tags_list = all_mapped.get(f.id, [])
-                    tags_str = ", ".join(t["name"] for t in tags_list) if tags_list else ""
-                    indexed = f.indexed_at.isoformat() if f.indexed_at else ""
-                    file_dicts.append({
-                        "id": f.id, "filename": f.filename,
-                        "path": f.path, "size_bytes": f.size_bytes,
-                        "created_at": indexed[:10],
-                        "tags_str": tags_str,
-                    })
-        except Exception as e:
-            logger.warning(f"网格→树同步查询失败: {e}")
-            return
-
-        # 展开目标 unit 后选中文件
-        tree_model = self._tree_view.model()
-        # 确保单元没有已展开的子节点再展开（防止重复展开）
-        unit_node = tree_model.get_node_by_unit_id(unit_id)
-        if unit_node is not None and not unit_node.children:
-            tree_model.expand_unit(unit_id, file_dicts)
-        self._tree_view.select_tree_node_by_file_id(file_id)
-
-    @Slot()
-    def _on_reload_current_unit(self) -> None:
-        """重新加载当前单元（删除文件后刷新网格+树）。"""
-        uid = self._current_unit_id
-        if uid is None:
-            return
-        # 重新加载网格
-        self._grid_view.load_unit(uid)
-        # 重新加载树文件节点
-        try:
-            with DatabaseManager.session() as session:
-                files = q.get_files_by_unit(session, uid)
-                all_mapped = q.get_all_mapped_files(session)
-                file_dicts = []
-                for f in files:
-                    tags_list = all_mapped.get(f.id, [])
-                    tags_str = ", ".join(t["name"] for t in tags_list) if tags_list else ""
-                    indexed = f.indexed_at.isoformat() if f.indexed_at else ""
-                    file_dicts.append({
-                        "id": f.id, "filename": f.filename,
-                        "path": f.path, "size_bytes": f.size_bytes,
-                        "created_at": indexed[:10],
-                        "tags_str": tags_str,
-                    })
-            tree_model = self._tree_view.model()
-            # 先折叠再展开，确保文件节点刷新
-            tree_model.collapse_unit(uid)
-            tree_model.expand_unit(uid, file_dicts)
-        except Exception as e:
-            logger.error(f"重新加载单元文件树失败: {e}")
 
     # ============================================================
     # 查重流程
