@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-代码修改后请运行 `python desktop/tests/test_flow.py` 验证确认无误。请使用中文进行回答，代码、文件名、API 名等保持英文。
+代码修改后请运行 `python desktop/tests/test_flow.py` 验证确认无误。涉及 web 前端修改 (`desktop/web/` 下的文件) 还需额外运行 `PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py` 验证浏览器测试全通过。请使用中文进行回答，代码、文件名、API 名等保持英文。
 
 ## Repo Structure
 
@@ -17,10 +17,6 @@ Media/                          # Git root — monorepo
 ├── README.md
 └── CLAUDE.md
 ```
-
-## Testing Policy
-
-所有新增功能必须附带对应的测试用例，合并到 `desktop/tests/test_flow.py` 中。
 
 ### 覆盖层级
 
@@ -40,14 +36,8 @@ Media/                          # Git root — monorepo
 ### 执行
 
 - 新增功能实现后，运行 `python desktop/tests/test_flow.py` 确认全部通过
+- 涉及前端页面改进的需要附带相应测试案例进入`desktop/tests/test_web_playwright.py`。
 - 所有测试按 `test_TAG()` 函数组织，在 `main()` 中按顺序调用
-
-### Bug Fix 纪律
-
-1. **追踪完整数据流** — 报 bug 时先 tracing 整条链：请求 → 端点 → 存储 → 返回，每步加日志验证，不准假设中间环节正确
-2. **一次只修一个 bug** — 同一轮改动不超过 2 个文件，修渲染就别同时改播放器
-3. **复现测试先 FAIL** — fix 前写最小测试让它 FAIL 证明 bug 存在，fix 后确认变 PASS，测试必须直接对应 bug，不准写宽松判据绕过
-4. **三次失败换思路** — 同一个 bug 修两次没好，第三次必须写根因分析做架构性质疑，而不是再修一层
 
 ## Commands
 
@@ -63,6 +53,9 @@ cd desktop && python tests/test_flow.py
 
 # Run web frontend tests (requires API server running)
 python desktop/tests/test_web.py
+
+# Run web frontend Playwright browser tests
+PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py
 
 # Or run from repo root (main.py auto-switches CWD)
 python desktop/main.py

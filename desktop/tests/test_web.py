@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Web 前端基础功能测试 —— 通过 HTTP 验证 SPA 可加载和 API 字段完整性。
 运行前确保 API 服务器已启动（http://localhost:19527）。
