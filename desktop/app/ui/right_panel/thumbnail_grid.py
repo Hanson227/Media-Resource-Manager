@@ -382,6 +382,7 @@ class ThumbnailGridView(QListView):
     preview_requested = Signal(int, str, str)  # file_id, file_path, media_type
     cover_from_file_requested = Signal(str)    # 右键图片 → 设为此单元封面
     file_selected_in_grid = Signal(int)        # file_id — 网格中单击文件时发射
+    file_deleted = Signal()                    # 文件已删除，请求刷新
 
     def __init__(self, model: ThumbnailGridModel, config: AppConfig,
                  parent=None) -> None:
@@ -622,6 +623,22 @@ class ThumbnailGridView(QListView):
                     self.preview_requested.emit(fid, fp, mt)
                     event.accept()
                     return
+
+        # Delete 键 → 删除选中文件
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            idxs = self.selectedIndexes()
+            if idxs:
+                model = self.model()
+                if isinstance(model, FolderCardModel):
+                    super().keyPressEvent(event)
+                    return
+                fid = model.data(idxs[0], Qt.ItemDataRole.UserRole + 1)
+                fp = model.data(idxs[0], Qt.ItemDataRole.UserRole)
+                if fid and fp:
+                    self._delete_file(fp, fid)
+                    event.accept()
+                    return
+
         super().keyPressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
@@ -775,4 +792,4 @@ class ThumbnailGridView(QListView):
             QMessageBox.warning(self, "部分成功",
                 f"文件已移至回收站，但数据库记录删除失败: {e}。\n请稍后手动重新扫描以清理。")
 
-        self.refresh()
+        self.file_deleted.emit()

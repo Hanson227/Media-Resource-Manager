@@ -140,11 +140,13 @@ class HeicBatchConvertDialog(QDialog):
         self._path_label.setText(str(folder_path))
         self._path_label.setStyleSheet("color: #fff;")
 
-        # 递归扫描 HEIC 文件
+        # 递归扫描 HEIC 文件（set 去重，Windows 不区分大小写可能重复匹配）
         heic_files: list[Path] = []
+        seen: set[Path] = set()
         for pattern in ("*.heic", "*.HEIC", "*.heif", "*.HEIF"):
             for f in folder_path.rglob(pattern):
-                if f.is_file() and is_heic_file(f):
+                if f.is_file() and f not in seen and is_heic_file(f):
+                    seen.add(f)
                     heic_files.append(f)
 
         self._sources = heic_files
