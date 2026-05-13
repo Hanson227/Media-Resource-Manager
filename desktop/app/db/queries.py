@@ -288,11 +288,22 @@ def update_file_unit(session: Session, file_id: int, unit_id: int) -> None:
     })
 
 
-def delete_media_file(session: Session, file_id: int) -> None:
+def delete_media_file(session: Session, file_id: int) -> bool:
     """删除一条媒体文件记录（级联删除关联的人脸向量和视频帧）。"""
     mf = session.query(MediaFile).filter(MediaFile.id == file_id).first()
     if mf:
         session.delete(mf)
+        return True
+    return False
+
+
+def delete_resource_unit(session: Session, unit_id: int) -> bool:
+    """删除一个资源单元（级联删除关联的 media_files、face_vectors、video_frames）。"""
+    unit = session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).first()
+    if unit:
+        session.delete(unit)
+        return True
+    return False
 
 
 def get_file_count_by_unit_ids(session: Session, unit_ids: list[int]) -> dict[int, int]:

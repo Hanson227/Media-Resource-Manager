@@ -353,6 +353,7 @@ class FolderTreeView(QTreeView):
     exclude_requested = Signal(int)
     cover_requested = Signal(int)
     clear_cover_requested = Signal(int)
+    delete_requested = Signal(int)        # 删除资源单元
     remove_root_requested = Signal(int)
     rename_requested = Signal(int)        # F2: 重命名单元
     copy_path_requested = Signal(str)     # Ctrl+C: 复制路径
@@ -569,6 +570,7 @@ class FolderTreeView(QTreeView):
         menu.exclude_requested.connect(self.exclude_requested.emit)
         menu.cover_requested.connect(self.cover_requested.emit)
         menu.clear_cover_requested.connect(self.clear_cover_requested.emit)
+        menu.delete_requested.connect(self.delete_requested.emit)
         menu.remove_root_requested.connect(self.remove_root_requested.emit)
         menu.refresh_requested.connect(self.refresh_model)
         menu.exec(self.viewport().mapToGlobal(pos))

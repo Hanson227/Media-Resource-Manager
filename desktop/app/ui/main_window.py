@@ -122,6 +122,11 @@ class MainWindow(QMainWindow):
         dedup_action.triggered.connect(self._on_start_dedup)
         tools_menu.addAction(dedup_action)
 
+        tag_action = QAction("管理标签(&T)...", self)
+        tag_action.setStatusTip("创建、编辑或删除文件标签")
+        tag_action.triggered.connect(self._on_manage_tags)
+        tools_menu.addAction(tag_action)
+
         heic_action = QAction("HEIC 转换(&H)...", self)
         heic_action.setStatusTip("将选中的 HEIC 文件批量转换为 JPG")
         heic_action.triggered.connect(self._on_heic_convert)
@@ -365,6 +370,7 @@ class MainWindow(QMainWindow):
         self._tree_view.exclude_requested.connect(self._on_exclude_unit)
         self._tree_view.cover_requested.connect(self._on_set_cover)
         self._tree_view.clear_cover_requested.connect(self._on_clear_cover)
+        self._tree_view.delete_requested.connect(self._on_delete_unit)
         self._tree_view.remove_root_requested.connect(self._on_remove_root)
 
         # ---- F2 重命名 / Ctrl+C 复制路径 ----
@@ -1006,17 +1012,69 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     @Slot()
-    @Slot()
     def _on_heic_convert(self) -> None:
-        """打开 HEIC 转换对话框。"""
-        from app.ui.dialogs.heic_convert import HeicConvertDialog
-        from PySide6.QtWidgets import QFileDialog
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "选择 HEIC 文件", "", "HEIC 图片 (*.heic *.heif);;所有文件 (*)",
+        """打开 HEIC 批量转换对话框。"""
+        from app.ui.dialogs.heic_batch_convert import HeicBatchConvertDialog
+        dlg = HeicBatchConvertDialog(self)
+        dlg.exec()
+        self._on_refresh_all()
+
+    @Slot()
+    def _on_manage_tags(self) -> None:
+        """打开标签管理对话框。"""
+        from app.ui.dialogs.tag_manager import TagManageDialog
+        dlg = TagManageDialog(self)
+        dlg.exec()
+        self._tag_bar.reload_tags()
+
+    @Slot(int)
+    def _on_delete_unit(self, unit_id: int) -> None:
+        """删除资源单元（移至回收站 + 删 DB）。"""
+        try:
+            with DatabaseManager.session() as session:
+                unit = q.get_unit_by_id(session, unit_id)
+                if unit is None:
+                    QMessageBox.warning(self, "删除失败", "资源单元不存在")
+                    return
+                unit_path = unit.path
+                file_count = q.get_unit_file_count(session, unit_id)
+        except Exception as e:
+            QMessageBox.critical(self, "删除失败", f"查询单元信息失败: {e}")
+            return
+
+        # 确认对话框
+        msg = f"确定要将文件夹「{Path(unit_path).name}」移至回收站？"
+        if file_count > 0:
+            msg += f"\n\n该文件夹包含 {file_count} 个文件。"
+        reply = QMessageBox.question(
+            self, "确认删除", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        if files:
-            HeicConvertDialog.run_for_files(files, self)
-            self._on_refresh_all()
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # 移至回收站
+        try:
+            import send2trash
+            send2trash.send2trash(unit_path)
+        except Exception as e:
+            QMessageBox.critical(self, "删除失败", f"无法将文件夹移至回收站: {e}")
+            return
+
+        # 删除 DB 记录
+        try:
+            with DatabaseManager.session() as session:
+                q.delete_resource_unit(session, unit_id)
+        except Exception as e:
+            logger.warning(f"数据库记录删除失败: {e}")
+            QMessageBox.warning(self, "部分成功",
+                f"文件夹已移至回收站，但数据库记录删除失败: {e}。\n请稍后手动重新扫描以清理。")
+
+        self._tree_view.refresh_model()
+        self._grid_view.clear()
+        self._current_unit_id = None
+        self._tag_bar.clear_selection()
+        self._tag_bar.hide()
 
     def _on_open_settings(self) -> None:
         from app.ui.dialogs.settings import SettingsDialog

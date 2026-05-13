@@ -13,7 +13,8 @@ from PySide6.QtCore import (
     Qt, QAbstractListModel, QModelIndex, Signal, Slot, QSize, QThread,
 )
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QListView, QAbstractItemView
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QListView, QAbstractItemView, QMenu
 
 from config import AppConfig
 from app.db.engine import DatabaseManager
@@ -223,6 +224,24 @@ class ThumbnailGridModel(QAbstractListModel):
     def set_tag_filter(self, tag_ids: list[int]) -> None:
         """按标签筛选文件。"""
         self._tag_filter_ids = tag_ids
+        self.beginResetModel()
+        self._apply_filter_in_place()
+        self.endResetModel()
+
+    def reload_tags(self) -> None:
+        """重新加载所有文件的标签映射并刷新显示。"""
+        file_ids = [f["id"] for f in self._full_files if f.get("id")]
+        self._tag_mappings.clear()
+        if file_ids:
+            try:
+                from app.db.queries import get_all_mapped_files
+                with DatabaseManager.session() as session:
+                    all_mapped = get_all_mapped_files(session)
+                    for fid in file_ids:
+                        if fid in all_mapped:
+                            self._tag_mappings[fid] = [t["id"] for t in all_mapped[fid]]
+            except Exception:
+                pass
         self.beginResetModel()
         self._apply_filter_in_place()
         self.endResetModel()
@@ -664,10 +683,97 @@ class ThumbnailGridView(QListView):
                 lambda *args, fp=file_path: self._convert_heic_file(fp)
             )
 
+        # 分配标签
+        if fid:
+            menu.addSeparator()
+            tag_menu = QMenu("分配标签", self)
+            try:
+                with DatabaseManager.session() as session:
+                    all_tags = q.get_all_tags(session)
+                    file_tag_ids = [t.id for t in q.get_file_tags(session, fid)]
+            except Exception:
+                all_tags = []
+                file_tag_ids = []
+
+            for tag in all_tags:
+                tag_action = QAction(f" {tag.name}", tag_menu)
+                tag_action.setCheckable(True)
+                tag_action.setChecked(tag.id in file_tag_ids)
+                tag_action.setData((fid, tag.id))
+                tag_action.triggered.connect(self._on_tag_toggle)
+                tag_menu.addAction(tag_action)
+
+            if all_tags:
+                menu.addMenu(tag_menu)
+            else:
+                no_tag_action = QAction("（暂无标签）", tag_menu)
+                no_tag_action.setEnabled(False)
+                tag_menu.addAction(no_tag_action)
+                menu.addMenu(tag_menu)
+
+        # 删除文件
+        if file_path and fid:
+            menu.addSeparator()
+            del_action = menu.addAction("删除文件")
+            del_action.setToolTip("将文件移至回收站并从媒体库移除")
+            del_action.triggered.connect(
+                lambda *args, fp=file_path, fid=fid: self._delete_file(fp, fid)
+            )
+
         menu.exec(self.viewport().mapToGlobal(pos))
 
     def _convert_heic_file(self, file_path: str) -> None:
         """右键菜单触发单个 HEIC 文件转换。"""
         from app.ui.dialogs.heic_convert import HeicConvertDialog
         HeicConvertDialog.run_for_files([file_path], self)
+        self.refresh()
+
+    def _on_tag_toggle(self) -> None:
+        """切换文件标签。"""
+        action = self.sender()
+        if not action:
+            return
+        fid, tag_id = action.data()
+        checked = action.isChecked()
+
+        try:
+            with DatabaseManager.session() as session:
+                current_ids = [t.id for t in q.get_file_tags(session, fid)]
+                if checked and tag_id not in current_ids:
+                    current_ids.append(tag_id)
+                elif not checked and tag_id in current_ids:
+                    current_ids.remove(tag_id)
+                q.set_file_tags(session, fid, current_ids)
+        except Exception as e:
+            logger.warning(f"标签更新失败: {e}")
+            action.setChecked(not checked)  # 回滚
+
+        self._file_model.reload_tags()
+
+    def _delete_file(self, file_path: str, file_id: int) -> None:
+        """将文件移至回收站并删除数据库记录。"""
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要将此文件移至回收站？\n{os.path.basename(file_path)}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            import send2trash
+            send2trash.send2trash(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "删除失败", f"无法将文件移至回收站: {e}")
+            return
+
+        try:
+            with DatabaseManager.session() as session:
+                q.delete_media_file(session, file_id)
+        except Exception as e:
+            logger.warning(f"数据库记录删除失败: {e}")
+            QMessageBox.warning(self, "部分成功",
+                f"文件已移至回收站，但数据库记录删除失败: {e}。\n请稍后手动重新扫描以清理。")
+
         self.refresh()
