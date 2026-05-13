@@ -403,6 +403,7 @@ class FolderTreeView(QTreeView):
     def __init__(self, model: FolderTreeModel, parent=None) -> None:
         super().__init__(parent)
         self._model = model
+        self._syncing_file: bool = False  # 防同步循环
         self.setModel(model)
         header = self.header()
         header.setStretchLastSection(False)
@@ -520,6 +521,8 @@ class FolderTreeView(QTreeView):
         - 文件夹节点 → folder_single_clicked(unit_id)
         - 根/收藏节点 → unit_selected(list[unit_ids])
         """
+        if self._syncing_file:
+            return
         indexes = self.selectedIndexes()
         if not indexes:
             return
@@ -563,38 +566,39 @@ class FolderTreeView(QTreeView):
     def select_tree_node_by_file_id(self, file_id: int) -> bool:
         """选中指定文件 ID 对应的树节点。只展开目标路径，不 expandAll。
         返回 True 表示找到并选中，False 表示未找到。"""
-        model = self._model
-        for root_row, root in enumerate(model._roots):
-            root_idx = model.index(root_row, 0)
-            if not root_idx.isValid():
-                continue
-            for child_row, child in enumerate(root.children):
-                if child.node_type == "unit" and child.children:
-                    for f_row, f_node in enumerate(child.children):
-                        if f_node.node_id == file_id:
-                            # 仅展开目标路径
-                            self.expand(root_idx)
-                            unit_idx = model.index(child_row, 0, root_idx)
-                            if unit_idx.isValid():
-                                self.expand(unit_idx)
-                                file_idx = model.index(f_row, 0, unit_idx)
-                                if file_idx.isValid():
-                                    sel = self.selectionModel()
-                                    if sel:
-                                        sel.blockSignals(True)
-                                    try:
+        if self._syncing_file:
+            return False
+        self._syncing_file = True
+        try:
+            model = self._model
+            for root_row, root in enumerate(model._roots):
+                root_idx = model.index(root_row, 0)
+                if not root_idx.isValid():
+                    continue
+                for child_row, child in enumerate(root.children):
+                    if child.node_type == "unit" and child.children:
+                        for f_row, f_node in enumerate(child.children):
+                            if f_node.node_id == file_id:
+                                self.setAnimated(False)
+                                self.expand(root_idx)
+                                unit_idx = model.index(child_row, 0, root_idx)
+                                if unit_idx.isValid():
+                                    self.expand(unit_idx)
+                                    file_idx = model.index(f_row, 0, unit_idx)
+                                    if file_idx.isValid():
                                         self.setCurrentIndex(file_idx)
                                         self.scrollTo(file_idx)
-                                    finally:
-                                        if sel:
-                                            sel.blockSignals(False)
-                                    return True
-        # Debug: log tree state when not found
-        for r, root in enumerate(model._roots):
-            for c, child in enumerate(root.children):
-                fc = len(child.children) if child.children else 0
-                logger.debug(f"  树: root={r} unit={c} id={child.node_id} children={fc}")
-        return False
+                                self.setAnimated(True)
+                                self.viewport().update()
+                                return True
+            # Debug: log tree state when not found
+            for r, root in enumerate(model._roots):
+                for c, child in enumerate(root.children):
+                    fc = len(child.children) if child.children else 0
+                    logger.debug(f"  树: root={r} unit={c} id={child.node_id} children={fc}")
+            return False
+        finally:
+            self._syncing_file = False
 
     @Slot()
     def _on_context_menu(self, pos) -> None:
