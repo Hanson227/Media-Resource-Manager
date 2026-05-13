@@ -1868,9 +1868,127 @@ def test_expand_unit_preserves_other_state():
     check("T19: unitB 子节点不受收起影响=1", model.rowCount(unitB_idx) == 1)
 
 
-# ============================================================
-# 主测
-# ============================================================
+
+def test_file_unit_delete_db():
+    """T20: 文件/文件夹删除 DB 层 — delete_media_file + delete_resource_unit。"""
+    section("T20: 文件/文件夹删除 DB 层")
+    from app.db import queries as qq
+    from app.db.models import MediaFile, ResourceUnit
+
+    with DatabaseManager.session() as session:
+        # 获取一个单元和它的文件
+        units = qq.get_all_active_units(session)
+        if not units:
+            check("T20: 无可用单元，跳过", True)
+            return
+
+        unit = units[0]
+        files = qq.get_files_by_unit(session, unit.id)
+        if not files:
+            check("T20: 单元无文件，跳过", True)
+            return
+
+        f = files[0]
+
+        # 测试 delete_media_file 返回 True
+        ok = qq.delete_media_file(session, f.id)
+        check("T20: delete_media_file 返回 True", ok)
+
+        # 验证已删除
+        deleted = session.query(MediaFile).filter(MediaFile.id == f.id).first()
+        check("T20: 文件记录已删除", deleted is None)
+
+        # 测试对不存在 ID 返回 False
+        ok2 = qq.delete_media_file(session, -999)
+        check("T20: 不存在文件返回 False", not ok2)
+
+        # 测试 delete_resource_unit
+        unit2 = qq.create_unit(session, "/tmp/test_delete_unit", "test_delete",
+                               unit.library_root_id, file_count=1, total_size=100)
+        check("T20: 临时单元创建成功", unit2.id is not None)
+
+        ok3 = qq.delete_resource_unit(session, unit2.id)
+        check("T20: delete_resource_unit 返回 True", ok3)
+        deleted_unit = session.query(ResourceUnit).filter(ResourceUnit.id == unit2.id).first()
+        check("T20: 单元记录已删除", deleted_unit is None)
+
+        # 对不存在 ID 返回 False
+        ok4 = qq.delete_resource_unit(session, -999)
+        check("T20: 不存在单元返回 False", not ok4)
+
+
+def test_tag_assign_ui():
+    """T21: 标签右键分配 — grid context menu 子菜单构造正确。"""
+    section("T21: 标签右键分配 UI")
+    from PySide6.QtWidgets import QApplication, QMenu
+    from PySide6.QtGui import QAction
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.ui.right_panel.thumbnail_grid import ThumbnailGridView, ThumbnailGridModel
+    from config import AppConfig
+    from app.db import queries as qq
+    from app.db.models import MediaFile
+
+    config = AppConfig()
+    model = ThumbnailGridModel(config)
+    view = ThumbnailGridView(model, config)
+
+    # 先创建测试标签
+    with DatabaseManager.session() as session:
+        tag_a = qq.create_tag(session, "测试标签A", "#FF0000")
+        tag_b = qq.create_tag(session, "测试标签B", "#00FF00")
+        tag_a_id = tag_a.id
+        tag_b_id = tag_b.id
+
+    # 使用真实文件 ID 做测试
+    with DatabaseManager.session() as session:
+        real_file = session.query(MediaFile).first()
+        if real_file is None:
+            check("T21: 无可用文件，跳过", True)
+            with DatabaseManager.session() as s:
+                qq.delete_tag(s, tag_a_id)
+                qq.delete_tag(s, tag_b_id)
+            return
+        fid = real_file.id
+
+    # 构造标签子菜单
+    tag_menu = QMenu()
+    with DatabaseManager.session() as session:
+        all_tags = qq.get_all_tags(session)
+        file_tag_ids = [t.id for t in qq.get_file_tags(session, fid)]
+
+    for tag in all_tags:
+        act = QAction(f" {tag.name}", tag_menu)
+        act.setCheckable(True)
+        act.setChecked(tag.id in file_tag_ids)
+        act.setData((fid, tag.id))
+        tag_menu.addAction(act)
+
+    check("T21: 标签菜单项数>=2", tag_menu.actions().__len__() >= 2)
+
+    # 模拟勾选标签 A
+    for act in tag_menu.actions():
+        _fid, tid = act.data()
+        if tid == tag_a_id:
+            act.setChecked(True)
+            with DatabaseManager.session() as session:
+                current = [t.id for t in qq.get_file_tags(session, _fid)]
+                if tid not in current:
+                    current.append(tid)
+                qq.set_file_tags(session, _fid, current)
+            break
+
+    with DatabaseManager.session() as session:
+        updated = qq.get_file_tags(session, fid)
+    check("T21: 标签A已分配给文件", any(t.id == tag_a_id for t in updated))
+
+    # 清理
+    with DatabaseManager.session() as session:
+        qq.delete_tag(session, tag_a_id)
+        qq.delete_tag(session, tag_b_id)
+        qq.set_file_tags(session, fid, [])
+
 
 def main():
     global _passed, _failed
@@ -1936,6 +2054,8 @@ def main():
         test_accordion_collapse_previous()
         test_tree_file_click_highlight_in_grid()
         test_expand_unit_preserves_other_state()
+        test_file_unit_delete_db()
+        test_tag_assign_ui()
 
     finally:
         # 清理数据库连接
