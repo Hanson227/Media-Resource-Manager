@@ -12,9 +12,8 @@ from typing import Optional
 from PySide6.QtCore import (
     Qt, QAbstractListModel, QModelIndex, Signal, Slot, QSize, QThread,
 )
-from PySide6.QtGui import QPixmap
-from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QListView, QAbstractItemView, QMenu
+from PySide6.QtGui import QAction, QPixmap
+from PySide6.QtWidgets import QListView, QAbstractItemView, QMenu, QMenu
 
 from config import AppConfig
 from app.db.engine import DatabaseManager

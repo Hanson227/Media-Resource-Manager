@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TreeNode:
     """树节点的纯数据容器，不从 SQLAlchemy 继承。"""
-    node_type: str           # "root" | "unit"
+    node_type: str           # "root" | "unit" | "favorites"
     node_id: int             # 数据库 ID
     name: str                # 显示名称
     path: str                # 文件夹/文件路径
@@ -78,6 +78,30 @@ class FolderTreeModel(QAbstractItemModel):
             with DatabaseManager.session() as session:
                 roots = q.get_all_roots(session)
                 self._roots = []
+
+                # 收藏虚拟根节点（仅在有收藏时显示）
+                if starred_units:
+                    fav_node = TreeNode(
+                        node_type="favorites",
+                        node_id=-1,
+                        name=f"★ 收藏  ({len(starred_units)} 个片段)",
+                        path="",
+                    )
+                    for unit in starred_units:
+                        fav_node.children.append(TreeNode(
+                            node_type="unit",
+                            node_id=unit.id,
+                            name=unit.name,
+                            path=unit.path,
+                            file_count=unit.file_count or 0,
+                            total_size=unit.total_size or 0,
+                            is_manual=unit.is_manual or False,
+                            is_starred=True,
+                            status=unit.status or "active",
+                            library_root_id=-1,
+                            created_at=unit.created_at.isoformat() if unit.created_at else None,
+                        ))
+                    self._roots.append(fav_node)
 
                 for root in roots:
                     units = q.get_units_by_root(session, root.id)
@@ -204,8 +228,7 @@ class FolderTreeModel(QAbstractItemModel):
         else:
             pnode = parent.internalPointer()
             if pnode:
-                if pnode.node_type in ("root",) and row < len(pnode.children):
-                    return self.createIndex(row, column, pnode.children[row])
+                if pnode.node_type in ("root",) and row < len(pnode.children):                    return self.createIndex(row, column, pnode.children[row])
                 if pnode.node_type == "unit" and pnode.children and row < len(pnode.children):
                     return self.createIndex(row, column, pnode.children[row])
         return QModelIndex()
@@ -236,6 +259,8 @@ class FolderTreeModel(QAbstractItemModel):
             return len(self._roots)
         node = parent.internalPointer()
         if node and node.node_type in ("root",):
+            return len(node.children)
+        if node and node.node_type == "unit" and node.children:
             return len(node.children)
         if node and node.node_type == "unit" and node.children:
             return len(node.children)
@@ -495,8 +520,7 @@ class FolderTreeView(QTreeView):
         if node.node_type == "unit":
             # 文件夹节点 → 直接进入文件夹（加载文件列表）
             self.unit_double_clicked.emit(unit_ids[0])
-        elif node.node_type == "root":
-            # 根节点 → 发射 unit_selected（显示文件夹卡片）
+        elif node.node_type == "root":            # 根节点 → 发射 unit_selected（显示文件夹卡片）
             self.unit_selected.emit(list(unit_ids))
 
     @Slot()
