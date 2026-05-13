@@ -35,6 +35,7 @@ const ConnectPage = {
         <span v-if="statusOk" class="mdi mdi-check-circle"></span>
         <span v-else class="mdi mdi-alert-circle"></span>
         {{ statusMsg }}
+
       </div>
     </div>
   `,
@@ -467,7 +468,9 @@ const PreviewPage = {
       </div>
       <div class="preview-content" @click="onTap">
         <template v-if="mediaType === 'image'">
-          <img :src="streamUrl" :alt="filename" style="max-width:100%;max-height:100%;object-fit:contain">
+          <img :src="streamUrl" :alt="filename"
+            class="gesture-follow" :class="{ dragging: _navSwiping }"
+            :style="{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', transform: 'translateX(' + gestureOffsetX + 'px)' }">
           <div class="image-nav-hint" v-if="fileList.length > 1">
             <span class="mdi mdi-chevron-left" @click.stop="navigateToFile(fileIndex - 1)"></span>
             <span class="pos">{{ fileIndex + 1 }} / {{ fileList.length }}</span>
@@ -476,7 +479,9 @@ const PreviewPage = {
           <div class="gesture-zone" @touchstart.prevent="onNavSwipeStart($event)" @touchend="onNavSwipeEnd" @touchmove.prevent="onNavSwipeMove($event)"></div>
         </template>
         <template v-else-if="mediaType === 'video'">
-          <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop :src="streamUrl"></video>
+          <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop :src="streamUrl"
+  class="gesture-follow" :class="{ dragging: _navSwiping }"
+  :style="{ transform: 'translateX(' + gestureOffsetX + 'px)' }"></video>
 
           <!-- Gesture Zone -->
           <div class="gesture-zone"
@@ -523,6 +528,10 @@ const PreviewPage = {
             </button>
           </div>
         </template>
+
+          <!-- Navigation feedback toast -->
+          <div class="nav-feedback" :class="{ show: !!navigateFeedback }">{{ navigateFeedback }}</div>
+
       </div>
     </div>
   `,
