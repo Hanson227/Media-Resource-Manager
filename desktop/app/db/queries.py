@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     MediaLibraryRoot, ResourceUnit, MediaFile, FaceVector,
     VideoFrame, DedupResult, DedupFileMatch, Message,
-    Whitelist, ScanSession,
+    Whitelist, ScanSession, FileTag, FileTagMapping,
 )
 
 
@@ -603,3 +603,78 @@ def finish_scan_session(session: Session, session_id: int,
 def get_latest_scan_session(session: Session) -> Optional[ScanSession]:
     """获取最近一次扫描记录。"""
     return session.query(ScanSession).order_by(ScanSession.started_at.desc()).first()
+
+
+# ============================================================
+# 文件标签
+# ============================================================
+
+def create_tag(session: Session, name: str, color: Optional[str] = None) -> FileTag:
+    """创建一个新标签。"""
+    tag = FileTag(name=name, color=color)
+    session.add(tag)
+    session.flush()
+    return tag
+
+
+def get_all_tags(session: Session) -> list[FileTag]:
+    """获取所有标签（按名称排序）。"""
+    return session.query(FileTag).order_by(FileTag.name).all()
+
+
+def get_tag_by_id(session: Session, tag_id: int) -> Optional[FileTag]:
+    """按 ID 获取标签。"""
+    return session.query(FileTag).filter(FileTag.id == tag_id).first()
+
+
+def get_tag_by_name(session: Session, name: str) -> Optional[FileTag]:
+    """按名称查找标签。"""
+    return session.query(FileTag).filter(FileTag.name == name).first()
+
+
+def delete_tag(session: Session, tag_id: int) -> bool:
+    """删除标签（级联删除关联关系）。"""
+    tag = session.query(FileTag).filter(FileTag.id == tag_id).first()
+    if tag:
+        session.delete(tag)
+        return True
+    return False
+
+
+def set_file_tags(session: Session, file_id: int, tag_ids: list[int]) -> None:
+    """设置文件的标签（全量替换：先删旧关联，再插新关联）。"""
+    session.query(FileTagMapping).filter(FileTagMapping.file_id == file_id).delete()
+    for tid in tag_ids:
+        mapping = FileTagMapping(file_id=file_id, tag_id=tid)
+        session.add(mapping)
+    session.flush()
+
+
+def get_file_tags(session: Session, file_id: int) -> list[FileTag]:
+    """获取指定文件的所有标签。"""
+    return session.query(FileTag).join(
+        FileTagMapping, FileTag.id == FileTagMapping.tag_id
+    ).filter(FileTagMapping.file_id == file_id).all()
+
+
+def get_all_mapped_files(session: Session, tag_ids: Optional[list[int]] = None) -> dict[int, list[dict]]:
+    """批量查询文件标签。返回 {file_id: [{id, name, color}, ...], ...}。
+
+    参数:
+        tag_ids: 若提供，只返回包含这些标签中任意一个的文件。
+    """
+    query = session.query(
+        FileTagMapping.file_id,
+        FileTag.id,
+        FileTag.name,
+        FileTag.color,
+    ).join(FileTag, FileTag.id == FileTagMapping.tag_id)
+    if tag_ids:
+        query = query.filter(FileTagMapping.tag_id.in_(tag_ids))
+    rows = query.all()
+    result: dict[int, list[dict]] = {}
+    for file_id, tag_id, name, color in rows:
+        result.setdefault(file_id, []).append({
+            "id": tag_id, "name": name, "color": color,
+        })
+    return result

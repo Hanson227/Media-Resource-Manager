@@ -122,6 +122,11 @@ class MainWindow(QMainWindow):
         dedup_action.triggered.connect(self._on_start_dedup)
         tools_menu.addAction(dedup_action)
 
+        heic_action = QAction("HEIC 转换(&H)...", self)
+        heic_action.setStatusTip("将选中的 HEIC 文件批量转换为 JPG")
+        heic_action.triggered.connect(self._on_heic_convert)
+        tools_menu.addAction(heic_action)
+
         tools_menu.addSeparator()
 
         excluded_action = QAction("管理已排除文件夹(&L)...", self)
@@ -180,6 +185,11 @@ class MainWindow(QMainWindow):
         dedup_btn.clicked.connect(self._on_start_dedup)
         dedup_btn.setToolTip("对选中的资源单元执行查重 (Ctrl+D)")
         toolbar.addWidget(dedup_btn)
+
+        heic_btn = QPushButton("HEIC")
+        heic_btn.clicked.connect(self._on_heic_convert)
+        heic_btn.setToolTip("将选中的 HEIC 文件批量转换为 JPG")
+        toolbar.addWidget(heic_btn)
 
         toolbar.addSeparator()
 
@@ -263,6 +273,12 @@ class MainWindow(QMainWindow):
         self._breadcrumb.clicked.connect(self._on_breadcrumb_back)
         self._breadcrumb.hide()
         right_layout.addWidget(self._breadcrumb)
+
+        # 标签筛选栏（只在文件模式显示）
+        from app.ui.widgets.tag_filter import TagFilterBar
+        self._tag_bar = TagFilterBar()
+        self._tag_bar.tag_filter_changed.connect(self._on_tag_filter_changed)
+        right_layout.addWidget(self._tag_bar)
 
         self._grid_model = ThumbnailGridModel(self._config)
         self._grid_view = ThumbnailGridView(self._grid_model, self._config)
@@ -449,6 +465,8 @@ class MainWindow(QMainWindow):
         self._current_unit_id = unit_id
         self._grid_view.load_unit(unit_id)
         self._breadcrumb.show()
+        # 显示标签筛选栏
+        self._tag_bar.reload_tags()
 
         # ---- 展开树文件子节点（不 expandAll） ----
         try:
@@ -988,6 +1006,18 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     @Slot()
+    @Slot()
+    def _on_heic_convert(self) -> None:
+        """打开 HEIC 转换对话框。"""
+        from app.ui.dialogs.heic_convert import HeicConvertDialog
+        from PySide6.QtWidgets import QFileDialog
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "选择 HEIC 文件", "", "HEIC 图片 (*.heic *.heif);;所有文件 (*)",
+        )
+        if files:
+            HeicConvertDialog.run_for_files(files, self)
+            self._on_refresh_all()
+
     def _on_open_settings(self) -> None:
         from app.ui.dialogs.settings import SettingsDialog
         dlg = SettingsDialog(self._config, self)
@@ -1064,11 +1094,20 @@ class MainWindow(QMainWindow):
                     if not u:
                         continue
                     # 优先使用手动设置的封面
+                    preview_file_id = None
                     if u.cover_path:
                         preview_path = u.cover_path
+                        from app.db.models import MediaFile
+                        row = session.query(MediaFile.id).filter(
+                            MediaFile.resource_unit_id == uid,
+                            MediaFile.path == u.cover_path,
+                        ).first()
+                        if row:
+                            preview_file_id = row[0]
                     else:
                         files = q.get_files_by_unit(session, uid)
                         preview_path = files[0].path if files else ""
+                        preview_file_id = files[0].id if files else None
                     unit_data.append({
                         "unit_id": u.id,
                         "name": u.name,
@@ -1077,6 +1116,7 @@ class MainWindow(QMainWindow):
                         "file_count": u.file_count or 0,
                         "total_size": u.total_size or 0,
                         "preview_path": preview_path,
+                        "preview_file_id": preview_file_id,
                         "created_at": u.created_at.isoformat() if u.created_at else None,
                     })
                     total_files += u.file_count or 0
@@ -1087,6 +1127,8 @@ class MainWindow(QMainWindow):
                 self._right_footer.setText(
                     f"{total_files} 个项目 | 共 {format_size(total_size)}"
                 )
+                self._tag_bar.clear_selection()
+                self._tag_bar.hide()
         except Exception as e:
             logger.error(f"加载文件夹卡片失败: {e}")
 
@@ -1097,6 +1139,11 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_filter_changed(self, index: int) -> None:
         self._apply_current_filter()
+
+    @Slot(list)
+    def _on_tag_filter_changed(self, tag_ids: list[int]) -> None:
+        """按标签筛选文件。"""
+        self._grid_model.set_tag_filter(tag_ids)
 
     def _on_sort(self, field: str) -> None:
         """切换排序。再次点击同字段切换升降序。"""

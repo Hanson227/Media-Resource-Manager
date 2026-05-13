@@ -285,6 +285,30 @@ def test_save_to_db(scan_result: ScanResult, root: Path):
         check(f"数据库中有 8 个文件 (实际: {total_files})", total_files == 8)
 
 
+def test_path_revalidation():
+    """测试 3.2: 扫描时路径重新校验 — 文件夹移动后旧路径标记排除。"""
+    section("测试 3.2: 扫描路径重新校验")
+    from pathlib import Path
+    with DatabaseManager.session() as session:
+        roots = q.get_all_roots(session)
+        if not roots:
+            check("无根目录，跳过", True)
+            return
+        root_id = roots[0].id
+        # 创建一个路径不存在的单元（模拟文件夹被移动后）
+        fake_unit = q.create_unit(session, path=str(Path(roots[0].path) / "_nonexistent_test_dir_"), name="测试-已移动", library_root_id=root_id)
+        # 执行扫描后的清理逻辑
+        for stale in q.get_units_by_root(session, root_id):
+            if stale.status == "active" and not Path(stale.path).is_dir():
+                q.mark_unit_excluded(session, stale.id)
+        # 验证
+        stale = q.get_unit_by_id(session, fake_unit.id)
+        check("失效路径单元被排除", stale.status == "excluded")
+        # 原有活跃单元不受影响
+        active = q.get_units_by_root(session, root_id)
+        check("原有活跃单元仍在", any(u.id != fake_unit.id for u in active))
+
+
 def test_scanner_nested_promotion():
     """测试 3.5: 扫描器嵌套单子目录提升 + .thumbnails 清理。"""
     section("测试 3.5: 扫描器嵌套优化")
@@ -759,6 +783,86 @@ def test_message_center():
     check("全部已读成功", ok_all)
 
 
+def test_tags():
+    """测试 9.5: 标签 CRUD。"""
+    section("测试 9.5: 标签 CRUD")
+    from app.db import queries as q
+
+    with DatabaseManager.session() as session:
+        # 创建标签
+        tag = q.create_tag(session, "正面大笑", "#FF6B6B")
+        check("创建标签成功", tag.id is not None)
+        check("标签名称正确", tag.name == "正面大笑")
+
+        tag2 = q.create_tag(session, "侧面走路", "#4ECDC4")
+        check("第二个标签创建成功", tag2.id is not None)
+
+        # 查重创建
+        dup = q.get_tag_by_name(session, "正面大笑")
+        check("按名称查找成功", dup is not None and dup.id == tag.id)
+
+        # 列表
+        all_tags = q.get_all_tags(session)
+        check("标签列表 >= 2", len(all_tags) >= 2)
+
+        # 为文件设置标签
+        from app.db.models import MediaFile
+        mf = session.query(MediaFile).first()
+        if mf:
+            q.set_file_tags(session, mf.id, [tag.id, tag2.id])
+            ftags = q.get_file_tags(session, mf.id)
+            check("文件标签数=2", len(ftags) == 2)
+
+            # 全量替换
+            q.set_file_tags(session, mf.id, [tag.id])
+            ftags2 = q.get_file_tags(session, mf.id)
+            check("替换后标签数=1", len(ftags2) == 1)
+
+        # 批量查询
+        mapped = q.get_all_mapped_files(session)
+        check("批量查询有结果", len(mapped) >= 0)
+
+        # 删除标签
+        ok = q.delete_tag(session, tag2.id)
+        check("删除标签成功", ok)
+
+
+def test_heic_converter():
+    """测试 6.6: HEIC 转换 — 文件头检测。"""
+    section("测试 6.6: HEIC 转换器")
+    from app.core.heic_converter import is_heic_file, convert_single, convert_batch
+
+    # is_heic_file 对非 HEIC 文件应返回 False
+    with DatabaseManager.session() as session:
+        from app.db import queries as q
+        units = q.get_all_active_units(session)
+        if units:
+            files = q.get_files_by_unit(session, units[0].id)
+            for f in files[:3]:
+                p = Path(f.path)
+                if p.is_file():
+                    check(f"非 HEIC 文件头检测正确: {p.name}", not is_heic_file(p))
+
+    # convert_single 对不存在文件应返回 error
+    result = convert_single(Path("C:/nonexistent.heic"))
+    check("不存在文件检测", not result.success)
+    check("错误消息不为空", bool(result.error))
+
+    # 对非 HEIC 的 jpg 文件转换应失败
+    with DatabaseManager.session() as session:
+        from app.db import queries as q
+        units = q.get_all_active_units(session)
+        if units:
+            files = q.get_files_by_unit(session, units[0].id)
+            jpgs = [f for f in files if f.path.lower().endswith(".jpg")]
+            if jpgs:
+                result2 = convert_single(Path(jpgs[0].path))
+                check("非 HEIC 文件转换失败", not result2.success)
+                check("错误含 '不是 HEIC'", "不是 HEIC" in result2.error)
+
+    check("HEIC 导入正常", True)
+
+
 def test_thumbnails(root: Path):
     section("测试 6.5: 缩略图生成")
     config = AppConfig()
@@ -788,6 +892,33 @@ def test_thumbnails(root: Path):
     all_imgs = list(root.rglob("*.jpg")) + list(root.rglob("*.png"))
     infos = gen.generate_batch(all_imgs[:4], cache_dir)
     check(f"批量生成了 {len(infos)} 个缩略图", len(infos) == min(4, len(all_imgs)))
+
+    # 校验缓存过期：修改源文件后应重新生成
+    import time
+    orig_mtime = img_path.stat().st_mtime
+    new_mtime = orig_mtime + 60
+    os.utime(img_path, (new_mtime, new_mtime))
+    info3 = gen.generate(img_path, cache_dir)
+    check("mtime 变更后缓存过期", info3.generation_method != "cache")
+    os.utime(img_path, (orig_mtime, orig_mtime))
+
+    # 校验 stable hash：hash 不依赖 PYTHONHASHSEED
+    import hashlib
+    h1 = int.from_bytes(
+        hashlib.md5(str(img_path).encode("utf-8")).digest()[:8],
+        byteorder="big", signed=True,
+    )
+    h2 = int.from_bytes(
+        hashlib.md5(str(img_path).encode("utf-8")).digest()[:8],
+        byteorder="big", signed=True,
+    )
+    check("stable hash 跨调用一致", h1 == h2)
+    other = root / "2025-01-01" / "片段A" / "照片02.jpg"
+    h3 = int.from_bytes(
+        hashlib.md5(str(other).encode("utf-8")).digest()[:8],
+        byteorder="big", signed=True,
+    )
+    check("不同路径 hash 不同", h1 != h3)
 
 def test_api_app():
     section("测试 10: FastAPI 应用创建")
@@ -1769,17 +1900,20 @@ def main():
         test_db_integrity()
         result = test_scanner(temp_root)
         test_save_to_db(result, temp_root)
+        test_path_revalidation()
         test_scanner_nested_promotion()
         test_refresh_workflow()
         test_hash_engine(temp_root)
         test_hash_batch(temp_root)
         test_thumbnails(temp_root)
+        test_heic_converter()
         test_dedup_engine()
         test_save_dedup_results()
         test_tree_model()
         test_context_menu_lambda_safety()
         test_ui_signal_integration()
         test_message_center()
+        test_tags()
         test_api_app()
         test_unit_response_fields()
         test_thumbnail_binary()

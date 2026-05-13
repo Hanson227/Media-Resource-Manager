@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python tests/test_flow.py)",
+      "Bash(python -c \"print\\('hello'\\)\")",
+      "Bash(python3 -c \"print\\('hello'\\)\")",
+      "Bash(/c/Users/Hanson/anaconda3/python.exe -c \"print\\('hello'\\)\")",
+      "Bash(conda run *)",
+      "Bash(cmd.exe /c \"where python\")",
+      "Read(//usr/**)",
+      "mcp__ide__executeCode",
+      "Bash(\"D:/anaconda/python.exe\" tests/test_flow.py)",
+      "Bash(D:/anaconda/python.exe *)",
+      "Bash(findstr /V \"^$\")",
+      "Bash(\"D:/anaconda/python.exe\" tests/test_web_playwright.py)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(D:/anaconda/Scripts/playwright.exe install *)"
+    ]
+  }
+}

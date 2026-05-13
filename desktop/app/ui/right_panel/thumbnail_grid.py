@@ -34,20 +34,31 @@ class ThumbLoadWorker(QThread):
     all_done = Signal(int)
 
     def __init__(self, files: list[dict], cache_dir: Path,
-                 config: AppConfig, parent=None) -> None:
+                 config: AppConfig, visible_range: tuple[int, int] = (0, 0),
+                 parent=None) -> None:
         super().__init__(parent)
         self._files = files
         self._cache_dir = Path(cache_dir)
+        self._visible_range = visible_range
         self._generator = ThumbnailGenerator(
             max_size=config.thumbnail_max_size,
         )
 
     def run(self) -> None:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        total = len(self._files)
+        first, last = self._visible_range
+        # 构建可见优先的加载顺序
+        visible_set = set(range(max(0, first), min(last + 1, total)))
+        order = list(visible_set) + [i for i in range(total) if i not in visible_set]
+
         count = 0
-        for fdict in self._files:
+        processed_visible = 0
+        for idx in order:
             if self.isInterruptionRequested():
                 break
+            is_visible = idx in visible_set
+            fdict = self._files[idx]
             fid = fdict["id"]
             fpath = Path(fdict["path"])
             if not fpath.is_file():
@@ -57,16 +68,21 @@ class ThumbLoadWorker(QThread):
             if cache_file.exists():
                 self.thumb_ready.emit(fid, str(cache_file))
                 count += 1
-                continue
+            else:
+                try:
+                    thumb_info = self._generator.generate(fpath, self._cache_dir, file_id=fid)
+                    if thumb_info.thumbnail_path.exists():
+                        self.thumb_ready.emit(fid, str(thumb_info.thumbnail_path))
+                        count += 1
+                except Exception:
+                    if self.isInterruptionRequested():
+                        break
 
-            try:
-                thumb_info = self._generator.generate(fpath, self._cache_dir, file_id=fid)
-                if thumb_info.thumbnail_path.exists():
-                    self.thumb_ready.emit(fid, str(thumb_info.thumbnail_path))
-                    count += 1
-            except Exception:
-                if self.isInterruptionRequested():
-                    break
+            # 可见区域加载完后，后续项每 15 批 yield 一次，让 UI 信号有时间处理
+            if is_visible:
+                processed_visible += 1
+            elif processed_visible > 0 and (idx % 15 == 0):
+                self.msleep(8)
 
         self.all_done.emit(count)
 
@@ -92,7 +108,8 @@ class FolderPreviewWorker(QThread):
             if not src.is_file():
                 continue
             try:
-                info = self._gen.generate(src, self._cache_dir, file_id=hash(str(src)))
+                fid = d.get("preview_file_id")
+                info = self._gen.generate(src, self._cache_dir, file_id=fid)
                 if info.thumbnail_path.exists():
                     self.preview_ready.emit(row, str(info.thumbnail_path))
             except Exception:
@@ -114,13 +131,18 @@ class ThumbnailGridModel(QAbstractListModel):
         self._media_filter: str = ""
         self._sort_field: str = ""     # ""=默认文件名顺序, "name"=名称, "size"=大小
         self._sort_asc: bool = True
+        self._tag_filter_ids: list[int] = []  # 选中的 tag_id 列表
+        self._tag_mappings: dict[int, list[int]] = {}  # file_id → [tag_id, ...]
 
     def set_files(self, files: list) -> None:
         self.beginResetModel()
         self._files = []
         self._full_files = []
         self._thumb_cache.clear()
+        self._tag_mappings.clear()
+        file_ids = []
         for f in files:
+            fid = f.id if hasattr(f, 'id') else f.get("id")
             duration = getattr(f, "duration_ms", None) if hasattr(f, 'id') else f.get("duration_ms")
             entry = (
                 {"id": f.id, "filename": f.filename, "path": f.path,
@@ -131,6 +153,20 @@ class ThumbnailGridModel(QAbstractListModel):
                 if hasattr(f, 'id') else f
             )
             self._full_files.append(entry)
+            if fid:
+                file_ids.append(fid)
+        # 批量加载标签映射
+        if file_ids:
+            try:
+                from app.db.engine import DatabaseManager
+                from app.db.queries import get_all_mapped_files
+                with DatabaseManager.session() as session:
+                    all_mapped = get_all_mapped_files(session)
+                    for fid in file_ids:
+                        if fid in all_mapped:
+                            self._tag_mappings[fid] = [t["id"] for t in all_mapped[fid]]
+            except Exception:
+                pass
         self._sort_in_place()
         self._apply_filter_in_place()
         self.endResetModel()
@@ -165,6 +201,12 @@ class ThumbnailGridModel(QAbstractListModel):
             filtered = [f for f in filtered if f.get("media_type") == "image"]
         elif self._media_filter == "video":
             filtered = [f for f in filtered if f.get("media_type") == "video"]
+        # 标签筛选：选中的标签取 AND 交集
+        if self._tag_filter_ids:
+            filtered = [
+                f for f in filtered
+                if all(tid in self._tag_mappings.get(f["id"], []) for tid in self._tag_filter_ids)
+            ]
         self._files = filtered
 
     def apply_filter(self, search_text: str | None = None,
@@ -174,6 +216,13 @@ class ThumbnailGridModel(QAbstractListModel):
             self._search_text = search_text
         if media_filter is not None:
             self._media_filter = media_filter
+        self.beginResetModel()
+        self._apply_filter_in_place()
+        self.endResetModel()
+
+    def set_tag_filter(self, tag_ids: list[int]) -> None:
+        """按标签筛选文件。"""
+        self._tag_filter_ids = tag_ids
         self.beginResetModel()
         self._apply_filter_in_place()
         self.endResetModel()
@@ -451,6 +500,20 @@ class ThumbnailGridView(QListView):
 
     # ---- 内部 ----
 
+    def _compute_visible_range(self) -> tuple[int, int]:
+        """返回当前视口中可见的模型行索引范围 (first_row, last_row)。"""
+        model = self.model()
+        if not model or model.rowCount() == 0:
+            return (0, 0)
+        vp = self.viewport()
+        rect = vp.rect()
+        top_idx = self.indexAt(rect.topLeft())
+        bot_idx = self.indexAt(rect.bottomRight())
+        n = model.rowCount() - 1
+        first = top_idx.row() if top_idx.isValid() else 0
+        last = bot_idx.row() if bot_idx.isValid() else n
+        return (max(0, first), min(n, last))
+
     def _start_thumb_worker(self, unit_path: str) -> None:
         files = self._file_model.file_list
         if not files:
@@ -458,7 +521,8 @@ class ThumbnailGridView(QListView):
         cache_dir = self._config.thumbnail_cache_dir
         if not cache_dir:
             cache_dir = Path(unit_path) / ".thumbnails" if unit_path else Path(".thumbnails")
-        self._thumb_worker = ThumbLoadWorker(files, cache_dir, self._config)
+        visible_range = self._compute_visible_range()
+        self._thumb_worker = ThumbLoadWorker(files, cache_dir, self._config, visible_range=visible_range)
         self._thumb_worker.thumb_ready.connect(self._file_model.on_thumb_ready)
         self._thumb_worker.start()
 
@@ -587,4 +651,23 @@ class ThumbnailGridView(QListView):
                 lambda *args, fp=file_path: self.cover_from_file_requested.emit(fp)
             )
 
+        # HEIC 转换
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in (".heic", ".heif"):
+            menu.addSeparator()
+            act_heic = menu.addAction("转换为 JPG")
+            from app.core.heic_converter import is_heic_file
+            if not is_heic_file(Path(file_path)):
+                act_heic.setEnabled(False)
+                act_heic.setToolTip("文件头不是 HEIC 格式")
+            act_heic.triggered.connect(
+                lambda *args, fp=file_path: self._convert_heic_file(fp)
+            )
+
         menu.exec(self.viewport().mapToGlobal(pos))
+
+    def _convert_heic_file(self, file_path: str) -> None:
+        """右键菜单触发单个 HEIC 文件转换。"""
+        from app.ui.dialogs.heic_convert import HeicConvertDialog
+        HeicConvertDialog.run_for_files([file_path], self)
+        self.refresh()
