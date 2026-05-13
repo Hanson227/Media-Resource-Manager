@@ -13,9 +13,10 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
-    Qt, QAbstractItemModel, QModelIndex, Signal, Slot,
+    Qt, QPointF, QAbstractItemModel, QModelIndex, Signal, Slot,
 )
-from PySide6.QtWidgets import QTreeView, QAbstractItemView, QHeaderView
+from PySide6.QtGui import QPainter, QColor, QPolygonF
+from PySide6.QtWidgets import QTreeView, QAbstractItemView, QHeaderView, QStyle, QProxyStyle
 
 from config import AppConfig
 from app.db.engine import DatabaseManager
@@ -367,8 +368,45 @@ class FolderTreeModel(QAbstractItemModel):
 
 
 # ============================================================
-# 树视图
+# 自定义分支指示器（绘制干净的三角形展开/收起标识）
 # ============================================================
+
+class _BranchIndicatorStyle(QProxyStyle):
+    """为树节点绘制干净的三角形展开/收起指示器。
+
+    折叠态 ▶（向右），展开态 ▼（向下）。
+    使用 Catppuccin Overlay_1 柔和灰色，避免与背景冲突。
+    """
+
+    def drawPrimitive(self, element, option, painter, widget=None):
+        if element == QStyle.PE_IndicatorBranch:
+            has_children = bool(option.state & QStyle.StateFlag.State_Children)
+            if has_children:
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                c = option.rect.center()
+                is_open = bool(option.state & QStyle.StateFlag.State_Open)
+                color = QColor("#7f849c")
+                painter.setBrush(color)
+                painter.setPen(Qt.PenStyle.NoPen)
+                if is_open:
+                    # ▼ 向下三角形
+                    painter.drawPolygon(QPolygonF([
+                        QPointF(c.x(), c.y() + 3),
+                        QPointF(c.x() - 4, c.y() - 3),
+                        QPointF(c.x() + 4, c.y() - 3),
+                    ]))
+                else:
+                    # ▶ 向右三角形
+                    painter.drawPolygon(QPolygonF([
+                        QPointF(c.x() + 3, c.y()),
+                        QPointF(c.x() - 3, c.y() - 4),
+                        QPointF(c.x() - 3, c.y() + 4),
+                    ]))
+                painter.restore()
+            return  # 不画树连接线，缩进已足够表明层级
+        super().drawPrimitive(element, option, painter, widget)
+
 
 class FolderTreeView(QTreeView):
     """文件夹树视图 —— 嵌入到主窗口左侧面板。
@@ -420,8 +458,11 @@ class FolderTreeView(QTreeView):
         header.setSectionsMovable(True)
         self.setAnimated(True)
         self.setExpandsOnDoubleClick(True)
-        self.setIndentation(16)
+        self.setIndentation(20)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # 自定义三角形展开/收起指示器
+        self._branch_style = _BranchIndicatorStyle()
+        self.setStyle(self._branch_style)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.expandAll()
         self.selectionModel().selectionChanged.connect(self._on_selection_changed)

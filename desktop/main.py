@@ -150,6 +150,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName(config.window_title)
     app.setApplicationVersion("0.1.0")
+    # 树展开/收起指示器由 FolderTreeView 自定义绘制（干净三角形 ▶/▼）
 
     # 应用主题调色板
     from app.ui.theme import apply_theme
