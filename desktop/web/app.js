@@ -475,11 +475,11 @@ const PreviewPage = {
         <button class="preview-back" @click="goBack"><span class="mdi mdi-arrow-left"></span></button>
         <span style="font-size:14px;color:rgba(255,255,255,.7);margin-left:8px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ filename }}</span>
       </div>
-      <div class="preview-content" @click="onTap">
+      <div class="preview-content" @click="onClick">
         <template v-if="mediaType === 'image'">
           <img :src="streamUrl" :alt="filename"
-            class="gesture-follow" :class="{ dragging: navSwiping }"
-            :style="{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', transform: 'translateX(' + gestureOffsetX + 'px)' }">
+            class="gesture-follow" :class="{ dragging: navSwiping, zoomed: zoomed }"
+            :style="{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', transform: 'translateX(' + gestureOffsetX + 'px) scale(' + (zoomed ? 1.8 : 1) + ')' }">
           <div class="image-nav-hint" v-if="fileList.length > 1">
             <span class="mdi mdi-chevron-left" @click.stop="navigateToFile(fileIndex - 1)"></span>
             <span class="pos">{{ fileIndex + 1 }} / {{ fileList.length }}</span>
@@ -569,6 +569,7 @@ const PreviewPage = {
       gestureOffsetX: 0,
       _navigating: false,
       navSwiping: false,
+      zoomed: false,
     };
   },
   computed: {
@@ -582,8 +583,27 @@ const PreviewPage = {
       }
       this.$router.back();
     },
-    /* ---- Tap to toggle controls ---- */
-    onTap() { if (this.mediaType !== 'video') return; this.controlsHidden = !this.controlsHidden; this.speedMenuOpen = false; },
+    /* ---- Tap / Double-tap ---- */
+    onClick() { this.checkDoubleTap(); },
+    checkDoubleTap() {
+      const now = Date.now();
+      if (now - this.lastTapTime < 350) {
+        if (this.tapTimer) { clearTimeout(this.tapTimer); this.tapTimer = null; }
+        this.lastTapTime = 0;
+        this.onDoubleTap();
+        return true;
+      }
+      this.lastTapTime = now;
+      this.tapTimer = setTimeout(() => { this.onSingleTap(); this.tapTimer = null; }, 350);
+      return false;
+    },
+    onSingleTap() {
+      if (this.mediaType === 'video') { this.controlsHidden = !this.controlsHidden; this.speedMenuOpen = false; }
+    },
+    onDoubleTap() {
+      if (this.mediaType === 'image') { this.zoomed = !this.zoomed; }
+      else if (this.mediaType === 'video') { this.togglePlay(); }
+    },
     /* ---- Playback ---- */
     togglePlay() { if (!this.videoEl) return; if (this.videoEl.paused) { this.videoEl.play(); } else { this.videoEl.pause(); } },
     onTimeUpdate() {
@@ -632,6 +652,10 @@ const PreviewPage = {
       clearTimeout(this.gestureTimer);
       this.gestureTimer = null;
       if (this.rewindTimer) { clearInterval(this.rewindTimer); this.rewindTimer = null; }
+      // Double-tap check runs before media-type dispatch
+      if (!this.gestureActive && !this.gestureSwiping) {
+        if (this.checkDoubleTap()) { this.gestureShowFeedback = false; this.gestureActive = false; return; }
+      }
       // If video is not playing, delegate to navigation swipe
       if (this.mediaType === 'video' && !this.playing) {
         this.onNavSwipeEnd(e);
@@ -639,24 +663,6 @@ const PreviewPage = {
       }
       // Restore playback rate
       if (this.gestureActive && this.videoEl) { this.videoEl.playbackRate = this.playbackRate; }
-      // Handle tap (no long-press, no swipe)
-      if (!this.gestureActive && !this.gestureSwiping) {
-        const now = Date.now();
-        if (now - this.lastTapTime < 350) {
-          // Double tap → toggle play/pause
-          if (this.tapTimer) { clearTimeout(this.tapTimer); this.tapTimer = null; }
-          this.togglePlay();
-          this.lastTapTime = 0;
-        } else {
-          // Single tap → toggle controls after short delay
-          this.lastTapTime = now;
-          this.tapTimer = setTimeout(() => {
-            this.controlsHidden = !this.controlsHidden;
-            this.speedMenuOpen = false;
-            this.tapTimer = null;
-          }, 350);
-        }
-      }
       // 先隐藏反馈（避免残留内容在 fadeout 期间闪烁）
       this.gestureShowFeedback = false;
       this.gestureActive = false;
@@ -757,6 +763,8 @@ const PreviewPage = {
     onNavSwipeStart(e) {
       const t = e.changedTouches && e.changedTouches[0];
       if (!t) return;
+      // Cancel pending single-tap timer from previous touch
+      if (this.tapTimer) { clearTimeout(this.tapTimer); this.tapTimer = null; }
       this._navStartX = t.clientX;
       this._navStartY = t.clientY;
       this.gestureOffsetX = 0;
@@ -776,6 +784,8 @@ const PreviewPage = {
       }
     },
     onNavSwipeEnd(e) {
+      // Double-tap check first (tap has no swipe movement)
+      if (this.checkDoubleTap()) { return; }
       if (!this.navSwiping || this.fileList.length < 2) { this.gestureOffsetX = 0; return; }
       const t = e.changedTouches && e.changedTouches[0];
       if (!t) { this.gestureOffsetX = 0; return; }
@@ -798,7 +808,8 @@ const PreviewPage = {
       this.filename = file.filename;
       this.mediaType = file.media_type || 'image';
       this.streamUrl = this.serverUrl + '/api/files/' + file.id + '/stream';
-      // Reset video state when switching
+      // Reset zoom and video state when switching
+      this.zoomed = false;
       this.playing = false;
       this.currentTime = 0;
       this.duration = 0;
