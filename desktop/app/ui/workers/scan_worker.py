@@ -159,16 +159,22 @@ class ScanWorker(QThread):
                         logger.info(f"单元路径已不存在，标记排除: {stale_unit.name} ({stale_unit.path})")
                         q.mark_unit_excluded(session, stale_unit.id)
 
-                # 清理：删除活跃单元中已不存在的文件记录
+                # 清理：删除活跃单元中已不存在的文件记录及对应缩略图缓存
                 stale_file_count = 0
                 for uid, upath in processed_units.items():
                     if Path(upath).is_dir():
                         for mf in q.get_files_by_unit(session, uid):
                             if not Path(mf.path).is_file():
+                                # 删除缩略图缓存
+                                thumb_dir = Path(upath) / ".thumbnails"
+                                for suffix in ("", ".meta"):
+                                    thumb = thumb_dir / f"{mf.id}_thumb.jpg{suffix}"
+                                    thumb.unlink(missing_ok=True)
+                                # 删除 DB 记录
                                 q.delete_media_file(session, mf.id)
                                 stale_file_count += 1
                 if stale_file_count:
-                    logger.info(f"清理了 {stale_file_count} 个已不存在的文件记录")
+                    logger.info(f"清理了 {stale_file_count} 个已不存在的文件记录及缩略图")
 
                 # 更新扫描会话
                 q.update_scan_session(session, scan_id,
