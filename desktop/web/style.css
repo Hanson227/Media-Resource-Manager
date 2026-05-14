@@ -585,3 +585,6 @@ body {
 .gesture-follow.dragging {
   transition: none;
 }
+.gesture-follow.zoomed {
+  cursor: zoom-out;
+}
