@@ -162,6 +162,17 @@ class HashWorker(QThread):
                 if self._cancelled:
                     break
 
+                # 跳过已不存在的文件（写入空哈希避免重复处理）
+                if not fpath.is_file():
+                    try:
+                        logger.warning(f"文件不存在，标记为已处理: {fpath}")
+                        _retry_db(lambda: self._mark_hashed(fid))
+                    except Exception:
+                        pass
+                    hashed_count += 1
+                    self.progress.emit(i + 1, total)
+                    continue
+
                 try:
                     # 计算哈希
                     result = engine.hash_file(fpath)
@@ -222,6 +233,12 @@ class HashWorker(QThread):
             if video_frame_hashes:
                 for ts_ms, ph in video_frame_hashes:
                     q.insert_video_frame(session, fid, ts_ms, ph)
+
+    @staticmethod
+    def _mark_hashed(fid: int) -> None:
+        """标记文件为已处理（写入空哈希），避免重复检出。"""
+        with DatabaseManager.session() as session:
+            q.update_file_hash(session, fid, md5_hash="", phash="", dhash="")
 
     @Slot()
     def cancel(self) -> None:
