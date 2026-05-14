@@ -82,8 +82,10 @@ class MainWindow(QMainWindow):
         # 核心：信号连线
         self._connect_signals()
 
-        # 初始加载文件夹树
+        # 初始加载文件夹树 + 自动清理已删除的路径
+        # 初始加载文件夹树 + 自动清理已删除的路径
         self._tree_view.refresh_model()
+        QTimer.singleShot(100, self._cleanup_missing_paths)
 
         logger.info("主窗口初始化完成")
 
@@ -1322,26 +1324,35 @@ class MainWindow(QMainWindow):
     # 刷新
     # ============================================================
 
+    def _cleanup_missing_paths(self) -> None:
+        """检查所有根目录和单元，标记路径已不存在的为 excluded。"""
+        try:
+            with DatabaseManager.session() as session:
+                cleaned_roots = 0
+                cleaned_units = 0
+                for root in q.get_all_roots(session):
+                    if not Path(root.path).is_dir():
+                        logger.info(f"根目录已不存在，标记排除: {root.path}")
+                        q.set_root_enabled(session, root.id, False)
+                        cleaned_roots += 1
+                    for stale in q.get_units_by_root(session, root.id):
+                        if stale.status == "active" and not Path(stale.path).is_dir():
+                            logger.info(f"单元路径已不存在，标记排除: {stale.name}")
+                            q.mark_unit_excluded(session, stale.id)
+                            cleaned_units += 1
+                if cleaned_roots or cleaned_units:
+                    logger.info(f"清理完成: {cleaned_roots} 个根目录, {cleaned_units} 个单元")
+                    self._tree_view.refresh_model()
+        except Exception as e:
+            logger.error(f"路径清理失败: {e}")
+
     @Slot()
     def _on_refresh_all(self) -> None:
         """刷新全部：重新扫描所有媒体库根目录。"""
         # 先停止所有后台线程
         self._cancel_all_workers()
 
-        # 清理：标记路径已不存在的根目录和单元（即使扫描因根路径缺失而跳过）
-        try:
-            with DatabaseManager.session() as session:
-                for root in q.get_all_roots(session):
-                    if not Path(root.path).is_dir():
-                        logger.info(f"根目录已不存在，标记排除: {root.path}")
-                        q.set_root_enabled(session, root.id, False)
-                    # 清理根下路径不存在的单元
-                    for stale in q.get_units_by_root(session, root.id):
-                        if stale.status == "active" and not Path(stale.path).is_dir():
-                            logger.info(f"单元路径已不存在，标记排除: {stale.name}")
-                            q.mark_unit_excluded(session, stale.id)
-        except Exception as e:
-            logger.error(f"预清理失败: {e}")
+        self._cleanup_missing_paths()
 
         try:
             with DatabaseManager.session() as session:
