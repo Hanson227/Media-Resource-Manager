@@ -302,9 +302,115 @@ def test_preview_navigation(page):
         check("从预览页返回", page.locator(".feed-item").count() > 0)
 
 
+def test_preview_swipe_gesture(page):
+    """验证预览页左右滑动手势导航。"""
+    section("Web 测试 5: 预览滑动手势")
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    page.wait_for_timeout(1500)
+
+    # 进入文件列表
+    unit_card = page.locator(".unit-card").first
+    if unit_card.count() == 0:
+        check("滑动手势测试: 无单元可进入", True)
+        return
+    unit_card.click()
+    page.wait_for_timeout(1000)
+
+    # 点击第一个文件进入预览
+    feed_item = page.locator(".feed-item").first
+    if feed_item.count() == 0:
+        check("滑动手势测试: 无文件可预览", True)
+        return
+    feed_item.click()
+    page.wait_for_timeout(1500)
+
+    # 验证预览页加载且有位置指示器
+    nav_hint = page.locator(".image-nav-hint")
+    if nav_hint.count() == 0 or nav_hint.locator(".pos").count() == 0:
+        check("滑动手势测试: 位置指示器不存在（可能仅一个文件）", True)
+        return
+
+    # 获取初始位置
+    pos_text = nav_hint.locator(".pos").text_content() or ""
+    if "/" not in pos_text:
+        check("滑动手势测试: 无法获取初始位置", True)
+        return
+    parts = pos_text.split("/")
+    initial_pos = int(parts[0].strip())
+    total = int(parts[1].strip())
+    if total < 2:
+        check("滑动手势测试: 文件不足 2 个，无法测试滑动", True)
+        return
+
+    # 模拟左滑 → 下一张
+    page.evaluate("""
+        () => {
+            const zone = document.querySelector('.gesture-zone');
+            if (!zone) return;
+            const rect = zone.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            function fire(name, x) {
+                const evt = new TouchEvent(name, { bubbles: true, cancelable: true });
+                // Override changedTouches getter
+                const touches = [{ clientX: x, clientY: cy, identifier: 0 }];
+                Object.defineProperty(evt, 'changedTouches', {
+                    get: () => touches, configurable: true
+                });
+                zone.dispatchEvent(evt);
+            }
+            fire('touchstart', cx + 60);
+            fire('touchmove', cx - 20);
+            fire('touchend', cx - 60);
+        }
+    """)
+    page.wait_for_timeout(600)
+
+    # 验证位置变化（左滑 → 前进到下一张）
+    new_pos_text = nav_hint.locator(".pos").text_content() or ""
+    new_parts = new_pos_text.split("/")
+    new_pos = int(new_parts[0].strip()) if len(new_parts) == 2 else initial_pos
+    if initial_pos < total:
+        check("左滑切换到下一张", new_pos == initial_pos + 1)
+    else:
+        check("末张左滑不切换", new_pos == total)
+
+    # 右滑 → navigateToFile(index-1)
+    prev_pos = new_pos
+    page.evaluate("""
+        () => {
+            const zone = document.querySelector('.gesture-zone');
+            if (!zone) return;
+            const rect = zone.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            function fire(name, x) {
+                const evt = new TouchEvent(name, { bubbles: true, cancelable: true });
+                const touches = [{ clientX: x, clientY: cy, identifier: 0 }];
+                Object.defineProperty(evt, 'changedTouches', {
+                    get: () => touches, configurable: true
+                });
+                zone.dispatchEvent(evt);
+            }
+            fire('touchstart', cx - 60);
+            fire('touchmove', cx + 60);
+            fire('touchend', cx + 60);
+        }
+    """)
+    page.wait_for_timeout(600)
+
+    final_text = nav_hint.locator(".pos").text_content() or ""
+    final_parts = final_text.split("/")
+    final_pos = int(final_parts[0].strip()) if len(final_parts) == 2 else prev_pos
+    if final_pos > 1:
+        check("右滑切换到上一张", final_pos == prev_pos - 1)
+    else:
+        check("首张右滑不切换", final_pos == 1)
+
+
 def test_navigation_tabs(page):
     """验证底部导航栏功能。"""
-    section("Web 测试 5: 底部导航")
+    section("Web 测试 7: 底部导航")
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
     page.wait_for_timeout(1000)
 
@@ -353,7 +459,7 @@ def test_navigation_tabs(page):
 
 def test_pin_lock_screen(page):
     """验证 PIN 锁屏界面渲染。"""
-    section("Web 测试 6: PIN 锁屏界面")
+    section("Web 测试 8: PIN 锁屏界面")
     page.goto(f"http://127.0.0.1:{_PORT}/")
     page.wait_for_timeout(1000)
 
@@ -386,7 +492,7 @@ def test_pin_lock_screen(page):
 
 def test_responsive_layout(page):
     """验证响应式布局。"""
-    section("Web 测试 7: 响应式布局")
+    section("Web 测试 9: 响应式布局")
     # 测试手机尺寸
     page.set_viewport_size({"width": 375, "height": 667})
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
@@ -459,6 +565,11 @@ def main():
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
             page.wait_for_timeout(500)
             test_preview_navigation(page)
+
+            # 预览滑动手势测试（独立导航以防之前测试退出预览）
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_timeout(500)
+            test_preview_swipe_gesture(page)
 
             # 重新加载使 localStorage 生效（绕过 PIN 页）
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")

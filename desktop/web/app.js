@@ -652,11 +652,19 @@ const PreviewPage = {
       clearTimeout(this.gestureTimer);
       this.gestureTimer = null;
       if (this.rewindTimer) { clearInterval(this.rewindTimer); this.rewindTimer = null; }
-      // Double-tap check runs before media-type dispatch
+      // Double-tap check: runs for taps (not swipes), before media-type dispatch
       if (!this.gestureActive && !this.gestureSwiping) {
         if (this.checkDoubleTap()) { this.gestureShowFeedback = false; this.gestureActive = false; return; }
+        // Single tap: controls toggle handled by timer callback, don't fall through to nav
+        this.gestureShowFeedback = false;
+        this.gestureActive = false;
+        this.gestureSwiping = false;
+        this.gestureSide = '';
+        this.gestureSeekLabel = '';
+        this.startHideTimer();
+        return;
       }
-      // If video is not playing, delegate to navigation swipe
+      // If video is not playing (and user swiped), delegate to navigation swipe
       if (this.mediaType === 'video' && !this.playing) {
         this.onNavSwipeEnd(e);
         return;
@@ -784,9 +792,13 @@ const PreviewPage = {
       }
     },
     onNavSwipeEnd(e) {
-      // Double-tap check first (tap has no swipe movement)
-      if (this.checkDoubleTap()) { return; }
-      if (!this.navSwiping || this.fileList.length < 2) { this.gestureOffsetX = 0; return; }
+      // Check double-tap only when not swiping (pure tap)
+      if (!this.navSwiping) {
+        if (this.checkDoubleTap()) { return; }
+        this.gestureOffsetX = 0;
+        return;
+      }
+      if (this.fileList.length < 2) { this.gestureOffsetX = 0; return; }
       const t = e.changedTouches && e.changedTouches[0];
       if (!t) { this.gestureOffsetX = 0; return; }
       const dx = t.clientX - this._navStartX;
