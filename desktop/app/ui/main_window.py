@@ -193,6 +193,11 @@ class MainWindow(QMainWindow):
         dedup_btn.setToolTip("对选中的资源单元执行查重 (Ctrl+D)")
         toolbar.addWidget(dedup_btn)
 
+        index_btn = QPushButton("索引")
+        index_btn.clicked.connect(self._on_start_index)
+        index_btn.setToolTip("计算所有文件哈希和人脸索引")
+        toolbar.addWidget(index_btn)
+
         toolbar.addSeparator()
 
         self._search_input = QLineEdit()
@@ -417,17 +422,7 @@ class MainWindow(QMainWindow):
         if root_idx.isValid():
             self._tree_view.setCurrentIndex(root_idx)
 
-        # 后台启动哈希索引（不阻塞 UI）
-        self._status_bar.set_status("正在后台计算文件哈希与人脸索引...")
-        self._status_bar.set_progress(0, 0)
-
-        self._hash_worker = HashWorker(self._config)
-        self._hash_worker.progress.connect(self._status_bar.set_progress)
-        self._hash_worker.finished.connect(self._on_hash_finished)
-        self._hash_worker.error_occurred.connect(
-            lambda e: self._status_bar.set_status(f"哈希错误: {e}")
-        )
-        self._hash_worker.start()
+        # 缩略图由 ThumbLoader 按需生成，后台不自动启动哈希/人脸索引
 
     @Slot(int)
     def _on_hash_finished(self, count: int) -> None:
@@ -991,6 +986,25 @@ class MainWindow(QMainWindow):
             self._status_bar.set_status(f"已处理: {resolution}")
         except Exception as e:
             logger.error(f"处理查重结果失败: {e}")
+
+    # ============================================================
+    # 哈希索引（手动触发）
+    # ============================================================
+
+    @Slot()
+    def _on_start_index(self) -> None:
+        """手动启动哈希与索引计算（扫描后不会自动执行）。"""
+        self._cancel_all_workers()
+        self._status_bar.set_status("正在后台计算文件哈希与人脸索引...")
+        self._status_bar.set_progress(0, 0)
+
+        self._hash_worker = HashWorker(self._config)
+        self._hash_worker.progress.connect(self._status_bar.set_progress)
+        self._hash_worker.finished.connect(self._on_hash_finished)
+        self._hash_worker.error_occurred.connect(
+            lambda e: self._status_bar.set_status(f"哈希错误: {e}")
+        )
+        self._hash_worker.start()
 
     # ============================================================
     # 快速预览

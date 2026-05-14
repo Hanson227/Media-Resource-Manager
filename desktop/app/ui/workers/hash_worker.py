@@ -207,8 +207,8 @@ class HashWorker(QThread):
                                             face_index=fv.face_index,
                                             bbox=fv.bbox,
                                         )
-                        except Exception as e:
-                            logger.debug(f"人脸检测跳过 [{fpath.name}]: {e}")
+                        except BaseException as e:
+                            logger.warning(f"人脸检测跳过 [{fpath.name}]: {type(e).__name__}: {e}")
 
                     hashed_count += 1
                     self.file_hashed.emit(fid, "md5" if result.md5 else "phash")
