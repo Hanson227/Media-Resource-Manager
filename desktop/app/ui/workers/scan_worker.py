@@ -158,6 +158,7 @@ class ScanWorker(QThread):
 
                 # 清理：删除所有活跃单元中已不存在的文件记录及对应缩略图缓存
                 stale_file_count = 0
+                affected_units: set[int] = set()
                 for unit in q.get_units_by_root(session, root.id):
                     if unit.status != "active":
                         continue
@@ -165,14 +166,22 @@ class ScanWorker(QThread):
                         continue
                     for mf in q.get_files_by_unit(session, unit.id):
                         if not Path(mf.path).is_file():
+                            # 删除缩略图缓存
                             thumb_dir = Path(unit.path) / ".thumbnails"
                             for suffix in ("", ".meta"):
                                 thumb = thumb_dir / f"{mf.id}_thumb.jpg{suffix}"
                                 thumb.unlink(missing_ok=True)
                             q.delete_media_file(session, mf.id)
                             stale_file_count += 1
+                            affected_units.add(unit.id)
                 if stale_file_count:
                     logger.info(f"清理了 {stale_file_count} 个已不存在的文件记录及缩略图")
+                    # 更新受影响单元的 file_count / total_size
+                    for uid in affected_units:
+                        remaining = q.get_files_by_unit(session, uid)
+                        new_count = len(remaining)
+                        new_size = sum(f.size_bytes for f in remaining)
+                        q.update_unit_stats(session, uid, new_count, new_size)
 
                 # 更新扫描会话
                 q.update_scan_session(session, scan_id,
