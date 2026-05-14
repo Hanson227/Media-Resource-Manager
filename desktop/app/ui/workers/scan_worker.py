@@ -103,6 +103,7 @@ class ScanWorker(QThread):
                 new_files = 0
                 updated_files = 0
                 errors: list[str] = list(result.errors)
+                processed_units: dict[int, str] = {}  # unit_id → unit_path
 
                 # 处理每个资源单元
                 for unit in result.units:
@@ -111,6 +112,7 @@ class ScanWorker(QThread):
 
                     if existing_unit:
                         unit_id = existing_unit.id
+                        processed_units[unit_id] = str(unit.path)
                         q.update_unit_stats(
                             session, unit_id,
                             unit.file_count, unit.total_size,
@@ -126,6 +128,7 @@ class ScanWorker(QThread):
                             total_size=unit.total_size,
                         )
                         unit_id = new_unit.id
+                    processed_units[unit_id] = str(unit.path)
 
                     # 处理每个文件
                     for df in unit.files:
@@ -155,6 +158,17 @@ class ScanWorker(QThread):
                     if stale_unit.status == "active" and not Path(stale_unit.path).is_dir():
                         logger.info(f"单元路径已不存在，标记排除: {stale_unit.name} ({stale_unit.path})")
                         q.mark_unit_excluded(session, stale_unit.id)
+
+                # 清理：删除活跃单元中已不存在的文件记录
+                stale_file_count = 0
+                for uid, upath in processed_units.items():
+                    if Path(upath).is_dir():
+                        for mf in q.get_files_by_unit(session, uid):
+                            if not Path(mf.path).is_file():
+                                q.delete_media_file(session, mf.id)
+                                stale_file_count += 1
+                if stale_file_count:
+                    logger.info(f"清理了 {stale_file_count} 个已不存在的文件记录")
 
                 # 更新扫描会话
                 q.update_scan_session(session, scan_id,
