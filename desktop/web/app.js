@@ -168,9 +168,7 @@ const UnitsPage = {
     },
     sortedUnits(units) {
       const arr = [...units];
-      // 收藏的排在顶部
-      arr.sort((a, b) => (a.is_starred === b.is_starred ? 0 : a.is_starred ? -1 : 1));
-      // 其次按当前排序条件
+      // 按收藏 + 当前排序条件排列
       if (this.sortBy === 'name') {
         arr.sort((a, b) => {
           if (a.is_starred !== b.is_starred) return a.is_starred ? -1 : 1;
@@ -237,20 +235,29 @@ const UnitsPage = {
         let startY = 0;
         const main = document.querySelector('.app-main');
         if (main) {
-          main.addEventListener('touchstart', (e) => {
+          this._ptrStart = (e) => {
             if (main.scrollTop <= 0) startY = e.touches[0].clientY;
             else startY = 0;
-          }, { passive: true });
-          main.addEventListener('touchmove', (e) => {
+          };
+          this._ptrMove = (e) => {
             if (!startY || this.refreshing) return;
             const dy = e.touches[0].clientY - startY;
             if (dy > 60) {
               startY = 0;
               this.refresh();
             }
-          }, { passive: true });
+          };
+          main.addEventListener('touchstart', this._ptrStart, { passive: true });
+          main.addEventListener('touchmove', this._ptrMove, { passive: true });
         }
       });
+    }
+  },
+  beforeUnmount() {
+    const main = document.querySelector('.app-main');
+    if (main && this._ptrStart) {
+      main.removeEventListener('touchstart', this._ptrStart);
+      main.removeEventListener('touchmove', this._ptrMove);
     }
   }
 };
@@ -455,20 +462,29 @@ const UnitFilesPage = {
         let startY = 0;
         const main = document.querySelector('.app-main');
         if (main) {
-          main.addEventListener('touchstart', (e) => {
+          this._ptrStart = (e) => {
             if (main.scrollTop <= 0) startY = e.touches[0].clientY;
             else startY = 0;
-          }, { passive: true });
-          main.addEventListener('touchmove', (e) => {
+          };
+          this._ptrMove = (e) => {
             if (!startY || this.refreshing) return;
             const dy = e.touches[0].clientY - startY;
             if (dy > 60) {
               startY = 0;
               this.refresh();
             }
-          }, { passive: true });
+          };
+          main.addEventListener('touchstart', this._ptrStart, { passive: true });
+          main.addEventListener('touchmove', this._ptrMove, { passive: true });
         }
       });
+    }
+  },
+  beforeUnmount() {
+    const main = document.querySelector('.app-main');
+    if (main && this._ptrStart) {
+      main.removeEventListener('touchstart', this._ptrStart);
+      main.removeEventListener('touchmove', this._ptrMove);
     }
   }
 };
@@ -491,7 +507,7 @@ const PreviewPage = {
             <span class="pos">{{ fileIndex + 1 }} / {{ fileList.length }}</span>
             <span class="mdi mdi-chevron-right" @click.stop="navigateToFile(fileIndex + 1)"></span>
           </div>
-          <div class="gesture-zone" @touchstart.prevent="onNavSwipeStart($event)" @touchend="onNavSwipeEnd" @touchmove.prevent="onNavSwipeMove($event)"></div>
+          <div class="gesture-zone" @touchstart.prevent="onNavSwipeStart($event)" @touchend="onNavSwipeEnd" @touchmove.prevent="onNavSwipeMove($event)" @touchcancel="onNavSwipeEnd"></div>
         </template>
         <template v-else-if="mediaType === 'video'">
           <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop :src="streamUrl"
@@ -778,7 +794,13 @@ const PreviewPage = {
       this.seeking = true;
       this.seekAt(e.clientX);
       const onMove = (ev) => { ev.preventDefault(); if (this.seeking) this.seekAt(ev.clientX); };
-      const onUp = () => { this.seeking = false; this.startHideTimer(); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+      const onUp = () => {
+        this.seeking = false; this.startHideTimer();
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        this._seekHandlers = null;
+      };
+      this._seekHandlers = { onMove, onUp };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
@@ -819,7 +841,12 @@ const PreviewPage = {
       const dx = t.clientX - this._navStartX;
       if (dx < -40) this.navigateToFile(this.fileIndex + 1);
       else if (dx > 40) this.navigateToFile(this.fileIndex - 1);
-      else this.gestureOffsetX = 0;  // spring back
+      else {
+        // Spring back: remove .dragging first, then animate offset to 0
+        this.navSwiping = false;
+        this.$nextTick(() => { this.gestureOffsetX = 0; });
+        return;
+      }
       this.navSwiping = false;
     },
     navigateToFile(newIndex) {
@@ -897,6 +924,11 @@ const PreviewPage = {
     if (this.gestureTimer) clearTimeout(this.gestureTimer);
     if (this.tapTimer) clearTimeout(this.tapTimer);
     if (this.navigateFeedbackTimer) clearTimeout(this.navigateFeedbackTimer);
+    if (this._seekHandlers) {
+      document.removeEventListener('mousemove', this._seekHandlers.onMove);
+      document.removeEventListener('mouseup', this._seekHandlers.onUp);
+      this._seekHandlers = null;
+    }
   }
 };
 
@@ -1259,6 +1291,7 @@ const App = {
     },
     onDisconnected() {
       this.serverUrl = '';
+      this.pinUnlocked = false;
       this.$router.push('/connect');
     },
     onLoading(v) { this.loading = v; },

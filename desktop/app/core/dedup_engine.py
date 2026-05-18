@@ -433,6 +433,8 @@ class DedupEngine:
 
             best_overall: Optional[FileMatch] = None
             best_overall_dist = self._face_threshold + 1.0
+            # 追踪最佳匹配对应的 B 人脸 key，最终匹配确认后才标记为已消费
+            best_face_keys: set[tuple[int, int]] = set()
 
             for idx_b, fb in enumerate(files_b):
                 if idx_b in exclude_b:
@@ -460,11 +462,11 @@ class DedupEngine:
                                 match_type=MatchType.FACE.value,
                                 score=round(score, 4),
                             )
-                            if dist <= self._face_threshold:
-                                matched_faces_b.add(face_key)
+                            best_face_keys = {face_key}
 
             if best_overall is not None and best_overall_dist <= self._face_threshold:
                 matches.append(best_overall)
+                matched_faces_b.update(best_face_keys)
 
         return matches
 

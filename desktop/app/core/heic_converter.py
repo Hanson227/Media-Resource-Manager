@@ -105,9 +105,9 @@ def convert_single(source: Path, target_dir: Optional[Path] = None,
         import pillow_heif
         pillow_heif.register_heif_opener()
 
-        img = Image.open(source)
-        img = img.convert("RGB")
-        img.save(target, "JPEG", quality=95)
+        with Image.open(source) as img:
+            img = img.convert("RGB")
+            img.save(target, "JPEG", quality=95)
         logger.info(f"HEIC 转换成功: {source} → {target}")
 
         # 验证生成的文件

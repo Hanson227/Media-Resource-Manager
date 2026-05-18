@@ -506,8 +506,13 @@ class QuickLookPreviewDialog(QDialog):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        if hasattr(self, '_media_stack'):
-            self._load_current()
+        if not hasattr(self, '_media_stack'):
+            return
+        # Only re-scale image; do NOT reload video (would restart playback)
+        if 0 <= self._current_index < len(self._file_list):
+            f = self._file_list[self._current_index]
+            if f.get("media_type") == "image":
+                self._show_image(f.get("path", ""))
 
     def closeEvent(self, event) -> None:
         self._stop_video()

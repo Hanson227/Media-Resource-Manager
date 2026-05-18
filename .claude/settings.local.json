@@ -16,7 +16,11 @@
       "Bash(echo \"EXIT: $?\")",
       "Bash(D:/anaconda/Scripts/playwright.exe install *)",
       "Skill(superpowers:systematic-debugging)",
-      "Bash(PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py)"
+      "Bash(PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py)",
+      "Skill(code-review-excellence)",
+      "Bash(PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py)",
+      "Skill(superpowers:dispatching-parallel-agents)",
+      "Bash(xargs wc -l)"
     ]
   }
 }

@@ -334,6 +334,7 @@ body {
 .progress-wrap.dragging .progress-thumb { opacity: 1; }
 .progress-wrap:hover .progress-track,
 .progress-wrap.dragging .progress-track { height: 5px; }
+.progress-wrap.dragging .progress-fill { transition: none; }
 .progress-seek-hint {
   position: absolute; bottom: 28px; transform: translateX(-50%);
   background: rgba(0,0,0,.8); color: #fff; font-size: 12px;

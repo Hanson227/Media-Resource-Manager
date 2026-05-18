@@ -1135,12 +1135,9 @@ def test_dedup_run_api():
             matches = q.get_file_matches_for_result(session, results[0].id)
             check(f"查重结果有匹配文件对", len(matches) > 0)
 
-    # 测试重复请求返回 409
-    resp2 = client.post("/api/dedup/run", json={
-        "unit_ids": unit_ids,
-        "threshold": 0.50,
-    })
-    check("重复请求返回 409", resp2.status_code in (200, 409))  # 可能已跑完
+    # 验证 _dedup_running 标志在查重完成后被正确重置
+    from app.api.routes.dedup import _dedup_running as dedup_flag
+    check("查重结束后 _dedup_running=False", not dedup_flag)
 
 
 # ============================================================
@@ -2019,6 +2016,500 @@ def test_tag_assign_ui():
         qq.set_file_tags(session, fid, [])
 
 
+# ============================================================
+# 新增测试 —— 文件监控器、白名单、扫描会话、单元元数据查询
+# ============================================================
+
+def test_watcher_event_handler():
+    """测试 25: 文件监控器 — 事件去抖动、媒体文件过滤、FileWatcher 生命周期。"""
+    section("测试 25: 文件监控器事件处理")
+    from app.core.watcher import MediaFileEventHandler, FileChangeEvent, FileWatcher
+    from watchdog.events import FileCreatedEvent, FileModifiedEvent, FileMovedEvent
+    import tempfile, time
+
+    captured = []
+
+    def on_change(event):
+        captured.append(event)
+
+    handler = MediaFileEventHandler(
+        extensions=frozenset({'.jpg', '.png', '.mp4'}),
+        on_change=on_change,
+        debounce_ms=50,
+    )
+    check("W1: EventHandler 创建成功", handler is not None)
+    check("W1: Debounce = 0.05s", handler._debounce_ms == 0.05)
+
+    tmp = Path(tempfile.mkdtemp(prefix="watcher_test_"))
+    try:
+        test_img = tmp / "test.jpg"
+        test_img.write_text("fake image")
+        test_txt = tmp / "test.txt"
+        test_txt.write_text("not media")
+
+        # 非媒体文件应被过滤
+        txt_event = FileCreatedEvent(str(test_txt))
+        handler.on_created(txt_event)
+        time.sleep(0.2)
+        txt_triggered = any(e.path == test_txt for e in captured)
+        check("W1: 非媒体文件被过滤", not txt_triggered)
+
+        # 媒体文件应触发回调
+        captured.clear()
+        img_event = FileCreatedEvent(str(test_img))
+        handler.on_created(img_event)
+        time.sleep(0.2)
+        img_triggered = any(e.path == test_img for e in captured)
+        check("W1: 媒体文件创建触发事件", img_triggered)
+
+        # 去抖动：5 次修改事件应合并为少数回调
+        captured.clear()
+        for _ in range(5):
+            mod_event = FileModifiedEvent(str(test_img))
+            handler.on_modified(mod_event)
+        time.sleep(0.2)
+        check("W1: 去抖动合并事件 (<=3)", len(captured) <= 3)
+
+        # on_deleted
+        captured.clear()
+        del_event = FileCreatedEvent(str(test_img))
+        handler.on_deleted(del_event)
+        time.sleep(0.2)
+        check("W1: on_deleted 触发回调", len(captured) > 0)
+
+        # FileMovedEvent — 移入媒体文件应触发
+        captured.clear()
+        test_mov = tmp / "moved.jpg"
+        test_mov.write_text("moved content")
+        move_event = FileMovedEvent(str(tmp / "old.txt"), str(test_mov))
+        handler.on_moved(move_event)
+        time.sleep(0.2)
+        moved_triggered = any(e.path == test_mov for e in captured)
+        check("W1: 媒体文件移入触发 on_moved", moved_triggered)
+
+        # FileWatcher 生命周期
+        watcher = FileWatcher(handler)
+        check("W1: FileWatcher 初始未运行", not watcher.is_running)
+        watcher.start()
+        check("W1: start 后 is_running", watcher.is_running)
+        watcher.start()  # 重复启动不应崩溃
+        check("W1: 重复 start 不崩溃", True)
+        watcher.stop()
+        check("W1: stop 后 is_running=False", not watcher.is_running)
+        watcher.stop()  # 重复停止不应崩溃
+        check("W1: 重复 stop 不崩溃", True)
+
+        # FileChangeEvent 值对象
+        ce = FileChangeEvent(path=test_img, change_type="created")
+        check("W2: FileChangeEvent 创建", ce is not None)
+        check("W2: change_type=created", ce.change_type == "created")
+        check("W2: is_directory 默认 False", not ce.is_directory)
+        check("W2: src_path 存入", ce.src_path is None)
+
+        ce2 = FileChangeEvent(path=test_img, change_type="modified", is_directory=True)
+        check("W2: is_directory 可设为 True", ce2.is_directory)
+
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_whitelist_and_scan_queries():
+    """测试 26: 白名单 + 扫描会话查询。"""
+    section("测试 26: 白名单与扫描会话查询")
+    from app.db import queries as qq
+    from app.db.models import Whitelist, ScanSession
+
+    # ---- 白名单 ----
+    with DatabaseManager.session() as session:
+        all_wl = qq.get_all_whitelists(session)
+        check("W3: 初始白名单为空", len(all_wl) == 0)
+
+        wl1 = qq.add_whitelist(session, "/path/to/keep", match_type="path", note="测试")
+        check("W3: 添加白名单成功", wl1.id is not None)
+        check("W3: pattern 正确", wl1.pattern == "/path/to/keep")
+        check("W3: is_regex 默认 False", not wl1.is_regex)
+
+        wl2 = qq.add_whitelist(session, r".*\.jpg", is_regex=True, match_type="extension")
+        check("W3: 正则白名单成功", wl2.id is not None)
+        check("W3: is_regex=True", wl2.is_regex)
+
+        # 查询全部
+        check("W3: 白名单数=2", len(qq.get_all_whitelists(session)) == 2)
+
+        # is_whitelisted
+        check("W3: 精确路径匹配", qq.is_whitelisted(session, "/path/to/keep"))
+        check("W3: 不匹配路径", not qq.is_whitelisted(session, "/other/path"))
+
+        # 删除
+        qq.remove_whitelist(session, wl1.id)
+        check("W3: 删除后剩余 1", len(qq.get_all_whitelists(session)) == 1)
+        check("W3: 删除后不再匹配", not qq.is_whitelisted(session, "/path/to/keep"))
+
+        # 删除不存在项不应报错
+        qq.remove_whitelist(session, -999)
+        check("W3: 删除不存在的白名单不报错", True)
+
+        session.query(Whitelist).delete()
+
+    # ---- 扫描会话 ----
+    with DatabaseManager.session() as session:
+        latest = qq.get_latest_scan_session(session)
+        check("W4: 初始无扫描会话", latest is None)
+
+        ss = qq.create_scan_session(session)
+        check("W4: 创建扫描会话成功", ss.id is not None)
+        # 默认 status 为 "running"（模型字段默认值）
+        check("W4: 初始状态 running", ss.status == "running")
+        check("W4: started_at 非空", ss.started_at is not None)
+
+        # 更新进度（使用表中存在的列）
+        qq.update_scan_session(session, ss.id, files_scanned=10, new_files=5)
+        updated = session.query(ScanSession).filter(ScanSession.id == ss.id).first()
+        check("W4: files_scanned=10", updated.files_scanned == 10)
+        check("W4: new_files=5", updated.new_files == 5)
+
+        # 完成（无错误）
+        qq.finish_scan_session(session, ss.id, status="completed")
+        finished = session.query(ScanSession).filter(ScanSession.id == ss.id).first()
+        check("W4: 完成状态=completed", finished.status == "completed")
+        check("W4: completed_at 非空", finished.completed_at is not None)
+
+        # 创建第二个会话并带错误完成（error_log 由 finish_scan_session 写入）
+        ss2 = qq.create_scan_session(session)
+        qq.finish_scan_session(session, ss2.id, status="completed",
+                               errors=["权限不足: /path"])
+        check("W4: 第二个会话创建正常", ss2.id != ss.id)
+
+        # get_latest_scan_session 返回最新的
+        latest = qq.get_latest_scan_session(session)
+        check("W4: 最新会话 ID 匹配", latest.id == ss2.id)
+
+        session.query(ScanSession).delete()
+
+
+def test_unit_metadata_queries():
+    """测试 27: 单元元数据查询 — cover、star、rename、manual、enabled roots 等。"""
+    section("测试 27: 单元元数据查询")
+    from app.db import queries as qq
+    from app.db.models import ResourceUnit, MediaFile
+
+    with DatabaseManager.session() as session:
+        units = qq.get_all_active_units(session)
+        if not units:
+            check("W5: 无可用单元，跳过", True)
+            return
+        unit = units[0]
+
+        # set_unit_starred / get_starred_units
+        qq.set_unit_starred(session, unit.id, True)
+        session.refresh(unit)
+        check("W5: 收藏成功 is_starred=True", unit.is_starred)
+        starred = qq.get_starred_units(session)
+        check("W5: 收藏列表包含本单元", any(u.id == unit.id for u in starred))
+        qq.set_unit_starred(session, unit.id, False)
+        session.refresh(unit)
+        check("W5: 取消收藏 is_starred=False", not unit.is_starred)
+
+        # set_unit_cover / clear_unit_cover
+        qq.set_unit_cover(session, unit.id, "/path/to/cover.jpg")
+        session.refresh(unit)
+        check("W5: cover_path 已设置", unit.cover_path == "/path/to/cover.jpg")
+        qq.clear_unit_cover(session, unit.id)
+        session.refresh(unit)
+        check("W5: clear 后 cover_path=None", unit.cover_path is None)
+
+        # rename_unit
+        original = unit.name
+        qq.rename_unit(session, unit.id, f"{original}_已重命名")
+        session.refresh(unit)
+        check("W5: 重命名成功", unit.name == f"{original}_已重命名")
+        qq.rename_unit(session, unit.id, original)  # 恢复
+
+        # mark_unit_manual
+        qq.mark_unit_manual(session, unit.id, True)
+        session.refresh(unit)
+        check("W5: mark_unit_manual(True)", unit.is_manual)
+        qq.mark_unit_manual(session, unit.id, False)
+
+        # get_unit_file_count
+        cnt = qq.get_unit_file_count(session, unit.id)
+        check("W5: get_unit_file_count >= 0", cnt >= 0)
+
+        # get_enabled_roots / set_root_enabled
+        roots = qq.get_enabled_roots(session)
+        check("W5: enabled roots 非空", len(roots) > 0)
+        root = roots[0]
+        qq.set_root_enabled(session, root.id, False)
+        session.refresh(root)
+        check("W5: root disabled", not root.enabled)
+        qq.set_root_enabled(session, root.id, True)
+        session.refresh(root)
+        check("W5: root re-enabled", root.enabled)
+
+        # get_files_without_hash
+        no_md5 = qq.get_files_without_hash(session, "md5", limit=5)
+        check("W5: get_files_without_hash 返回 list", isinstance(no_md5, list))
+        invalid = qq.get_files_without_hash(session, "invalid_type")
+        check("W5: 无效 hash_type 返回空", len(invalid) == 0)
+
+        # get_file_count_by_unit_ids
+        counts = qq.get_file_count_by_unit_ids(session, [unit.id])
+        check("W5: get_file_count_by_unit_ids 有结果", unit.id in counts)
+        check("W5: count > 0", counts[unit.id] > 0)
+
+        # get_files_by_md5
+        files = qq.get_files_by_unit(session, unit.id)
+        if files and files[0].md5_hash:
+            md5_matches = qq.get_files_by_md5(session, files[0].md5_hash)
+            check("W5: get_files_by_md5 返回 list", isinstance(md5_matches, list))
+            check("W5: MD5 查询有结果", len(md5_matches) > 0)
+
+        # get_excluded_units / unexclude_unit
+        excluded = qq.get_excluded_units(session)
+        check("W5: get_excluded_units 不报错", isinstance(excluded, list))
+
+        # unmerge_unit（对非合并单元应无副作用）
+        qq.unmerge_unit(session, unit.id)
+        check("W5: unmerge_unit 不报错", True)
+
+        # update_file_unit
+        if files:
+            qq.update_file_unit(session, files[0].id, unit.id)
+            check("W5: update_file_unit 不报错", True)
+
+        # get_files_by_md5 无匹配应返回空
+        no_match = qq.get_files_by_md5(session, "NONEXISTENT_MD5_HASH_12345")
+        check("W5: get_files_by_md5 无匹配返回空", len(no_match) == 0)
+
+
+# ============================================================
+# 新增 API 端点测试 —— 标签、消息、单元详情、文件详情
+# ============================================================
+
+def test_api_tags_endpoints():
+    """测试 29: 标签 API 端点全覆盖（list/create/delete/get-by-file/set-by-file/mapped-files）。"""
+    section("测试 29: 标签 API 端点")
+    from app.api.server import create_app
+    from fastapi.testclient import TestClient
+    config = AppConfig()
+    app = create_app(config)
+    client = TestClient(app)
+
+    # GET /api/tags — 初始
+    resp = client.get("/api/tags")
+    check("T29: GET /api/tags 200", resp.status_code == 200)
+    data = resp.json()
+    check("T29: 含 tags 字段", "tags" in data)
+    initial_count = len(data["tags"])
+
+    # POST /api/tags — 创建
+    resp = client.post("/api/tags", params={"name": "API测试标签", "color": "#FF0000"})
+    check("T29: POST /api/tags 200", resp.status_code == 200)
+    tag_data = resp.json()
+    check("T29: 返回 id", "id" in tag_data)
+    check("T29: name 正确", tag_data["name"] == "API测试标签")
+    tag_id = tag_data["id"]
+
+    # POST 重复名称 → 409
+    resp = client.post("/api/tags", params={"name": "API测试标签"})
+    check("T29: 重复标签返回 409", resp.status_code == 409)
+
+    # GET 验证计数 +1
+    resp = client.get("/api/tags")
+    check("T29: 标签数+1", len(resp.json()["tags"]) == initial_count + 1)
+
+    # GET /api/tags/by-file/{fid}
+    with DatabaseManager.session() as session:
+        from app.db.models import MediaFile
+        mf = session.query(MediaFile).first()
+    if mf:
+        fid = mf.id
+
+        # 初始无标签
+        resp = client.get(f"/api/tags/by-file/{fid}")
+        check("T29: GET by-file 200", resp.status_code == 200)
+        check("T29: 初始标签数为 0", len(resp.json()["tags"]) == 0)
+
+        # PUT /api/tags/by-file/{fid} — 设置标签
+        resp = client.put(f"/api/tags/by-file/{fid}", json=[tag_id])
+        check("T29: PUT by-file 200", resp.status_code == 200)
+        check("T29: success=True", resp.json().get("success") is True)
+
+        # GET 验证已设置
+        resp = client.get(f"/api/tags/by-file/{fid}")
+        check("T29: 标签已设置", len(resp.json()["tags"]) == 1)
+
+        # PUT 清空
+        resp = client.put(f"/api/tags/by-file/{fid}", json=[])
+        check("T29: PUT 清空 200", resp.status_code == 200)
+
+        # GET /api/tags/mapped-files
+        resp = client.get("/api/tags/mapped-files")
+        check("T29: GET mapped-files 200", resp.status_code == 200)
+        check("T29: 含 mappings 字段", "mappings" in resp.json())
+
+    # DELETE /api/tags/{tag_id}
+    resp = client.delete(f"/api/tags/{tag_id}")
+    check("T29: DELETE 200", resp.status_code == 200)
+
+    # DELETE 不存在 → 404
+    resp = client.delete("/api/tags/99999")
+    check("T29: DELETE 不存在返回 404", resp.status_code == 404)
+
+
+def test_api_messages_endpoints():
+    """测试 30: 消息 API 端点全覆盖（list/unread-count/mark-read/read-all/dismiss）。"""
+    section("测试 30: 消息 API 端点")
+    from app.api.server import create_app
+    from fastapi.testclient import TestClient
+    config = AppConfig()
+    app = create_app(config)
+    client = TestClient(app)
+
+    # GET /api/messages — 列表
+    resp = client.get("/api/messages")
+    check("T30: GET /api/messages 200", resp.status_code == 200)
+    data = resp.json()
+    check("T30: 含 messages 字段", "messages" in data)
+    check("T30: 含 unread_count 字段", "unread_count" in data)
+
+    # GET /api/messages/unread-count
+    resp = client.get("/api/messages/unread-count")
+    check("T30: GET unread-count 200", resp.status_code == 200)
+    check("T30: unread_count 为 int", isinstance(resp.json()["unread_count"], int))
+
+    # GET /api/messages?unread_only=true
+    resp = client.get("/api/messages", params={"unread_only": True})
+    check("T30: GET unread_only 200", resp.status_code == 200)
+
+    # 先用 MessageCenter 创建一条消息
+    from app.services.message_center import MessageCenter
+    msg = MessageCenter.create_info("API测试消息", "HTTP 端点测试")
+    check("T30: 测试消息已创建", msg is not None)
+    if msg:
+        # POST /api/messages/{msg_id}/read
+        resp = client.post(f"/api/messages/{msg.id}/read")
+        check("T30: POST read 200", resp.status_code == 200)
+        check("T30: success=True", resp.json().get("success") is True)
+
+        # POST /api/messages/read-all
+        resp = client.post("/api/messages/read-all")
+        check("T30: POST read-all 200", resp.status_code == 200)
+
+        # DELETE /api/messages/{msg_id}
+        resp = client.delete(f"/api/messages/{msg.id}")
+        check("T30: DELETE 200", resp.status_code == 200)
+
+
+def test_api_detail_endpoints():
+    """测试 31: 单元/文件详情 API —  /api/units/{id}, /api/units/{id}/files, /api/files, /api/files/{id}。"""
+    section("测试 31: 单元与文件详情 API")
+    from app.api.server import create_app
+    from fastapi.testclient import TestClient
+    config = AppConfig()
+    app = create_app(config)
+    client = TestClient(app)
+
+    # 先获取有效单元 ID
+    resp = client.get("/api/units")
+    check("T31: GET /api/units 200", resp.status_code == 200)
+    units_data = resp.json()
+    if not units_data.get("units"):
+        check("T31: 无单元可测（跳过）", True)
+        return
+    uid = units_data["units"][0]["id"]
+    unit_name = units_data["units"][0]["name"]
+
+    # GET /api/units/{unit_id}
+    resp = client.get(f"/api/units/{uid}")
+    check("T31: GET /api/units/{uid} 200", resp.status_code == 200)
+    detail = resp.json()
+    check("T31: id 匹配", detail.get("id") == uid)
+    check("T31: name 非空", detail.get("name") == unit_name)
+    check("T31: 含 cover_file_id", "cover_file_id" in detail)
+    check("T31: 含 library_root_id", "library_root_id" in detail)
+    check("T31: 含 library_root_name", "library_root_name" in detail)
+
+    # GET /api/units/{unit_id}/files
+    resp = client.get(f"/api/units/{uid}/files")
+    check("T31: GET /api/units/{uid}/files 200", resp.status_code == 200)
+    files_data = resp.json()
+    check("T31: unit_id 匹配", files_data.get("unit_id") == uid)
+    check("T31: 含 files 列表", "files" in files_data)
+    check("T31: 含 file_count", "file_count" in files_data)
+    check("T31: file_count > 0", files_data.get("file_count", 0) > 0)
+
+    # GET /api/files?unit_id=...
+    resp = client.get("/api/files", params={"unit_id": uid})
+    check("T31: GET /api/files 200", resp.status_code == 200)
+    list_data = resp.json()
+    check("T31: 含 files", "files" in list_data)
+    check("T31: 含 total", "total" in list_data)
+    check("T31: total > 0", list_data.get("total", 0) > 0)
+    check("T31: 含 per_page", "per_page" in list_data)
+
+    # GET /api/files/{file_id} — 详情
+    if list_data["files"]:
+        fid = list_data["files"][0]["id"]
+        resp = client.get(f"/api/files/{fid}")
+        check("T31: GET /api/files/{fid} 200", resp.status_code == 200)
+        fd = resp.json()
+        check("T31: 文件 id 匹配", fd.get("id") == fid)
+        check("T31: 含 filename", "filename" in fd)
+        check("T31: 含 path", "path" in fd)
+        check("T31: 含 media_type", "media_type" in fd)
+        check("T31: 含 resource_unit_id", "resource_unit_id" in fd)
+
+        # DELETE /api/files/{file_id} — 实际删除
+        resp = client.delete(f"/api/files/{fid}")
+        check("T31: DELETE /api/files/{fid} 200", resp.status_code == 200)
+        check("T31: success=True", resp.json().get("success") is True)
+
+        # 删除后再次查询应 404
+        resp = client.get(f"/api/files/{fid}")
+        check("T31: 删除后文件 404", resp.status_code == 404)
+
+    # 不存在单元 → 404
+    resp = client.get("/api/units/99999")
+    check("T31: 不存在单元 404", resp.status_code == 404)
+    resp = client.get("/api/units/99999/files")
+    check("T31: 不存在单元 files 404", resp.status_code == 404)
+
+    # 不存在文件 → 404
+    resp = client.get("/api/files/99999")
+    check("T31: 不存在文件 404", resp.status_code == 404)
+    resp = client.delete("/api/files/99999")
+    check("T31: DELETE 不存在文件 404", resp.status_code == 404)
+
+
+def test_convert_batch():
+    """测试 32: HEIC 批量转换 — convert_batch 路径覆盖。"""
+    section("测试 32: HEIC 批量转换")
+    from app.core.heic_converter import convert_batch, ConversionResult
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp(prefix="heic_batch_"))
+    try:
+        # 对不存在的文件列表调用 convert_batch
+        sources = [tmp / "nonexistent1.heic", tmp / "nonexistent2.heic"]
+        summary = convert_batch(sources)
+        check("T32: convert_batch 返回 ConvertSummary", summary is not None)
+        check("T32: total=2", summary.total == 2)
+        check("T32: all failed（文件不存在）", summary.failed == 2)
+        check("T32: success=0", summary.success == 0)
+        check("T32: results 长度为 2", len(summary.results) == 2)
+        check("T32: 第一个结果为 ConversionResult",
+              isinstance(summary.results[0], ConversionResult))
+
+        # 空列表
+        empty = convert_batch([])
+        check("T32: 空列表 total=0", empty.total == 0)
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     global _passed, _failed
     _passed = 0
@@ -2086,6 +2577,15 @@ def main():
         test_expand_unit_preserves_other_state()
         test_file_unit_delete_db()
         test_tag_assign_ui()
+
+        # 新增覆盖测试
+        test_watcher_event_handler()
+        test_whitelist_and_scan_queries()
+        test_unit_metadata_queries()
+        test_api_tags_endpoints()
+        test_api_messages_endpoints()
+        test_api_detail_endpoints()
+        test_convert_batch()
 
     finally:
         # 清理数据库连接

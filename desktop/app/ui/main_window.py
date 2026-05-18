@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         self._hash_worker: Optional[HashWorker] = None
         self._dedup_worker: Optional[DedupWorker] = None
         self._current_expanded_unit_id: Optional[int] = None  # accordion: 当前展开文件层的单元 ID
+        self._scan_queue: list[str] = []  # 串行扫描队列
 
         # 搜索防抖定时器 — 每次按键重置，150ms 空闲后触发放行
         self._filter_timer = QTimer()
@@ -418,12 +419,23 @@ class MainWindow(QMainWindow):
         # 刷新文件夹树
         self._tree_view.refresh_model()
 
-        # 自动选中第一个根目录，使内容立即可见
-        root_idx = self._tree_view.model().index(0, 0)
-        if root_idx.isValid():
-            self._tree_view.setCurrentIndex(root_idx)
+        # 如果还有积压的扫描队列，继续下一个
+        self._start_next_scan()
+
+        # 续行：无积压时自动选中第一个根目录
+        if not self._scan_queue:
+            root_idx = self._tree_view.model().index(0, 0)
+            if root_idx.isValid():
+                self._tree_view.setCurrentIndex(root_idx)
 
         # 缩略图由 ThumbLoader 按需生成，后台不自动启动哈希/人脸索引
+
+    def _start_next_scan(self) -> None:
+        """从扫描队列中弹出下一个路径并开始扫描。"""
+        if not self._scan_queue:
+            return
+        next_path = self._scan_queue.pop(0)
+        self._start_scan(next_path)
 
     @Slot(int)
     def _on_hash_finished(self, count: int) -> None:
@@ -493,7 +505,6 @@ class MainWindow(QMainWindow):
             logger.error(f"加载单元详情失败: {e}")
 
 
-    @Slot()
     # ============================================================
     # 双向联动：网格 ↔ 树同步
     # ============================================================
@@ -1403,13 +1414,8 @@ class MainWindow(QMainWindow):
             self._start_scan(paths[0])
         else:
             # 多根目录：逐个串行扫描，避免 worker 覆盖
-            self._start_scan(paths[0])
-            for path in paths[1:]:
-                if self._scan_worker:
-                    self._scan_worker.finished.connect(
-                        lambda *args, _p=path: self._start_scan(_p),
-                        Qt.ConnectionType.SingleShotConnection,
-                    )
+            self._scan_queue = list(paths)
+            self._start_next_scan()
 
     def _cancel_all_workers(self) -> None:
         """安全停止所有后台工作线程。"""

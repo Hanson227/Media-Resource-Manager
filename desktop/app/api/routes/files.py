@@ -14,6 +14,15 @@ from fastapi.responses import FileResponse, Response
 from app.api.schemas import FileItem, FileDetailResponse, FileListResponse, StatusResponse
 
 logger = logging.getLogger(__name__)
+
+# HEIC/HEIF 浏览器不原生支持，注册 Pillow 插件以便在内存中转为 JPEG
+try:
+    import pillow_heif  # noqa: F401 — registers HEIF opener with Pillow
+    pillow_heif.register_heif_opener()
+except ImportError:
+    logger.warning("pillow_heif 未安装，HEIC 文件无法在浏览器中查看")
+    pillow_heif = None  # type: ignore[assignment]
+
 from app.core.thumbnail_generator import ThumbnailGenerator
 from app.db.engine import DatabaseManager
 from app.db import queries as q
@@ -186,17 +195,18 @@ async def stream_file(file_id: int):
     media_type = MIME_MAP.get(f.extension.lower(), "application/octet-stream")
     # HEIC 浏览器不原生支持，转为 JPEG 传输
     if media_type == "image/heic":
+        if pillow_heif is None:
+            raise HTTPException(status_code=415, detail="HEIC 支持未安装（缺少 pillow_heif）")
         try:
             from PIL import Image
-            import pillow_heif
-            pillow_heif.register_heif_opener()
-            img = Image.open(path).convert("RGB")
-            buf = io.BytesIO()
-            img.save(buf, "JPEG", quality=90)
-            buf.seek(0)
+            with Image.open(path) as img:
+                rgb_img = img.convert("RGB")
+                buf = io.BytesIO()
+                rgb_img.save(buf, "JPEG", quality=90)
+                buf.seek(0)
             return Response(content=buf.read(), media_type="image/jpeg",
                             headers={"Content-Disposition": f'inline; filename="{f.filename}.jpg"'})
         except Exception as e:
-            logger.warning(f"HEIC 转换失败 {f.path}: {e}")
-            # fallback: 返回原始文件
+            logger.error(f"HEIC 转换失败 {f.path}: {e}")
+            raise HTTPException(status_code=500, detail=f"HEIC 转换失败: {e}")
     return FileResponse(str(path), media_type=media_type, filename=f.filename)

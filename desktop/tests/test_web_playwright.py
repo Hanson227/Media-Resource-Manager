@@ -161,17 +161,16 @@ def test_units_page_shows_data(page):
     """验证单元列表页面能显示数据。"""
     section("Web 测试 2: 单元列表页面")
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-    page.wait_for_timeout(1000)
 
-    # 等待数据加载（单元列表或根组）
+    # 等待单元列表加载完成
     root_groups = page.locator(".root-group")
+    root_groups.first.wait_for(state="attached", timeout=5000)
     count = root_groups.count()
     check("根目录组已渲染", count > 0)
 
     if count > 0:
-        # 等待数据渲染完毕（单元卡片可能已在 DOM 中，因 group 默认展开）
-        cards_visible = page.locator(".unit-card").first.wait_for(state="attached", timeout=5000)
         unit_cards = page.locator(".unit-card")
+        unit_cards.first.wait_for(state="attached", timeout=5000)
         card_count = unit_cards.count()
         check("单元卡片已渲染", card_count > 0)
 
@@ -198,25 +197,26 @@ def test_unit_files_page(page):
     """验证进入单元后的文件列表页。"""
     section("Web 测试 3: 文件列表页")
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-    page.wait_for_timeout(1000)
 
-    # 展开根目录并进入第一个单元
+    # 等待根目录组和单元卡片
     root_group = page.locator(".root-group").first
+    root_group.wait_for(state="attached", timeout=5000)
     if root_group.count() == 0:
         check("无根目录可测试", True)
         return
 
     # 等待单元卡片加载后再点击进入
     unit_card = page.locator(".unit-card").first
+    unit_card.wait_for(state="attached", timeout=5000)
     if unit_card.count() == 0:
         check("无单元可进入", True)
         return
 
     unit_card.click()
-    page.wait_for_timeout(1000)
 
-    # 验证进入了文件列表页
+    # 等待文件列表页渲染
     feed_header = page.locator(".feed-header")
+    feed_header.wait_for(state="attached", timeout=5000)
     if feed_header.count() > 0:
         header_text = feed_header.text_content() or ""
         check("文件列表页已加载", len(header_text) > 0)
@@ -251,26 +251,27 @@ def test_preview_navigation(page):
     """验证预览页加载和导航功能。"""
     section("Web 测试 4: 预览页面导航")
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-    page.wait_for_timeout(1500)
 
-    # 展开根目录进入文件列表
+    # 等待单元加载并进入文件列表
     unit_card = page.locator(".unit-card").first
+    unit_card.wait_for(state="attached", timeout=5000)
     if unit_card.count() == 0:
         check("预览测试: 无单元可进入", True)
         return
     unit_card.click()
-    page.wait_for_timeout(1000)
+    page.locator(".feed-header").wait_for(state="attached", timeout=5000)
 
     # 点击第一个文件进入预览
     feed_item = page.locator(".feed-item").first
+    feed_item.wait_for(state="attached", timeout=5000)
     if feed_item.count() == 0:
         check("预览测试: 无文件可预览", True)
         return
     feed_item.click()
-    page.wait_for_timeout(1500)
 
-    # 验证预览页加载
+    # 等待预览覆盖层加载
     preview = page.locator(".preview-overlay")
+    preview.wait_for(state="visible", timeout=5000)
     check("预览页已加载", preview.count() > 0)
 
     # 验证位置指示器存在（多个文件时）
@@ -283,7 +284,6 @@ def test_preview_navigation(page):
         next_btn = nav_hint.locator(".mdi-chevron-right")
         if next_btn.count() > 0:
             next_btn.click()
-            page.wait_for_timeout(500)
             new_pos = nav_hint.locator(".pos").text_content() or ""
             check("点击前进后位置变化", new_pos != pos_text)
 
@@ -291,7 +291,6 @@ def test_preview_navigation(page):
         prev_btn = nav_hint.locator(".mdi-chevron-left")
         if prev_btn.count() > 0:
             prev_btn.click()
-            page.wait_for_timeout(500)
             check("后退按钮响应正常", True)
 
     # 返回按钮
@@ -306,23 +305,24 @@ def test_preview_swipe_gesture(page):
     """验证预览页左右滑动手势导航。"""
     section("Web 测试 5: 预览滑动手势")
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-    page.wait_for_timeout(1500)
 
     # 进入文件列表
     unit_card = page.locator(".unit-card").first
+    unit_card.wait_for(state="attached", timeout=5000)
     if unit_card.count() == 0:
         check("滑动手势测试: 无单元可进入", True)
         return
     unit_card.click()
-    page.wait_for_timeout(1000)
+    page.locator(".feed-header").wait_for(state="attached", timeout=5000)
 
     # 点击第一个文件进入预览
     feed_item = page.locator(".feed-item").first
+    feed_item.wait_for(state="attached", timeout=5000)
     if feed_item.count() == 0:
         check("滑动手势测试: 无文件可预览", True)
         return
     feed_item.click()
-    page.wait_for_timeout(1500)
+    page.locator(".preview-overlay").wait_for(state="visible", timeout=5000)
 
     # 验证预览页加载且有位置指示器
     nav_hint = page.locator(".image-nav-hint")
@@ -342,7 +342,13 @@ def test_preview_swipe_gesture(page):
         check("滑动手势测试: 文件不足 2 个，无法测试滑动", True)
         return
 
-    # 模拟左滑 → 下一张
+    # 检查 gesture-zone 是否存在
+    gesture_zone = page.locator(".gesture-zone")
+    if gesture_zone.count() == 0:
+        check("滑动手势测试: 无 gesture-zone 区域", True)
+        return
+
+    # 通过 dispatchEvent 模拟 TouchEvents（Playwright mouse 不触发 touch 事件）
     page.evaluate("""
         () => {
             const zone = document.querySelector('.gesture-zone');
@@ -352,7 +358,6 @@ def test_preview_swipe_gesture(page):
             const cy = rect.top + rect.height / 2;
             function fire(name, x) {
                 const evt = new TouchEvent(name, { bubbles: true, cancelable: true });
-                // Override changedTouches getter
                 const touches = [{ clientX: x, clientY: cy, identifier: 0 }];
                 Object.defineProperty(evt, 'changedTouches', {
                     get: () => touches, configurable: true
@@ -364,7 +369,7 @@ def test_preview_swipe_gesture(page):
             fire('touchend', cx - 60);
         }
     """)
-    page.wait_for_timeout(600)
+    page.wait_for_timeout(500)
 
     # 验证位置变化（左滑 → 前进到下一张）
     new_pos_text = nav_hint.locator(".pos").text_content() or ""
@@ -375,7 +380,7 @@ def test_preview_swipe_gesture(page):
     else:
         check("末张左滑不切换", new_pos == total)
 
-    # 右滑 → navigateToFile(index-1)
+    # 右滑 → 上一张
     prev_pos = new_pos
     page.evaluate("""
         () => {
@@ -397,7 +402,7 @@ def test_preview_swipe_gesture(page):
             fire('touchend', cx + 60);
         }
     """)
-    page.wait_for_timeout(600)
+    page.wait_for_timeout(500)
 
     final_text = nav_hint.locator(".pos").text_content() or ""
     final_parts = final_text.split("/")
@@ -412,24 +417,26 @@ def test_preview_scroll_restore(page):
     """验证从预览返回后文件列表滚动位置恢复。"""
     section("Web 测试 6: 预览返回滚动位置")
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-    page.wait_for_timeout(1500)
 
+    # 等待单元加载并进入文件列表
     unit_card = page.locator(".unit-card").first
+    unit_card.wait_for(state="attached", timeout=5000)
     if unit_card.count() == 0:
         check("滚动恢复测试: 无单元可进入", True)
         return
     unit_card.click()
-    page.wait_for_timeout(1000)
+    page.locator(".feed-header").wait_for(state="attached", timeout=5000)
 
-    # 等待文件加载完成（至少显示 4 个文件才值得测试滚动）
+    # 等待文件列表加载
     feed_items = page.locator(".feed-item")
+    feed_items.first.wait_for(state="attached", timeout=5000)
     if feed_items.count() < 4:
         check("滚动恢复测试: 文件不足，跳过", True)
         return
 
-    # 点击靠后的文件（如第 4 个，index=3, row=1）进入预览
+    # 点击靠后的文件（如第 4 个，index=3）进入预览
     feed_items.nth(3).click()
-    page.wait_for_timeout(1500)
+    page.locator(".preview-overlay").wait_for(state="visible", timeout=5000)
 
     # 在预览中前进到下一个文件（触发 _fileScrollTop 更新）
     nav_hint = page.locator(".image-nav-hint")
@@ -437,15 +444,14 @@ def test_preview_scroll_restore(page):
         next_btn = nav_hint.locator(".mdi-chevron-right")
         if next_btn.count() > 0:
             next_btn.click()
-            page.wait_for_timeout(500)
 
     # 返回文件列表
     back_btn = page.locator(".preview-back")
     if back_btn.count() > 0:
         back_btn.click()
-        page.wait_for_timeout(1000)
 
-    # 验证文件列表已恢复（feed-items 可见，且不在顶部）
+    # 验证文件列表已恢复
+    page.locator(".feed-item").first.wait_for(state="attached", timeout=5000)
     items_after = page.locator(".feed-item").count()
     check("返回后文件列表已渲染", items_after >= 4)
 
@@ -458,10 +464,10 @@ def test_navigation_tabs(page):
     """验证底部导航栏功能。"""
     section("Web 测试 7: 底部导航")
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-    page.wait_for_timeout(1000)
 
     # 等待底部导航渲染
     tabs = page.locator(".bottom-tabs")
+    tabs.wait_for(state="attached", timeout=5000)
     tabs_count = tabs.count()
     check("底部导航栏存在", tabs_count > 0)
 
@@ -489,7 +495,6 @@ def test_navigation_tabs(page):
         text = tab_texts[i]
         if "查重" in text:
             tab_items.nth(i).click()
-            page.wait_for_timeout(500)
             check("切换到查重页面", True)
             break
 
@@ -498,36 +503,34 @@ def test_navigation_tabs(page):
         text = tab_texts[i]
         if "消息" in text:
             tab_items.nth(i).click()
-            page.wait_for_timeout(500)
             check("切换到消息页面", True)
             break
 
 
 def test_pin_lock_screen(page):
     """验证 PIN 锁屏界面渲染。"""
-    section("Web 测试 9: PIN 锁屏界面")
+    section("Web 测试 8: PIN 锁屏界面")
     page.goto(f"http://127.0.0.1:{_PORT}/")
-    page.wait_for_timeout(1000)
 
     # PIN 界面可能在连接之前显示
     pin_overlay = page.locator(".pin-overlay")
-    pin_keypad = page.locator(".pin-keypad")
-    lock_icon = page.locator(".lock-icon")
 
     if pin_overlay.count() > 0:
+        pin_overlay.wait_for(state="attached", timeout=3000)
         check("PIN 遮罩层存在", pin_overlay.count() > 0)
 
         # 检测是设置模式还是验证模式
+        lock_icon = page.locator(".lock-icon")
         if lock_icon.count() > 0:
             check("锁图标存在", lock_icon.count() > 0)
 
+        pin_keypad = page.locator(".pin-keypad")
         if pin_keypad.count() > 0:
             pin_keys = page.locator(".pin-key")
             check("数字键盘按钮存在", pin_keys.count() > 0)
             # 尝试输入
             if pin_keys.count() >= 4:
                 pin_keys.nth(0).click()
-                page.wait_for_timeout(100)
                 pin_dots = page.locator(".pin-dot")
                 if pin_dots.count() > 0:
                     # 验证首个点位被填充
@@ -538,23 +541,21 @@ def test_pin_lock_screen(page):
 
 def test_responsive_layout(page):
     """验证响应式布局。"""
-    section("Web 测试 10: 响应式布局")
+    section("Web 测试 9: 响应式布局")
     # 测试手机尺寸
     page.set_viewport_size({"width": 375, "height": 667})
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-    page.wait_for_timeout(1000)
+    page.locator(".app-main").wait_for(state="attached", timeout=5000)
 
     bottom_tabs = page.locator(".bottom-tabs")
     check("手机尺寸底部导航可见", bottom_tabs.count() > 0)
 
     # 测试平板尺寸
     page.set_viewport_size({"width": 768, "height": 1024})
-    page.wait_for_timeout(500)
     check("平板尺寸页面正常", page.locator(".app-main").count() > 0)
 
     # 恢复默认尺寸
     page.set_viewport_size({"width": 1280, "height": 800})
-    page.wait_for_timeout(500)
     check("桌面尺寸页面正常", page.locator(".app-main").count() > 0)
 
 
@@ -609,30 +610,30 @@ def main():
 
             # 预览导航测试
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-            page.wait_for_timeout(500)
+            page.wait_for_load_state("networkidle")
             test_preview_navigation(page)
 
             # 预览滑动手势测试（独立导航以防之前测试退出预览）
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-            page.wait_for_timeout(500)
+            page.wait_for_load_state("networkidle")
             test_preview_swipe_gesture(page)
 
             # 预览返回滚动恢复测试
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-            page.wait_for_timeout(500)
+            page.wait_for_load_state("networkidle")
             test_preview_scroll_restore(page)
 
             # 重新加载使 localStorage 生效（绕过 PIN 页）
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-            page.wait_for_timeout(500)
+            page.wait_for_load_state("networkidle")
             test_navigation_tabs(page)
 
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-            page.wait_for_timeout(500)
+            page.wait_for_load_state("networkidle")
             test_pin_lock_screen(page)
 
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
-            page.wait_for_timeout(500)
+            page.wait_for_load_state("networkidle")
             test_responsive_layout(page)
 
             browser.close()

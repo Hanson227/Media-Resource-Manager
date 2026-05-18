@@ -14,7 +14,7 @@ from typing import Optional
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import AppConfig
@@ -85,7 +85,6 @@ def create_app(config: AppConfig) -> FastAPI:
         body = await request.json()
         if body.get("pin", "") == cfg.web_pin:
             return {"verified": True}
-        from fastapi.responses import JSONResponse
         return JSONResponse(status_code=403, content={"verified": False, "error": "密码错误"})
 
     # ============================================================
@@ -143,7 +142,7 @@ def _make_proactor_handler(original_handler):
         if "connection_lost" in msg or "shutdown" in msg or "Transport" in msg:
             return
         if original_handler:
-            loop.default_exception_handler(context)
+            original_handler(context)
     return handler
 
 
