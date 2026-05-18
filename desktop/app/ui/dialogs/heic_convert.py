@@ -100,12 +100,15 @@ class HeicConvertDialog(QDialog):
         )
         self._close_btn.setEnabled(True)
         self._close_btn.setText("关闭")
-        self._worker.deleteLater()
 
     def _on_close(self) -> None:
-        if self._worker and self._worker.isRunning():
-            self._worker.requestInterruption()
-            self._worker.wait(3000)
+        # 转换未完成时中断工作线程
+        try:
+            if self._worker and self._worker.isRunning():
+                self._worker.requestInterruption()
+                self._worker.wait(3000)
+        except RuntimeError:
+            pass  # 工作线程已被清理
         self.accept()
 
     @staticmethod

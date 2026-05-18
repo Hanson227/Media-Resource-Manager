@@ -3,12 +3,13 @@
 文件路由 —— /api/files 真实数据库查询端点。
 """
 
+import io
 import logging
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Query, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from app.api.schemas import FileItem, FileDetailResponse, FileListResponse, StatusResponse
 
@@ -183,4 +184,19 @@ async def stream_file(file_id: int):
         raise HTTPException(status_code=404, detail="文件已在磁盘上移除")
 
     media_type = MIME_MAP.get(f.extension.lower(), "application/octet-stream")
+    # HEIC 浏览器不原生支持，转为 JPEG 传输
+    if media_type == "image/heic":
+        try:
+            from PIL import Image
+            import pillow_heif
+            pillow_heif.register_heif_opener()
+            img = Image.open(path).convert("RGB")
+            buf = io.BytesIO()
+            img.save(buf, "JPEG", quality=90)
+            buf.seek(0)
+            return Response(content=buf.read(), media_type="image/jpeg",
+                            headers={"Content-Disposition": f'inline; filename="{f.filename}.jpg"'})
+        except Exception as e:
+            logger.warning(f"HEIC 转换失败 {f.path}: {e}")
+            # fallback: 返回原始文件
     return FileResponse(str(path), media_type=media_type, filename=f.filename)

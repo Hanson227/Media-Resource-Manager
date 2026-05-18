@@ -426,6 +426,7 @@ class FolderTreeView(QTreeView):
     remove_root_requested = Signal(int)
     rename_requested = Signal(int)        # F2: 重命名单元
     copy_path_requested = Signal(str)     # Ctrl+C: 复制路径
+    heic_convert_requested = Signal(str)  # 目录下 HEIC 批量转 JPG (folder_path)
     file_selected_from_tree = Signal(int) # file_id — 树中单击文件时发射
 
     def __init__(self, model: FolderTreeModel, parent=None) -> None:
@@ -654,6 +655,7 @@ class FolderTreeView(QTreeView):
         menu.cover_requested.connect(self.cover_requested.emit)
         menu.clear_cover_requested.connect(self.clear_cover_requested.emit)
         menu.delete_requested.connect(self.delete_requested.emit)
+        menu.heic_convert_requested.connect(self.heic_convert_requested.emit)
         menu.remove_root_requested.connect(self.remove_root_requested.emit)
         menu.refresh_requested.connect(self.refresh_model)
         menu.exec(self.viewport().mapToGlobal(pos))

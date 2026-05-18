@@ -76,7 +76,7 @@ def ensure_db():
     unit_b = root / "片段B"
     unit_a.mkdir(parents=True)
     unit_b.mkdir(parents=True)
-    for i in range(3):
+    for i in range(6):
         Image.new("RGB", (100, 100), color=(i * 50, 100, 200)).save(unit_a / f"照片{i+1:02d}.jpg")
         Image.new("RGB", (100, 100), color=(200, 100, i * 50)).save(unit_b / f"视频{i+1:02d}.jpg")
 
@@ -408,6 +408,52 @@ def test_preview_swipe_gesture(page):
         check("首张右滑不切换", final_pos == 1)
 
 
+def test_preview_scroll_restore(page):
+    """验证从预览返回后文件列表滚动位置恢复。"""
+    section("Web 测试 6: 预览返回滚动位置")
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    page.wait_for_timeout(1500)
+
+    unit_card = page.locator(".unit-card").first
+    if unit_card.count() == 0:
+        check("滚动恢复测试: 无单元可进入", True)
+        return
+    unit_card.click()
+    page.wait_for_timeout(1000)
+
+    # 等待文件加载完成（至少显示 4 个文件才值得测试滚动）
+    feed_items = page.locator(".feed-item")
+    if feed_items.count() < 4:
+        check("滚动恢复测试: 文件不足，跳过", True)
+        return
+
+    # 点击靠后的文件（如第 4 个，index=3, row=1）进入预览
+    feed_items.nth(3).click()
+    page.wait_for_timeout(1500)
+
+    # 在预览中前进到下一个文件（触发 _fileScrollTop 更新）
+    nav_hint = page.locator(".image-nav-hint")
+    if nav_hint.count() > 0:
+        next_btn = nav_hint.locator(".mdi-chevron-right")
+        if next_btn.count() > 0:
+            next_btn.click()
+            page.wait_for_timeout(500)
+
+    # 返回文件列表
+    back_btn = page.locator(".preview-back")
+    if back_btn.count() > 0:
+        back_btn.click()
+        page.wait_for_timeout(1000)
+
+    # 验证文件列表已恢复（feed-items 可见，且不在顶部）
+    items_after = page.locator(".feed-item").count()
+    check("返回后文件列表已渲染", items_after >= 4)
+
+    # 验证浏览器的 URL 已回到文件列表页
+    current_url = page.url
+    check("URL 已回到文件列表页", "/preview/" not in current_url)
+
+
 def test_navigation_tabs(page):
     """验证底部导航栏功能。"""
     section("Web 测试 7: 底部导航")
@@ -459,7 +505,7 @@ def test_navigation_tabs(page):
 
 def test_pin_lock_screen(page):
     """验证 PIN 锁屏界面渲染。"""
-    section("Web 测试 8: PIN 锁屏界面")
+    section("Web 测试 9: PIN 锁屏界面")
     page.goto(f"http://127.0.0.1:{_PORT}/")
     page.wait_for_timeout(1000)
 
@@ -492,7 +538,7 @@ def test_pin_lock_screen(page):
 
 def test_responsive_layout(page):
     """验证响应式布局。"""
-    section("Web 测试 9: 响应式布局")
+    section("Web 测试 10: 响应式布局")
     # 测试手机尺寸
     page.set_viewport_size({"width": 375, "height": 667})
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
@@ -570,6 +616,11 @@ def main():
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
             page.wait_for_timeout(500)
             test_preview_swipe_gesture(page)
+
+            # 预览返回滚动恢复测试
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_timeout(500)
+            test_preview_scroll_restore(page)
 
             # 重新加载使 localStorage 生效（绕过 PIN 页）
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")

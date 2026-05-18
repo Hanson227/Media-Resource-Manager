@@ -129,6 +129,9 @@ class AppConfig:
     api_port: int = 19527
     """API 监听端口。"""
 
+    web_pin: str = ""
+    """Web 前端访问密码（空字符串表示不启用密码）。"""
+
     # ========== 预览 ==========
     preview_seek_percent: int = 5
     """预览对话框中左右方向键每次跳转的视频时长百分比。"""
@@ -219,6 +222,7 @@ class AppConfig:
             "api_port": self.api_port,
             "smb_share_name_prefix": self.smb_share_name_prefix,
             "preview_seek_percent": self.preview_seek_percent,
+            "web_pin": self.web_pin,
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
