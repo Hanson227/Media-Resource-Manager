@@ -374,6 +374,7 @@ class MainWindow(QMainWindow):
         self._tree_view.cover_requested.connect(self._on_set_cover)
         self._tree_view.clear_cover_requested.connect(self._on_clear_cover)
         self._tree_view.delete_requested.connect(self._on_delete_unit)
+        self._tree_view.heic_convert_requested.connect(self._on_unit_heic_convert)
         self._tree_view.remove_root_requested.connect(self._on_remove_root)
 
         # ---- F2 重命名 / Ctrl+C 复制路径 ----
@@ -1080,6 +1081,23 @@ class MainWindow(QMainWindow):
             self._on_reload_current_unit()
         else:
             self._on_refresh_all()
+
+    @Slot(str)
+    def _on_unit_heic_convert(self, folder_path: str) -> None:
+        """右键菜单触发：对指定目录下的 HEIC 文件批量转 JPG。"""
+        from app.core.heic_converter import is_heic_file
+        from pathlib import Path
+        sources = [f for f in Path(folder_path).rglob("*") if f.suffix.lower() in (".heic", ".heif") and is_heic_file(f)]
+        if not sources:
+            QMessageBox.information(self, "HEIC 转换", f"在「{Path(folder_path).name}」下未找到 HEIC 文件。")
+            return
+        from app.ui.dialogs.heic_convert import HeicConvertDialog
+        dlg = HeicConvertDialog(sources, self)
+        dlg.exec()
+        # 刷新树和当前单元
+        self._tree_view.refresh_model()
+        if self._current_unit_id is not None:
+            self._on_reload_current_unit()
 
     @Slot()
     def _on_manage_tags(self) -> None:

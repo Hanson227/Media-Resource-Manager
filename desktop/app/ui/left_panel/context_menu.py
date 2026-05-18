@@ -40,6 +40,7 @@ class FolderTreeContextMenu(QMenu):
     delete_requested = Signal(int)      # 删除资源单元 (unit_id)
     remove_root_requested = Signal(int)
     refresh_requested = Signal()
+    heic_convert_requested = Signal(str)  # 目录下 HEIC 文件批量转 JPG (folder_path)
 
     def __init__(self, parent, unit_ids: list[int], model,
                  root_id: int | None = None) -> None:
@@ -147,6 +148,16 @@ class FolderTreeContextMenu(QMenu):
             clear_cover_action.setToolTip("恢复为默认缩略图")
             clear_cover_action.triggered.connect(lambda *args, uid=unit_id: self.clear_cover_requested.emit(uid))
             self.addAction(clear_cover_action)
+
+        self.addSeparator()
+
+        # HEIC 转换
+        heic_action = QAction("HEIC 转 JPG...", self)
+        heic_action.setToolTip("将本文件夹下的所有 HEIC 文件批量转换为 JPG")
+        heic_action.triggered.connect(
+            lambda *args, p=node.path: self.heic_convert_requested.emit(p)
+        )
+        self.addAction(heic_action)
 
     def _build_root_menu(self) -> None:
         """根目录节点的右键菜单。"""

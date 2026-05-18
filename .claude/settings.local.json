@@ -14,7 +14,9 @@
       "Bash(findstr /V \"^$\")",
       "Bash(\"D:/anaconda/python.exe\" tests/test_web_playwright.py)",
       "Bash(echo \"EXIT: $?\")",
-      "Bash(D:/anaconda/Scripts/playwright.exe install *)"
+      "Bash(D:/anaconda/Scripts/playwright.exe install *)",
+      "Skill(superpowers:systematic-debugging)",
+      "Bash(PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py)"
     ]
   }
 }

@@ -69,6 +69,26 @@ def create_app(config: AppConfig) -> FastAPI:
         return {"status": "ok"}
 
     # ============================================================
+    # Web 访问认证
+    # ============================================================
+    @app.get("/api/auth/status")
+    async def auth_status(request: Request):
+        cfg = getattr(request.app.state, "config", None)
+        pin = cfg.web_pin if cfg else ""
+        return {"pin_required": bool(pin)}
+
+    @app.post("/api/auth/verify")
+    async def auth_verify(request: Request):
+        cfg = getattr(request.app.state, "config", None)
+        if not cfg or not cfg.web_pin:
+            return {"verified": True}
+        body = await request.json()
+        if body.get("pin", "") == cfg.web_pin:
+            return {"verified": True}
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=403, content={"verified": False, "error": "密码错误"})
+
+    # ============================================================
     # 静态文件（Web 前端 SPA）
     # ============================================================
     web_dir = Path(__file__).resolve().parent.parent.parent / "web"

@@ -224,12 +224,15 @@ const UnitsPage = {
     } finally {
       this.loading = false;
       this.$emit('loading', false);
-      this.$nextTick(() => {
+      // 双重 $nextTick 确保 DOM 布局完成后恢复滚动位置
+      this.$nextTick(() => this.$nextTick(() => {
         if (_unitsScrollTop > 0) {
           const main = document.querySelector('.app-main');
           if (main) main.scrollTop = _unitsScrollTop;
           _unitsScrollTop = 0;
         }
+      }));
+      this.$nextTick(() => {
         // 下拉刷新：监听滚动到顶部继续下拉
         let startY = 0;
         const main = document.querySelector('.app-main');
@@ -439,12 +442,15 @@ const UnitFilesPage = {
     } finally {
       this.loading = false;
       this.$emit('loading', false);
-      this.$nextTick(() => {
+      // 双重 $nextTick 确保 DOM 布局完成后恢复滚动位置
+      this.$nextTick(() => this.$nextTick(() => {
         if (_fileScrollTop > 0) {
           const main = document.querySelector('.app-main');
           if (main) main.scrollTop = _fileScrollTop;
           _fileScrollTop = 0;
         }
+      }));
+      this.$nextTick(() => {
         // 下拉刷新：监听滚动到顶部继续下拉
         let startY = 0;
         const main = document.querySelector('.app-main');
@@ -620,6 +626,8 @@ const PreviewPage = {
         this.onNavSwipeStart(e);
         return;
       }
+      // Reset nav state so playing video doesn't inherit stale flags
+      this.navSwiping = false;
       const t = e.changedTouches && e.changedTouches[0];
       if (!t) return;
       this.gestureStartX = t.clientX;
@@ -652,21 +660,28 @@ const PreviewPage = {
       clearTimeout(this.gestureTimer);
       this.gestureTimer = null;
       if (this.rewindTimer) { clearInterval(this.rewindTimer); this.rewindTimer = null; }
-      // Double-tap check: runs for taps (not swipes), before media-type dispatch
-      if (!this.gestureActive && !this.gestureSwiping) {
-        if (this.checkDoubleTap()) { this.gestureShowFeedback = false; this.gestureActive = false; return; }
-        // Single tap: controls toggle handled by timer callback, don't fall through to nav
-        this.gestureShowFeedback = false;
-        this.gestureActive = false;
-        this.gestureSwiping = false;
-        this.gestureSide = '';
-        this.gestureSeekLabel = '';
-        this.startHideTimer();
+      // Paused video: nav handlers are used (navSwiping), not gesture handlers
+      if (this.mediaType === 'video' && !this.playing) {
+        if (!this.navSwiping) {
+          // Tap (no swipe) on paused video
+          if (this.checkDoubleTap()) { this.gestureShowFeedback = false; this.gestureActive = false; return; }
+          this.gestureShowFeedback = false; this.gestureActive = false;
+          this.gestureSwiping = false; this.gestureSide = ''; this.gestureSeekLabel = '';
+          this.startHideTimer();
+          return;
+        }
+        // Swipe on paused video: navigate
+        this.onNavSwipeEnd(e);
+        this.gestureShowFeedback = false; this.gestureActive = false;
+        this.gestureSwiping = false; this.gestureSide = ''; this.gestureSeekLabel = '';
         return;
       }
-      // If video is not playing (and user swiped), delegate to navigation swipe
-      if (this.mediaType === 'video' && !this.playing) {
-        this.onNavSwipeEnd(e);
+      // Playing video: original gesture logic (gestureSwiping is used)
+      if (!this.gestureActive && !this.gestureSwiping) {
+        if (this.checkDoubleTap()) { this.gestureShowFeedback = false; this.gestureActive = false; return; }
+        this.gestureShowFeedback = false; this.gestureActive = false;
+        this.gestureSwiping = false; this.gestureSide = ''; this.gestureSeekLabel = '';
+        this.startHideTimer();
         return;
       }
       // Restore playback rate
@@ -817,6 +832,8 @@ const PreviewPage = {
       const file = this.fileList[newIndex];
       if (!file) { this._navigating = false; return; }
       this.fileIndex = newIndex;
+      // Update back-button scroll target (2-column grid, ~200px per item)
+      _fileScrollTop = Math.floor(newIndex / 2) * 200;
       this.filename = file.filename;
       this.mediaType = file.media_type || 'image';
       this.streamUrl = this.serverUrl + '/api/files/' + file.id + '/stream';
@@ -1086,21 +1103,9 @@ const SettingsPage = {
         <span class="label">断开连接</span>
         <span class="mdi mdi-logout" style="color:var(--red);font-size:20px"></span>
       </div>
-      <div class="setting-item" @click="showPinDialog = !showPinDialog">
-        <span class="label">{{ hasPin ? '修改密码' : '设置密码' }}</span>
-        <span class="mdi mdi-chevron-right"></span>
-      </div>
-      <div v-if="showPinDialog" style="padding:12px 16px;border-bottom:1px solid var(--border)">
-        <div style="display:flex;gap:8px;align-items:center">
-          <input v-model="newPin" type="password" maxlength="6" inputmode="numeric" pattern="[0-9]*"
-            placeholder="6 位数字" style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-primary);font-size:16px;outline:none">
-          <button class="btn btn-primary" style="width:auto;padding:10px 16px;flex-shrink:0" @click="savePin">保存</button>
-        </div>
-        <div v-if="pinMsg" style="margin-top:8px;font-size:13px;color:var(--green)">{{ pinMsg }}</div>
-      </div>
-      <div v-if="hasPin" class="setting-item" @click="removePin">
-        <span class="label" style="color:var(--red)">关闭密码</span>
-        <span class="mdi mdi-lock-open-variant-outline" style="color:var(--red);font-size:20px"></span>
+      <div class="setting-item" v-if="hasPin">
+        <span class="label"><span class="mdi mdi-lock-outline" style="font-size:16px;margin-right:6px"></span>访问密码已启用</span>
+        <span class="value">在桌面端设置中修改</span>
       </div>
       <div class="setting-item" @click="showAbout = !showAbout">
         <span class="label">关于</span>
@@ -1116,31 +1121,22 @@ const SettingsPage = {
   props: ['serverUrl'],
   emits: ['disconnected'],
   data() { return {
-    showAbout: false, showPinDialog: false,
-    newPin: '', pinMsg: '',
+    showAbout: false,
+    pinEnabled: false,
   };},
   computed: {
-    hasPin() { return !!localStorage.getItem('media_pin'); }
+    hasPin() { return this.pinEnabled; }
   },
   methods: {
     disconnect() {
       if (confirm('确定断开连接？')) this.$emit('disconnected');
     },
-    savePin() {
-      if (!/^\d{6}$/.test(this.newPin)) { this.pinMsg = '请输入 6 位数字'; return; }
-      localStorage.setItem('media_pin', btoa(this.newPin));
-      this.pinMsg = '密码已保存';
-      this.showPinDialog = false;
-      this.newPin = '';
-    },
-    removePin() {
-      if (confirm('确定关闭访问密码？')) {
-        localStorage.removeItem('media_pin');
-        this.pinMsg = '';
-        // Force re-render
-        this.$forceUpdate();
-      }
-    }
+  },
+  async mounted() {
+    try {
+      const auth = await api(this.serverUrl, '/api/auth/status');
+      this.pinEnabled = auth.pin_required || false;
+    } catch (e) { this.pinEnabled = false; }
   }
 };
 
@@ -1167,7 +1163,6 @@ let _unitsScrollTop = 0;
 const App = {
   data() {
     const saved = localStorage.getItem('media_server_url') || '';
-    const storedPin = localStorage.getItem('media_pin') || '';
     return {
       serverUrl: saved,
       loading: false,
@@ -1175,9 +1170,8 @@ const App = {
       // Offline detection
       offline: false,
       failCount: 0,
-      // PIN state
-      pinUnlocked: !storedPin,   // if no PIN set, skip lock
-      pinMode: storedPin ? 'enter' : 'set',
+      // Server-side PIN state
+      pinUnlocked: false,
       pinValue: '',
       pinError: '',
       pinVerifying: false,
@@ -1217,7 +1211,7 @@ const App = {
     }
   },
   methods: {
-    // ---- PIN ----
+    // ---- PIN (server-side verification) ----
     pinPress(d) {
       if (this.pinValue.length >= 6 || this.pinVerifying) return;
       this.pinError = '';
@@ -1229,28 +1223,38 @@ const App = {
       this.pinError = '';
       this.pinValue = this.pinValue.slice(0, -1);
     },
-    pinSubmit() {
+    async pinSubmit() {
       this.pinVerifying = true;
-      setTimeout(() => {
-        if (this.pinMode === 'set') {
-          // Save PIN (simple obfuscation)
-          localStorage.setItem('media_pin', btoa(this.pinValue));
+      try {
+        const data = await api(this.serverUrl, '/api/auth/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin: this.pinValue }),
+        });
+        if (data.verified) {
           this.pinUnlocked = true;
         } else {
-          const stored = localStorage.getItem('media_pin') || '';
-          if (btoa(this.pinValue) === stored) {
-            this.pinUnlocked = true;
-          } else {
-            this.pinError = '密码错误，请重试';
-            this.pinValue = '';
-            this.pinVerifying = false;
-          }
+          this.pinError = '密码错误，请重试';
+          this.pinValue = '';
         }
-      }, 300);
+      } catch (e) {
+        this.pinError = '验证失败：' + (e.message || '连接错误');
+        this.pinValue = '';
+      }
+      this.pinVerifying = false;
     },
     // ---- Navigation ----
-    onConnected(url) {
+    async onConnected(url) {
       this.serverUrl = url;
+      // 检查服务端是否启用了访问密码
+      try {
+        const auth = await api(url, '/api/auth/status');
+        if (auth.pin_required) {
+          this.pinUnlocked = false;  // 需要输入密码
+          return;  // 停留在连接页（会显示密码锁屏）
+        }
+      } catch (e) { /* 兼容旧版服务端无此端点 */ }
+      this.pinUnlocked = true;
       this.$router.push('/units');
     },
     onDisconnected() {
@@ -1284,10 +1288,17 @@ const App = {
       this.$router.push(path);
     }
   },
-  created() {
+  async created() {
     // Redirect to connect if no server configured
     if (!this.serverUrl && this.$route.path !== '/connect') {
       this.$router.replace('/connect');
+    }
+    // If server URL is known, check auth status on page load
+    if (this.serverUrl) {
+      try {
+        const auth = await api(this.serverUrl, '/api/auth/status');
+        if (!auth.pin_required) { this.pinUnlocked = true; }
+      } catch (e) { this.pinUnlocked = true; /* 旧版服务端 */ }
     }
   },
   mounted() {
