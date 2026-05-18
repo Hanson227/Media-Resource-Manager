@@ -586,6 +586,8 @@ class FolderTreeView(QTreeView):
         if field == self._model._sort_field:
             asc = not self._model._sort_asc
         self._model.set_sort(field, asc)
+        # reset 会折叠所有节点，排序后重新展开
+        self.expandAll()
 
     @Slot(QModelIndex)
     def _on_double_clicked(self, index: QModelIndex) -> None:
