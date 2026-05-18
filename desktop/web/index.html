@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<meta name="theme-color" content="#0f0f0f">
+<meta name="theme-color" content="#0e0e12">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>影视资源管理器</title>
@@ -34,33 +34,55 @@
   </div>
 
   <template v-if="pinUnlocked">
-    <!-- Loading indicator -->
-    <div v-if="loading" class="loading-bar"></div>
+    <div class="layout-wrap">
+      <!-- Loading indicator -->
+      <div v-if="loading" class="loading-bar"></div>
 
-    <!-- Offline Banner -->
-    <div v-if="offline" class="offline-banner">
-      <span class="mdi mdi-wifi-off"></span> 网络连接已断开，正在重连...
-    </div>
+      <!-- Offline Banner -->
+      <div v-if="offline" class="offline-banner">
+        <span class="mdi mdi-wifi-off"></span> 网络连接已断开，正在重连...
+      </div>
 
-    <!-- Top Bar -->
-    <template v-if="!isConnectPage && !isPreviewPage && serverUrl">
-      <div class="top-bar">
-        <h1>{{ pageTitle }}</h1>
-        <div class="top-actions">
-          <button v-if="showRefresh" class="top-btn" @click="refresh" :title="'刷新'">
-            <span class="mdi mdi-refresh"></span>
+      <!-- Top Bar -->
+      <template v-if="!isConnectPage && !isPreviewPage && serverUrl">
+        <div class="top-bar">
+          <h1>{{ pageTitle }}</h1>
+          <div class="top-actions">
+            <button v-if="showRefresh" class="top-btn" @click="refresh" :title="'刷新'">
+              <span class="mdi mdi-refresh"></span>
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- Sidebar (tablet+, conditional) -->
+      <nav class="sidebar" v-if="serverUrl && !isPreviewPage && !isConnectPage">
+        <div class="sidebar-header">影视资源管理器</div>
+        <div class="sidebar-nav">
+          <button class="sidebar-item" :class="{ active: currentTab === 'units' }" @click="goTab('/units')">
+            <span class="mdi mdi-folder-multiple-image"></span><span>单元</span>
+          </button>
+          <button class="sidebar-item" :class="{ active: currentTab === 'dedup' }" @click="goTab('/dedup')">
+            <span class="mdi mdi-compare"></span><span>查重</span>
+          </button>
+          <button class="sidebar-item" :class="{ active: currentTab === 'messages' }" @click="goTab('/messages')">
+            <span class="mdi mdi-message-badge-outline"></span><span>消息</span>
+            <span v-if="unreadCount > 0" class="badge-num">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
+          </button>
+          <button class="sidebar-item" :class="{ active: currentTab === 'settings' }" @click="goTab('/settings')">
+            <span class="mdi mdi-cog-outline"></span><span>设置</span>
           </button>
         </div>
+      </nav>
+
+      <!-- Main Content (always present) -->
+      <div class="app-main">
+        <router-view :server-url="serverUrl" @connected="onConnected" @disconnected="onDisconnected"
+          @loading="onLoading" @error="onError" @unread="onUnread"></router-view>
       </div>
-    </template>
+    </div>  <!-- /layout-wrap -->
 
-    <!-- Main Content -->
-    <div class="app-main">
-      <router-view :server-url="serverUrl" @connected="onConnected" @disconnected="onDisconnected"
-        @loading="onLoading" @error="onError" @unread="onUnread"></router-view>
-    </div>
-
-    <!-- Bottom Tab Bar -->
+    <!-- Bottom Tab Bar (mobile only, outside layout-wrap) -->
     <template v-if="serverUrl && !isPreviewPage && !isConnectPage">
       <nav class="bottom-tabs">
         <button class="tab-item" :class="{ active: currentTab === 'units' }" @click="goTab('/units')">

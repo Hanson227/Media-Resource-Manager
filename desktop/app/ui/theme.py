@@ -1,41 +1,40 @@
 # -*- coding: utf-8 -*-
 """
-Catppuccin Mocha 主题色板 —— 集中管理所有颜色常量。
-
+Slate-Indigo 主题色板 —— 与 Web 端设计系统统一。
 QSS 样式表位于 style.qss，Python 层颜色用于动态/程序化设置。
 """
 
 # ---- 底色 ----
-BASE = "#1e1e2e"
-MANTLE = "#181825"
-CRUST = "#11111b"
+BASE = "#0e0e12"
+MANTLE = "#16161d"
+CRUST = "#0a0a0e"
 
 # ---- 表面 ----
-SURFACE_0 = "#313244"
-SURFACE_1 = "#3b3b4e"
-SURFACE_2 = "#52546a"
+SURFACE_0 = "#1c1c26"
+SURFACE_1 = "#252530"
+SURFACE_2 = "#363648"
 
 # ---- 覆盖 ----
-OVERLAY_0 = "#6c7086"
-OVERLAY_1 = "#7f849c"
-SUBTEXT_0 = "#a6adc8"
-SUBTEXT_1 = "#bac2de"
+OVERLAY_0 = "#5e5e72"
+OVERLAY_1 = "#7c7c8a"
+SUBTEXT_0 = "#a0a0b0"
+SUBTEXT_1 = "#c0c0cc"
 
 # ---- 文字 ----
-TEXT = "#cdd6f4"
+TEXT = "#f0f0f4"
 
 # ---- 强调色 ----
-INDIGO = "#818cf8"
-BLUE = "#89b4fa"
-GREEN = "#a6e3a1"
-PEACH = "#fab387"
-RED = "#f38ba8"
+INDIGO = "#6366f1"
+BLUE = "#60a5fa"
+GREEN = "#22c55e"
+PEACH = "#f59e0b"
+RED = "#ef4444"
 
 
 def apply_theme(app) -> None:
     """对 QApplication 应用全局主题。
 
-    设置深色调色板，适用于 Catppuccin Mocha + style.qss。
+    设置深色调色板，适用于 Slate-Indigo + style.qss。
     """
     from PySide6.QtGui import QPalette, QColor
 
