@@ -444,7 +444,7 @@ class FolderTreeView(QTreeView):
         header.resizeSection(model.COL_NAME, 200)
         header.resizeSection(model.COL_SIZE, 90)
         header.resizeSection(model.COL_DATE, 100)
-        header.resizeSection(model.COL_TAGS, 120)
+        header.resizeSection(model.COL_TAGS, 80)
         header.setSectionsMovable(True)
         self.setAnimated(True)
         self.setExpandsOnDoubleClick(True)
