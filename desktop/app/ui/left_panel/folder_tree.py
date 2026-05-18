@@ -359,9 +359,6 @@ class FolderTreeModel(QAbstractItemModel):
             labels = {self.COL_NAME: "名称", self.COL_SIZE: "大小",
                       self.COL_DATE: "日期", self.COL_TAGS: "标签"}
             label = labels.get(section, "")
-            col_map = {self.COL_NAME: "name", self.COL_SIZE: "size", self.COL_DATE: "date"}
-            if section in col_map and col_map[section] == self._sort_field:
-                label += " ↑" if self._sort_asc else " ↓"
             return label
         return None
 
@@ -486,6 +483,8 @@ class FolderTreeView(QTreeView):
         header.resizeSection(model.COL_DATE, 100)
         header.resizeSection(model.COL_TAGS, 80)
         header.setSectionsMovable(True)
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
         self.setAnimated(True)
         self.setExpandsOnDoubleClick(True)
         self.setIndentation(20)
@@ -586,6 +585,8 @@ class FolderTreeView(QTreeView):
         if field == self._model._sort_field:
             asc = not self._model._sort_asc
         self._model.set_sort(field, asc)
+        order = Qt.SortOrder.AscendingOrder if asc else Qt.SortOrder.DescendingOrder
+        self.header().setSortIndicator(col, order)
         # reset 会折叠所有节点，排序后重新展开
         self.expandAll()
 
