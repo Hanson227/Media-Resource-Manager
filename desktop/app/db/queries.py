@@ -243,7 +243,16 @@ def get_files_without_hash(session: Session, hash_type: str = "md5",
         hash_type: 'md5'/'phash'/'dhash'。
         limit: 最大返回数量。
     """
-    column = getattr(MediaFile, f"{hash_type}_hash", None)
+    # 数据库列名与 hash_type 参数名不一致：
+    # MediaFile.md5_hash 对应 hash_type="md5"
+    # MediaFile.phash   对应 hash_type="phash"
+    # MediaFile.dhash   对应 hash_type="dhash"
+    column_map = {
+        "md5": MediaFile.md5_hash,
+        "phash": MediaFile.phash,
+        "dhash": MediaFile.dhash,
+    }
+    column = column_map.get(hash_type)
     if column is None:
         return []
     return session.query(MediaFile).filter(column == None).limit(limit).all()

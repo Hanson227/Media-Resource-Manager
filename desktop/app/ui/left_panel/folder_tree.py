@@ -259,8 +259,6 @@ class FolderTreeModel(QAbstractItemModel):
             return len(node.children)
         if node and node.node_type == "unit" and node.children:
             return len(node.children)
-        if node and node.node_type == "unit" and node.children:
-            return len(node.children)
         return 0
 
     def columnCount(self, parent=QModelIndex()) -> int:
@@ -537,20 +535,16 @@ class FolderTreeView(QTreeView):
 
     @Slot(QModelIndex)
     def _on_double_clicked(self, index: QModelIndex) -> None:
-        """双击单元节点 → 直接加载该单元的文件列表。"""
-        if not index.isValid():
-            return
-        node = index.internalPointer()
-        if node is None or node.node_type != "unit":
-            return
-        self.unit_double_clicked.emit(node.node_id)
+        """双击单元节点 → Qt 默认处理展开/折叠，不重复发射 unit_double_clicked。
+        _on_selection_changed 已经在单击时处理过进入文件夹的逻辑。"""
+        pass
 
     @Slot()
     def _on_selection_changed(self) -> None:
         """树选择变化：按节点类型分发不同信号。
 
         - 文件节点 → file_selected_from_tree(file_id)
-        - 文件夹节点 → folder_single_clicked(unit_id)
+        - 文件夹节点 → unit_double_clicked（单击进入文件夹加载文件列表）
         - 根/收藏节点 → unit_selected(list[unit_ids])
         """
         if self._syncing_file:
@@ -581,19 +575,6 @@ class FolderTreeView(QTreeView):
             self.unit_double_clicked.emit(unit_ids[0])
         elif node.node_type == "root":            # 根节点 → 发射 unit_selected（显示文件夹卡片）
             self.unit_selected.emit(list(unit_ids))
-
-    @Slot()
-    def _on_tree_file_selected(self, selected, deselected) -> None:
-        """检测文件节点选中并发射 file_selected_from_tree 信号。"""
-        indexes = selected.indexes()
-        if not indexes:
-            return
-        idx = indexes[0]
-        if idx.column() != 0:
-            return
-        node = idx.internalPointer()
-        if node and node.node_subtype == "file":
-            self.file_selected_from_tree.emit(node.node_id)
 
     def select_tree_node_by_file_id(self, file_id: int) -> bool:
         """选中指定文件 ID 对应的树节点。只展开目标路径，不 expandAll。

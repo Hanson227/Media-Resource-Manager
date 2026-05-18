@@ -62,7 +62,8 @@ class MediaFileEventHandler(FileSystemEventHandler):
         self._extensions = extensions
         self._on_change = on_change
         self._debounce_ms = debounce_ms / 1000.0
-        self._pending_events: dict[str, threading.Timer] = {}
+        self._pending_events: dict[str, tuple[threading.Timer, int]] = {}
+        self._timer_counter = 0
         self._lock = threading.Lock()
 
     def on_created(self, event: FileSystemEvent) -> None:
@@ -79,11 +80,18 @@ class MediaFileEventHandler(FileSystemEventHandler):
         self._handle_event(event, "deleted")
 
     def on_moved(self, event: FileSystemEvent) -> None:
-        """文件移动/重命名事件。"""
+        """文件移动/重命名事件。
+
+        如果目标在监控范围内且是媒体文件，视为移动/创建；
+        如果源文件是媒体文件但目标不在监控范围内，视为删除。
+        """
         src = Path(event.src_path)
         dest = Path(event.dest_path)
-        # 如果移出监控范围，视为删除；移入视为创建
-        if is_media_file(dest, self._extensions):
+        src_is_media = is_media_file(src, self._extensions) if not event.is_directory else False
+        dest_is_media = is_media_file(dest, self._extensions) if not event.is_directory else False
+
+        if dest_is_media:
+            # 移入或重命名为媒体文件
             change_event = FileChangeEvent(
                 path=dest,
                 change_type="moved",
@@ -91,6 +99,14 @@ class MediaFileEventHandler(FileSystemEventHandler):
                 is_directory=event.is_directory,
             )
             self._debounce_and_emit(str(dest), change_event)
+        elif src_is_media and not dest_is_media:
+            # 移出监控范围或重命名为非媒体文件 → 视为删除
+            change_event = FileChangeEvent(
+                path=src,
+                change_type="deleted",
+                is_directory=event.is_directory,
+            )
+            self._debounce_and_emit(str(src), change_event)
 
     def _handle_event(self, event: FileSystemEvent, change_type: str) -> None:
         """处理文件系统事件。"""
@@ -106,25 +122,34 @@ class MediaFileEventHandler(FileSystemEventHandler):
         self._debounce_and_emit(str(path), change_event)
 
     def _debounce_and_emit(self, key: str, event: FileChangeEvent) -> None:
-        """对同一文件的连续事件进行去抖动处理。"""
+        """对同一文件的连续事件进行去抖动处理。
+
+        使用自增 token 避免多线程竞态：当旧 timer 在新 timer 创建后
+        才触发回调时，旧 timer 的 token 已过时，不会误删新 timer。
+        """
         with self._lock:
             # 取消之前的定时器
             if key in self._pending_events:
-                self._pending_events[key].cancel()
+                old_timer, _ = self._pending_events[key]
+                old_timer.cancel()
 
-            # 创建新的定时器
+            # 创建新的定时器，带唯一 token
+            self._timer_counter += 1
+            token = self._timer_counter
             timer = threading.Timer(
                 self._debounce_ms,
-                lambda: self._emit(key, event),
+                lambda k=key, ev=event, t=token: self._emit(k, ev, t),
             )
-            self._pending_events[key] = timer
+            self._pending_events[key] = (timer, token)
             timer.start()
 
-    def _emit(self, key: str, event: FileChangeEvent) -> None:
-        """触发回调并从待处理列表中移除。"""
+    def _emit(self, key: str, event: FileChangeEvent, token: int) -> None:
+        """触发回调并从待处理列表中移除（仅当 token 匹配时）。"""
         with self._lock:
-            if key in self._pending_events:
-                del self._pending_events[key]
+            stored = self._pending_events.get(key)
+            if stored is None or stored[1] != token:
+                return  # 此 timer 已被更新的 timer 替代
+            del self._pending_events[key]
         try:
             self._on_change(event)
         except Exception as e:
@@ -149,7 +174,8 @@ class FileWatcher:
         """
         self._observer = Observer()
         self._event_handler = event_handler
-        self._watched_paths: set[str] = set()
+        self._watched_paths: dict[str, object] = {}
+        """{path_str: watch_handle} 映射，用于后续取消监控。"""
         self._running = False
 
     def start(self) -> None:
@@ -182,8 +208,10 @@ class FileWatcher:
             logger.warning(f"监控目录不存在: {root}")
             return
 
-        self._observer.schedule(self._event_handler, root_str, recursive=True)
-        self._watched_paths.add(root_str)
+        watch_handle = self._observer.schedule(
+            self._event_handler, root_str, recursive=True,
+        )
+        self._watched_paths[root_str] = watch_handle
         logger.info(f"已添加监控: {root}")
 
     def remove_root(self, root: Path) -> None:
@@ -192,13 +220,11 @@ class FileWatcher:
         参数:
             root: 要移除的根目录路径。
         """
-        # watchdog 不直接支持移除单个 watch，
-        # 需要重建 observer 或使用 unschedule
         root_str = str(root)
         if root_str in self._watched_paths:
-            self._watched_paths.discard(root_str)
+            watch_handle = self._watched_paths.pop(root_str)
+            self._observer.unschedule(watch_handle)
             logger.info(f"已移除监控: {root}")
-            # 注意：简化实现，实际上需要调用 observer.unschedule()
 
     @property
     def is_running(self) -> bool:

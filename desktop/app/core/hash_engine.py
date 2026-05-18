@@ -445,6 +445,10 @@ class HashEngine:
                 if face_roi.size == 0:
                     continue
 
+                if self._face_recognizer is None:
+                    logger.debug("人脸特征模型未加载，跳过特征提取")
+                    continue
+
                 # OpenFace 需要 96x96 输入
                 face_blob = cv2.dnn.blobFromImage(
                     face_roi, 1.0 / 255.0, (96, 96),

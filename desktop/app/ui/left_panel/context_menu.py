@@ -171,4 +171,5 @@ class FolderTreeContextMenu(QMenu):
     def _build_multi_menu(self) -> None:
         merge_action = QAction(f"合并 {len(self._unit_ids)} 个资源单元", self)
         merge_action.setToolTip("将选中的资源单元合并到它们的公共父文件夹")
+        # TODO: 多选合并需要确定父单元，当前仅为界面占位
         self.addAction(merge_action)
