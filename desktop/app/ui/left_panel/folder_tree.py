@@ -85,6 +85,8 @@ class FolderTreeModel(QAbstractItemModel):
         super().__init__(parent)
         self._config = config
         self._roots: list[TreeNode] = []
+        self._sort_field = "name"
+        self._sort_asc = True
 
     def refresh(self) -> None:
         """从数据库重新加载所有数据，转为 TreeNode 纯数据。"""
@@ -127,6 +129,7 @@ class FolderTreeModel(QAbstractItemModel):
             logger.error(f"刷新文件夹树失败: {e}")
             self._roots = []
         self.endResetModel()
+        self._re_sort()
 
     def get_selected_units(self, index: QModelIndex) -> list[int]:
         """获取指定索引对应的资源单元 ID 列表。"""
@@ -169,6 +172,37 @@ class FolderTreeModel(QAbstractItemModel):
                 if child.node_id == unit_node.node_id:
                     return self.createIndex(c_idx, 0, child)
         return QModelIndex()
+
+    def _sort_key(self, node: TreeNode):
+        """返回排序用的比较键。"""
+        if self._sort_field == "name":
+            return (node.name or "").lower()
+        elif self._sort_field == "size":
+            return node.total_size if node.node_type == "unit" else 0
+        elif self._sort_field == "date":
+            return node.created_at or ""
+        return ""
+
+    def _re_sort(self) -> None:
+        """内部重排（不触发 reset，由调用方保证在 reset 之外执行）。"""
+        for root in self._roots:
+            root.children.sort(key=lambda u: (
+                0 if u.is_starred else 1,
+                self._sort_key(u),
+            ), reverse=not self._sort_asc)
+
+    def set_sort(self, field: str, asc: bool = True) -> None:
+        """设置排序字段和方向并重排（触发 reset）。"""
+        if field not in ("name", "size", "date"):
+            return
+        self._sort_field = field
+        self._sort_asc = asc
+        self.beginResetModel()
+        try:
+            self._re_sort()
+        except Exception as e:
+            logger.error(f"树排序失败: {e}")
+        self.endResetModel()
 
     def expand_unit(self, unit_id: int, files: list) -> None:
         """加载单元下的文件作为树节点子项（使用 beginInsertRows）。"""
@@ -322,7 +356,11 @@ class FolderTreeModel(QAbstractItemModel):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             labels = {self.COL_NAME: "名称", self.COL_SIZE: "大小",
                       self.COL_DATE: "日期", self.COL_TAGS: "标签"}
-            return labels.get(section, "")
+            label = labels.get(section, "")
+            col_map = {self.COL_NAME: "name", self.COL_SIZE: "size", self.COL_DATE: "date"}
+            if section in col_map and col_map[section] == self._sort_field:
+                label += " ↑" if self._sort_asc else " ↓"
+            return label
         return None
 
     # ============================================================
@@ -458,6 +496,7 @@ class FolderTreeView(QTreeView):
         self.selectionModel().selectionChanged.connect(self._on_selection_changed)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self.doubleClicked.connect(self._on_double_clicked)
+        self.header().sectionClicked.connect(self._on_header_sort)
         logger.info("文件夹树视图初始化完成")
 
     def refresh_model(self) -> None:
@@ -533,6 +572,18 @@ class FolderTreeView(QTreeView):
             ids = self._model.get_selected_units(idx)
             unit_ids.update(ids)
         return list(unit_ids)
+
+    @Slot(int)
+    def _on_header_sort(self, col: int) -> None:
+        """点击列标题切换排序。"""
+        col_map = {self._model.COL_NAME: "name", self._model.COL_SIZE: "size", self._model.COL_DATE: "date"}
+        field = col_map.get(col)
+        if field is None:
+            return  # 标签列不可排序
+        asc = True
+        if field == self._model._sort_field:
+            asc = not self._model._sort_asc
+        self._model.set_sort(field, asc)
 
     @Slot(QModelIndex)
     def _on_double_clicked(self, index: QModelIndex) -> None:
