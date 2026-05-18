@@ -471,7 +471,8 @@ def test_navigation_tabs(page):
     tabs_count = tabs.count()
     check("底部导航栏存在", tabs_count > 0)
 
-    if tabs_count == 0:
+    if tabs_count == 0 or not tabs.first.is_visible():
+        check("底部导航不可见（平板布局使用侧边栏）", True)
         return
 
     tab_items = page.locator(".tab-item")
@@ -505,6 +506,23 @@ def test_navigation_tabs(page):
             tab_items.nth(i).click()
             check("切换到消息页面", True)
             break
+
+
+def test_navigation_sidebar(page):
+    """验证侧边栏导航功能（1280px 布局）。"""
+    section("Web 测试 7b: 侧边栏导航")
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    sidebar = page.locator(".sidebar")
+    if sidebar.count() == 0 or not sidebar.is_visible():
+        check("侧边栏不可见（移动端布局）", True)
+        return
+    sidebar_items = page.locator(".sidebar-item")
+    count = sidebar_items.count()
+    check(f"侧边栏导航项 ({count})", count >= 3)
+    if count >= 3 and "查重" in (sidebar_items.nth(1).text_content() or ""):
+        sidebar_items.nth(1).click()
+        page.wait_for_timeout(300)
+        check("侧边栏切换到查重", True)
 
 
 def test_pin_lock_screen(page):
@@ -635,6 +653,11 @@ def main():
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
             page.wait_for_load_state("networkidle")
             test_responsive_layout(page)
+
+            # 侧边栏导航测试（1280px 视口下）
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_load_state("networkidle")
+            test_navigation_sidebar(page)
 
             browser.close()
 
