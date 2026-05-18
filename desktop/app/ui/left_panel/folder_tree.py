@@ -274,13 +274,14 @@ class FolderTreeModel(QAbstractItemModel):
         col = index.column()
         if role == Qt.ItemDataRole.DisplayRole:
             if col == self.COL_NAME:
+                prefix = ""
                 suffix = ""
                 if node.node_type == "unit" and node.node_subtype != "file":
                     if node.is_starred:
-                        suffix = " ⭐"
-                    elif node.status == "merged":
-                        suffix = " ▷"
-                return f"{node.name}{suffix}"
+                        prefix = "⭐ "  # 星标作为前缀
+                    if node.status == "merged":
+                        suffix = " ▷"  # merged 标记保持后缀
+                return f"{prefix}{node.name}{suffix}"
             elif col == self.COL_SIZE:
                 from app.utils.file_helpers import format_size
                 if node.node_subtype == "file":
