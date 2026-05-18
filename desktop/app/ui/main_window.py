@@ -215,6 +215,13 @@ class MainWindow(QMainWindow):
         self._filter_combo.setMaximumWidth(80)
         toolbar.addWidget(self._filter_combo)
 
+        toolbar.addSeparator()
+
+        self._msg_btn = QPushButton("消息")
+        self._msg_btn.setToolTip("打开消息中心 (Ctrl+M)")
+        self._msg_btn.clicked.connect(self._on_open_messages)
+        toolbar.addWidget(self._msg_btn)
+
         # 排序按钮
         self._sort_name_btn = QPushButton("名称↑")
         self._sort_name_btn.setCheckable(True)
@@ -227,19 +234,6 @@ class MainWindow(QMainWindow):
         self._sort_size_btn.setToolTip("按文件大小排序")
         self._sort_size_btn.clicked.connect(lambda: self._on_sort("size"))
         toolbar.addWidget(self._sort_size_btn)
-
-        self._sort_date_btn = QPushButton("时间↑")
-        self._sort_date_btn.setCheckable(True)
-        self._sort_date_btn.setToolTip("按创建时间排序")
-        self._sort_date_btn.clicked.connect(lambda: self._on_sort("date"))
-        toolbar.addWidget(self._sort_date_btn)
-
-        toolbar.addSeparator()
-
-        self._msg_btn = QPushButton("消息")
-        self._msg_btn.setToolTip("打开消息中心 (Ctrl+M)")
-        self._msg_btn.clicked.connect(self._on_open_messages)
-        toolbar.addWidget(self._msg_btn)
 
     # ============================================================
     # 中央区域：左树 + 右网格
@@ -1334,17 +1328,13 @@ class MainWindow(QMainWindow):
             asc = self._grid_model._sort_asc
         self._sort_name_btn.blockSignals(True)
         self._sort_size_btn.blockSignals(True)
-        self._sort_date_btn.blockSignals(True)
         self._sort_name_btn.setChecked(field == "name")
         self._sort_size_btn.setChecked(field == "size")
-        self._sort_date_btn.setChecked(field == "date")
         self._sort_name_btn.blockSignals(False)
         self._sort_size_btn.blockSignals(False)
-        self._sort_date_btn.blockSignals(False)
         arrow = "↑" if asc else "↓"
         self._sort_name_btn.setText(f"名称{arrow if field == 'name' else '↑'}")
         self._sort_size_btn.setText(f"大小{arrow if field == 'size' else '↑'}")
-        self._sort_date_btn.setText(f"时间{arrow if field == 'date' else '↑'}")
 
     def _apply_current_filter(self) -> None:
         """读取搜索框和筛选下拉的当前值，应用到网格+文件夹树。"""
