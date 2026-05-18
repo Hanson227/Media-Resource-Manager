@@ -98,8 +98,6 @@ class FolderTreeModel(QAbstractItemModel):
 
                 for root in roots:
                     units = q.get_units_by_root(session, root.id)
-                    # 收藏的单元排在顶部
-                    units.sort(key=lambda u: (0 if u.is_starred else 1, u.name or ""))
                     root_name = Path(root.path).name or root.path
                     star_count = sum(1 for u in units if u.is_starred)
                     star_suffix = f" ⭐{star_count}" if star_count else ""
@@ -128,8 +126,9 @@ class FolderTreeModel(QAbstractItemModel):
         except Exception as e:
             logger.error(f"刷新文件夹树失败: {e}")
             self._roots = []
-        self.endResetModel()
+        # 在 reset 块内排序，避免视图渲染后数据突变
         self._re_sort()
+        self.endResetModel()
 
     def get_selected_units(self, index: QModelIndex) -> list[int]:
         """获取指定索引对应的资源单元 ID 列表。"""
@@ -184,12 +183,15 @@ class FolderTreeModel(QAbstractItemModel):
         return ""
 
     def _re_sort(self) -> None:
-        """内部重排（不触发 reset，由调用方保证在 reset 之外执行）。"""
+        """内部重排（不触发 reset，由调用方保证在 reset 之外执行）。
+
+        使用稳定排序（stable sort）保证：
+        1. 收藏的单元永远排在顶部
+        2. 同一收藏组内按 _sort_field 排序
+        """
         for root in self._roots:
-            root.children.sort(key=lambda u: (
-                0 if u.is_starred else 1,
-                self._sort_key(u),
-            ), reverse=not self._sort_asc)
+            root.children.sort(key=self._sort_key, reverse=not self._sort_asc)
+            root.children.sort(key=lambda u: 0 if u.is_starred else 1)
 
     def set_sort(self, field: str, asc: bool = True) -> None:
         """设置排序字段和方向并重排（触发 reset）。"""
