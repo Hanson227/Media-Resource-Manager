@@ -1075,7 +1075,7 @@ def test_web_static_files():
     app = create_app(config)
     client = TestClient(app)
 
-    web_dir = Path(__file__).parent.parent / "web"
+    web_dir = Path(__file__).resolve().parent.parent.parent / "web"
     check("web 目录存在", web_dir.is_dir())
     check("index.html 存在", (web_dir / "index.html").is_file())
     check("manifest.json 存在", (web_dir / "manifest.json").is_file())

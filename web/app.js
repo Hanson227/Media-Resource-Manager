@@ -510,7 +510,7 @@ const PreviewPage = {
           <div class="gesture-zone" @touchstart.prevent="onNavSwipeStart($event)" @touchend="onNavSwipeEnd" @touchmove.prevent="onNavSwipeMove($event)" @touchcancel="onNavSwipeEnd"></div>
         </template>
         <template v-else-if="mediaType === 'video'">
-          <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop :src="streamUrl"
+          <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop :src="streamUrl" :poster="posterUrl"
   class="gesture-follow" :class="{ dragging: navSwiping }"
   :style="{ transform: 'translateX(' + gestureOffsetX + 'px)' }"></video>
 
@@ -588,6 +588,7 @@ const PreviewPage = {
       // Navigation swipe state
       navigateFeedback: '',
       navigateFeedbackTimer: null,
+      posterUrl: '',
       gestureOffsetX: 0,
       _navigating: false,
       navSwiping: false,
@@ -864,6 +865,7 @@ const PreviewPage = {
       this.filename = file.filename;
       this.mediaType = file.media_type || 'image';
       this.streamUrl = this.serverUrl + '/api/files/' + file.id + '/stream';
+      this.posterUrl = this.serverUrl + '/api/files/' + file.id + '/thumbnail';
       // Reset zoom and video state when switching
       this.zoomed = false;
       this.playing = false;
