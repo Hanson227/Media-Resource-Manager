@@ -402,11 +402,14 @@ class ThumbnailGridView(QListView):
         self.setWrapping(True)
         self.setFlow(QListView.Flow.LeftToRight)
         self.setItemDelegate(ThumbnailDelegate(config))
+        # ScrollPerPixel：连续平滑滚动；singleStep 设小让每齿移动更细腻
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.verticalScrollBar().setSingleStep(20)
 
         ts = config.thumbnail_max_size
         spacing = config.grid_spacing
         self.setIconSize(QSize(ts, ts))
-        self.setGridSize(QSize(ts + spacing * 2 + 8, ts + 56 + spacing))
+        self.setGridSize(QSize(ts + spacing * 2 + 8, ts + 48 + spacing))
         self.setSpacing(spacing)
 
         self.doubleClicked.connect(self._on_double_clicked)
@@ -462,7 +465,7 @@ class ThumbnailGridView(QListView):
 
         ts = config.thumbnail_max_size
         self.setIconSize(QSize(ts, ts))
-        self.setGridSize(QSize(ts + 24, ts + 60))
+        self.setGridSize(QSize(ts + 24, ts + 52))
 
         cache_dir = config.thumbnail_cache_dir
         self._folder_worker = FolderPreviewWorker(unit_data, cache_dir, config)
