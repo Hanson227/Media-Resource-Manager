@@ -88,6 +88,7 @@ class UnitItem(BaseModel):
     library_root_id: Optional[int] = None
     library_root_name: Optional[str] = None
     cover_file_id: Optional[int] = None
+    created_at: Optional[str] = None
 
 
 class UnitListResponse(BaseModel):
