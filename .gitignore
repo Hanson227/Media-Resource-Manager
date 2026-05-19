@@ -1,5 +1,8 @@
 # ============ Python (desktop) ============
 
+# ai
+.superpower/
+
 # Bytecode
 __pycache__/
 *.py[cod]
@@ -30,6 +33,7 @@ build/
 
 # Runtime data
 desktop/data/
+data/
 
 # Logs
 *.log
@@ -47,40 +51,4 @@ Thumbs.db
 .DS_Store
 $RECYCLE.BIN/
 
-# ============ Android (android/) ============
-
-# Built application files
-*.apk
-*.ap_
-*.aab
-
-# Files for the ART/Dalvik VM
-*.dex
-
-# Java class files
-*.class
-
-# Generated files
-bin/
-gen/
-out/
-build/
-.navigation/
-*.log
-
-# Gradle files
-.gradle/
-local.properties
-*.iml
-
-# Android Studio
-*.apk
-*.aab
-output.json
-
-# Keystore
-*.jks
-*.keystore
-
-# Google Services
-google-services.json
+.scripts/

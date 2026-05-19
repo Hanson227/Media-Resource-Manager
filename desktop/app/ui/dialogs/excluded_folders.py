@@ -4,6 +4,7 @@
 """
 
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
@@ -89,6 +90,29 @@ class ExcludedFoldersDialog(QDialog):
         name = selected.text().split("\n")[0]
         try:
             with DatabaseManager.session() as session:
+                unit = q.get_unit_by_id(session, unit_id)
+                if unit is None:
+                    QMessageBox.warning(self, "恢复失败", "资源单元不存在")
+                    return
+                path_exists = Path(unit.path).is_dir()
+                if not path_exists:
+                    reply = QMessageBox.question(
+                        self, "路径不存在",
+                        f"文件夹路径已不存在:\n{unit.path}\n\n"
+                        f"取消排除后该记录会保留，但下次刷新时会因路径不存在而被重新排除。\n\n"
+                        f"是否改为直接删除该记录？",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                        QMessageBox.StandardButton.Yes,
+                    )
+                    if reply == QMessageBox.StandardButton.Cancel:
+                        return
+                    if reply == QMessageBox.StandardButton.Yes:
+                        q.delete_resource_unit(session, unit_id)
+                        logger.info(f"已删除路径不存在的单元记录: {name} (id={unit_id})")
+                        self.excluded_changed.emit()
+                        self._load_excluded()
+                        return
+                # reply == No → 强制恢复（即使路径不存在）
                 q.unexclude_unit(session, unit_id)
             self.excluded_changed.emit()
             self._load_excluded()
