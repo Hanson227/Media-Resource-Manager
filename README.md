@@ -1,6 +1,6 @@
 # 影视资源管理器 (Media Resource Manager)
 
-> 纯本地运行的 Windows 桌面应用 + Android 手机客户端，用于管理电脑上的本地影视/图片资源文件夹。
+> 纯本地运行的 Windows 桌面应用 + Web 前端，用于管理电脑上的本地影视/图片资源文件夹。
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-41CD52?logo=qt&logoColor=white)
@@ -16,9 +16,11 @@ Media/
 ├── desktop/             # Windows 桌面应用（Python/PySide6）
 │   ├── main.py
 │   ├── app/
-│   └── tests/
-├── android/             # Android 手机客户端（Kotlin）
-├── API.md               # HTTP API 契约（两个平台共享）
+│   ├── tests/
+│   └── data/
+├── web/                 # Web 前端 SPA（Vue 3）
+├── docs/                # 设计文档和计划
+├── API.md               # HTTP API 契约
 ├── README.md
 └── .gitignore
 ```
@@ -27,11 +29,11 @@ Media/
 
 - **文件夹级资源管理** — 自动扫描本地文件夹，将包含媒体文件的目录识别为"资源单元"，支持嵌套场景
 - **多策略文件查重** — 逐层匹配：MD5（精确）→ pHash（感知）→ dHash（差异）→ 人脸识别，基于杰卡德指数判定单元级重复
-- **缩略图预览** — 图像/视频自动生成缩略图，支持网格浏览、空格键快速预览
+- **缩略图预览** — 图像/视频自动生成缩略图，支持网格浏览
 - **实时文件监控** — watchdog 监测文件变更，支持去抖合并
+- **Web 前端** — Vue 3 SPA，支持手机/平板/桌面端响应式布局，左右滑动预览、视频播放
 - **局域网 API** — 内置 FastAPI 服务（默认 `0.0.0.0:19527`），可通过 HTTP 查询媒体库数据
-- **手机 APP** — 通过 API + SMB 协议在手机上浏览、播放电脑中的媒体文件
-- **深色主题** — Catppuccin Mocha 配色，全局 QSS + QPalette 统一渲染
+- **深色主题** — Slate-Indigo 设计体系，全局 QSS + QPalette 统一渲染
 
 ## 桌面应用架构
 
@@ -57,16 +59,30 @@ desktop/app/
     dialogs/             #   设置、查重对比、消息中心、预览等
     widgets/             #   状态栏、进度面板、缩略图加载器
     workers/             #   QThread 工作线程（扫描/哈希/查重）
-    style.qss            #   Catppuccin Mocha 深色样式表
+    style.qss            #   深色样式表
   api/                   # FastAPI HTTP 接口
-    server.py            #   守护线程运行
+    server.py            #   守护线程运行，内嵌 Web 前端静态文件服务
     routes/              #   /api/files, /api/units, /api/dedup, /api/messages
     schemas.py           #   Pydantic 响应模型
   registry/              # 注册器 + HashAlgorithm 抽象
-  services/              # 消息中心、清理服务、SMB 共享
+  services/              # 消息中心、清理服务
   utils/                 # 枚举常量、文件辅助函数
 desktop/tests/
-  test_flow.py           # 端到端测试（93 项）
+  test_flow.py           # 端到端测试（369 项）
+  test_web_playwright.py # Web 前端浏览器测试（32 项）
+```
+
+### Web 前端
+
+```
+web/
+├── index.html           # Vue 3 SPA 入口
+├── app.js               # 全部组件（路由、页面、手势）
+├── style.css            # Slate-Indigo 设计体系
+├── manifest.json        # PWA 清单
+├── sw.js                # Service Worker（离线缓存）
+├── icon-192.png
+└── icon-512.png
 ```
 
 ### 数据库
@@ -106,8 +122,8 @@ SQLite + WAL 模式，10 张表：
 ### 安装
 
 ```bash
-git clone https://github.com/yourname/media-manager.git
-cd media-manager
+git clone https://gitee.com/hanson227/Media-Resource-Manager.git
+cd Media-Resource-Manager
 
 # 创建虚拟环境（推荐）
 python -m venv .venv
@@ -117,8 +133,20 @@ python -m venv .venv
 cd desktop
 pip install -r requirements.txt
 
-# 运行
+# 运行桌面端
 python main.py
+
+# Web 前端直接通过浏览器访问 http://localhost:19527
+```
+
+### 测试
+
+```bash
+# 后端 + API 端到端测试
+cd desktop && python tests/test_flow.py
+
+# Web 前端浏览器测试（需 API 服务运行中）
+PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
 ```
 
 ### 配置
@@ -138,21 +166,18 @@ python main.py
 
 也可以在 GUI "工具 → 设置"中修改。
 
-### 测试
-
-```bash
-cd desktop && python tests/test_flow.py
-```
-
 ## API 端点
 
 | 方法 | 路径 | 说明 |
 |--------|------|-------------|
 | GET | `/api/health` | 健康检查 |
 | GET | `/api/units` | 列出资源单元 |
+| GET | `/api/units/{id}` | 单元详情 |
+| GET | `/api/units/{id}/files` | 单元内文件列表 |
 | GET | `/api/files` | 列出媒体文件（支持 unit_id 筛选和分页） |
 | GET | `/api/files/{id}` | 文件详情 |
-| GET | `/api/files/{id}/thumbnail` | 缩略图路径 |
+| GET | `/api/files/{id}/thumbnail` | 缩略图 |
+| GET | `/api/files/{id}/stream` | 流式传输原始文件（支持 Range） |
 | DELETE | `/api/files/{id}` | 删除文件记录 |
 | GET | `/api/dedup/results` | 查重结果列表 |
 | GET | `/api/dedup/results/{id}` | 查重详情（含文件匹配列表） |
@@ -160,9 +185,22 @@ cd desktop && python tests/test_flow.py
 | GET | `/api/messages` | 消息列表 |
 | POST | `/api/messages/{id}/read` | 标记已读 |
 | POST | `/api/messages/read-all` | 全部标记已读 |
+| GET | `/api/tags` | 标签列表 |
+| GET | `/api/tags/mapped-files` | 标签-文件映射 |
 
 完整文档在应用运行后访问 `http://localhost:19527/docs`。
-手机 APP 集成指南详见 [API.md](API.md)。
+API 详细契约见 [API.md](API.md)。
+
+## Web 前端
+
+Web 前端是基于 Vue 3 的 SPA，通过桌面端内置的 FastAPI 服务器提供静态文件服务。
+
+- 响应式布局：手机底部导航、平板/桌面侧边栏
+- 资源单元浏览、文件网格、左右滑动预览
+- 视频播放：播放/暂停、进度拖动、倍速播放、手势快进快退
+- 查重结果查看和处理
+- 消息中心
+- 访问密码锁屏
 
 ## 已知限制
 
@@ -174,17 +212,11 @@ cd desktop && python tests/test_flow.py
 ## 开发
 
 ```bash
-# 桌面端
-cd desktop
+# 后端 + API 测试
+cd desktop && python tests/test_flow.py
 
-# 代码风格
-ruff check .
-
-# 类型检查
-mypy app/
-
-# 测试
-python tests/test_flow.py
+# Web 前端浏览器测试
+PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
 ```
 
 ### 设计原则
