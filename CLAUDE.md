@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-代码修改后请运行 `python desktop/tests/test_flow.py` 验证确认无误。涉及 web 前端修改 (`desktop/web/` 下的文件) 还需额外运行 `PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py` 验证浏览器测试全通过。请使用中文进行回答，代码、文件名、API 名等保持英文。
+代码修改后请运行 `python desktop/tests/test_flow.py` 验证确认无误。涉及 web 前端修改 (`web/` 下的文件) 还需额外运行 `PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py` 验证浏览器测试全通过。请使用中文进行回答，代码、文件名、API 名等保持英文。
 
 ## Repo Structure
 
@@ -12,8 +12,9 @@ Media/                          # Git root — monorepo
 │   ├── app/                    # Python source
 │   ├── tests/
 │   └── ...
-├── android/                    # 手机端 Android 应用
-├── API.md                      # HTTP API 契约（两个平台共享）
+├── web/                        # Web 前端 SPA (Vue 3)
+├── docs/                       # 设计文档和计划
+├── API.md                      # HTTP API 契约
 ├── README.md
 └── CLAUDE.md
 ```

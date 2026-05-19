@@ -90,7 +90,7 @@ def create_app(config: AppConfig) -> FastAPI:
     # ============================================================
     # 静态文件（Web 前端 SPA）
     # ============================================================
-    web_dir = Path(__file__).resolve().parent.parent.parent / "web"
+    web_dir = Path(__file__).resolve().parent.parent.parent.parent / "web"
     if web_dir.is_dir():
         # 根端点：浏览器返回 index.html，API 客户端返回 JSON
         @app.get("/")
