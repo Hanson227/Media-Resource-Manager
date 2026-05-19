@@ -479,7 +479,7 @@ class FolderTreeView(QTreeView):
         header.setStretchLastSection(True)
         # 默认列宽
         header.resizeSection(model.COL_NAME, 200)
-        header.resizeSection(model.COL_SIZE, 90)
+        header.resizeSection(model.COL_SIZE, 150)
         header.resizeSection(model.COL_DATE, 100)
         header.resizeSection(model.COL_TAGS, 80)
         header.setSectionsMovable(True)

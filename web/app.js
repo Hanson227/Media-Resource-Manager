@@ -102,11 +102,11 @@ const UnitsPage = {
             <div class="sort-bar">
               <span class="count">{{ group.units.length }} 个单元</span>
               <span class="spacer"></span>
-              <button class="sort-btn" :class="{ active: sortBy === 'name' }" @click.stop="setSort('name')">
-                <span class="mdi" :class="sortIcon('name')"></span> 名称
-              </button>
               <button class="sort-btn" :class="{ active: sortBy === 'size' }" @click.stop="setSort('size')">
                 <span class="mdi" :class="sortIcon('size')"></span> 大小
+              </button>
+              <button class="sort-btn" :class="{ active: sortBy === 'date' }" @click.stop="setSort('date')">
+                <span class="mdi" :class="sortIcon('date')"></span> 日期
               </button>
             </div>
             <div class="unit-grid">
@@ -118,7 +118,7 @@ const UnitsPage = {
                 </div>
                 <div class="info">
                   <div class="name">{{ u.name }}<span v-if="u.is_starred" class="star-icon">⭐</span></div>
-                  <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}</div>
+                  <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}<span v-if="u.created_at"> · {{ formatDate(u.created_at) }}</span></div>
                 </div>
               </div>
             </div>
@@ -152,9 +152,19 @@ const UnitsPage = {
       while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
       return size.toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
     },
+    formatDate(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    },
     setSort(field) {
       if (this.sortBy === field) {
-        this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
+        if (this.sortOrder === 'desc') {
+          this.sortBy = 'name';
+          this.sortOrder = 'asc';
+        } else {
+          this.sortOrder = 'desc';
+        }
       } else {
         this.sortBy = field;
         this.sortOrder = 'asc';
@@ -168,18 +178,17 @@ const UnitsPage = {
     },
     sortedUnits(units) {
       const arr = [...units];
-      // 按收藏 + 当前排序条件排列
-      if (this.sortBy === 'name') {
-        arr.sort((a, b) => {
-          if (a.is_starred !== b.is_starred) return a.is_starred ? -1 : 1;
-          return this.sortOrder === 'asc'
-            ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name);
-        });
-      } else {
+      if (this.sortBy === 'size') {
         arr.sort((a, b) => {
           if (a.is_starred !== b.is_starred) return a.is_starred ? -1 : 1;
           return this.sortOrder === 'asc'
             ? (a.total_size || 0) - (b.total_size || 0) : (b.total_size || 0) - (a.total_size || 0);
+        });
+      } else if (this.sortBy === 'date') {
+        arr.sort((a, b) => {
+          if (a.is_starred !== b.is_starred) return a.is_starred ? -1 : 1;
+          const da = a.created_at || '', db = b.created_at || '';
+          return this.sortOrder === 'asc' ? da.localeCompare(db) : db.localeCompare(da);
         });
       }
       return arr;
@@ -281,11 +290,11 @@ const UnitFilesPage = {
           <h2>{{ unitName }}</h2>
           <div style="display:flex;align-items:center;gap:6px">
             <span class="count">{{ filteredFiles.length }} / {{ files.length }} 个文件</span>
-            <button class="sort-btn" :class="{ active: sortBy === 'name' }" @click="setSort('name')">
-              <span class="mdi" :class="sortIcon('name')"></span>
-            </button>
             <button class="sort-btn" :class="{ active: sortBy === 'size' }" @click="setSort('size')">
-              <span class="mdi" :class="sortIcon('size')"></span>
+              <span class="mdi" :class="sortIcon('size')"></span> 大小
+            </button>
+            <button class="sort-btn" :class="{ active: sortBy === 'date' }" @click="setSort('date')">
+              <span class="mdi" :class="sortIcon('date')"></span> 日期
             </button>
           </div>
         </div>
@@ -353,12 +362,14 @@ const UnitFilesPage = {
     },
     sortedFiles() {
       const arr = [...this.filteredFiles];
-      if (this.sortBy === 'name') {
-        arr.sort((a, b) => this.sortOrder === 'asc'
-          ? a.filename.localeCompare(b.filename) : b.filename.localeCompare(a.filename));
-      } else {
+      if (this.sortBy === 'size') {
         arr.sort((a, b) => this.sortOrder === 'asc'
           ? (a.size_bytes || 0) - (b.size_bytes || 0) : (b.size_bytes || 0) - (a.size_bytes || 0));
+      } else if (this.sortBy === 'date') {
+        arr.sort((a, b) => {
+          const da = a.created_at || '', db = b.created_at || '';
+          return this.sortOrder === 'asc' ? da.localeCompare(db) : db.localeCompare(da);
+        });
       }
       return arr;
     },
@@ -392,7 +403,13 @@ const UnitFilesPage = {
     },
     setSort(field) {
       if (this.sortBy === field) {
-        this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
+        if (this.sortOrder === 'desc') {
+          // 第三下：回到默认（名称排序）
+          this.sortBy = 'name';
+          this.sortOrder = 'asc';
+        } else {
+          this.sortOrder = 'desc';
+        }
       } else {
         this.sortBy = field;
         this.sortOrder = 'asc';

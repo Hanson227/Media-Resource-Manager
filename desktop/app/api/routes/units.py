@@ -55,6 +55,7 @@ async def list_units():
                     library_root_id=u.library_root_id,
                     library_root_name=Path(u.library_root.path).name if u.library_root else None,
                     cover_file_id=cover_path_map.get(u.id) or first_map.get(u.id),
+                    created_at=u.created_at.isoformat() if u.created_at else None,
                 )
                 for u in units
             ]
@@ -122,6 +123,7 @@ async def get_unit_files(unit_id: int):
                         "media_type": f.media_type,
                         "size_bytes": f.size_bytes,
                         "duration_ms": f.duration_ms,
+                        "created_at": f.indexed_at.isoformat() if f.indexed_at else None,
                     }
                     for f in files[:200]
                 ],
