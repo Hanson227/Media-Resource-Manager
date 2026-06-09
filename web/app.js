@@ -120,7 +120,7 @@ const UnitsPage = {
                 <div class="info">
                   <div class="info-row">
                     <div class="info-text">
-                      <div class="name">{{ u.name }}<span v-if="u.is_starred" class="star-icon">⭐</span></div>
+                      <div class="name"><span v-if="u.is_starred" class="star-icon">⭐ </span>{{ u.name }}</div>
                       <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}<span v-if="u.created_at"> · {{ formatDate(u.created_at) }}</span></div>
                     </div>
                     <button class="card-more" @click.stop="$root.showSheet(u.name, [
