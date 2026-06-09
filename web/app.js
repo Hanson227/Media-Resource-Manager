@@ -110,7 +110,12 @@ const UnitsPage = {
               </button>
             </div>
             <div class="unit-grid">
-              <div v-for="u in sortedUnits(group.units)" :key="u.id" class="unit-card" @click="openUnit(u.id)">
+              <div v-for="u in sortedUnits(group.units)" :key="u.id" class="unit-card"
+                @click="openUnit(u.id)"
+                @contextmenu.prevent
+                @touchstart.prevent="onCardPress($event, u)"
+                @touchend="onCardRelease($event, u)"
+                @touchmove="onCardMove">
                 <div class="cover">
                   <img v-if="u.cover_file_id" :src="coverUrl(u.cover_file_id)" loading="lazy"
                     @load="onCoverLoad(u.id)" @error="onCoverError(u.id)">
@@ -167,6 +172,30 @@ const UnitsPage = {
       const d = new Date(iso);
       return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
     },
+    // ---- Long-press context menu ----
+    onCardPress(e, unit) {
+      this._pressTarget = unit;
+      this._pressMoved = false;
+      this._pressTimer = setTimeout(() => {
+        if (!this._pressMoved) {
+          this.$root.showSheet(unit.name, [
+            { label: unit.is_starred ? '取消收藏' : '收藏',
+              icon: unit.is_starred ? 'mdi-star-off' : 'mdi-star-outline',
+              action: () => this._toggleStar(unit) },
+          ]);
+        }
+      }, 500);
+    },
+    onCardRelease() { clearTimeout(this._pressTimer); },
+    onCardMove() { this._pressMoved = true; clearTimeout(this._pressTimer); },
+    async _toggleStar(unit) {
+      try {
+        const ep = unit.is_starred ? 'unstar' : 'star';
+        await api(this.serverUrl, '/api/units/' + unit.id + '/' + ep, { method: 'POST' });
+        unit.is_starred = !unit.is_starred;
+      } catch (e) { /* silently fail */ }
+    },
+
     setSort(field) {
       if (this.sortBy === field) {
         if (this.sortOrder === 'desc') {
@@ -327,7 +356,12 @@ const UnitFilesPage = {
           </button>
         </div>
         <div class="feed-grid">
-          <div v-for="f in sortedFiles" :key="f.id" class="feed-item" @click="preview(f)">
+          <div v-for="f in sortedFiles" :key="f.id" class="feed-item"
+            @click="preview(f)"
+            @contextmenu.prevent
+            @touchstart.prevent="onCardPress($event, f)"
+            @touchend="onCardRelease($event, f)"
+            @touchmove="onCardMove">
             <div class="thumb-wrap">
               <img :src="thumbUrl(f.id)" loading="lazy"
                 @load="onImgLoad(f.id)" @error="onImgError($event, f.id)"
@@ -390,6 +424,29 @@ const UnitFilesPage = {
     },
   },
   methods: {
+    // ---- Long-press context menu ----
+    onCardPress(e, file) {
+      this._pressTarget = file;
+      this._pressMoved = false;
+      this._pressTimer = setTimeout(() => {
+        if (!this._pressMoved) {
+          this.$root.showSheet(file.filename, [
+            { label: '删除文件', icon: 'mdi-delete-outline', danger: true,
+              action: () => this._deleteFile(file) },
+          ]);
+        }
+      }, 500);
+    },
+    onCardRelease() { clearTimeout(this._pressTimer); },
+    onCardMove() { this._pressMoved = true; clearTimeout(this._pressTimer); },
+    async _deleteFile(file) {
+      if (!confirm('确定删除「' + file.filename + '」？')) return;
+      try {
+        await api(this.serverUrl, '/api/files/' + file.id, { method: 'DELETE' });
+        this.files = this.files.filter(f => f.id !== file.id);
+      } catch (e) { alert('删除失败: ' + e.message); }
+    },
+
     thumbUrl(id) { return this.serverUrl + '/api/files/' + id + '/thumbnail'; },
     onImgLoad(id) { this.loaded.add(id); },
     onImgError(e, id) { this.errored.add(id); },
@@ -1273,6 +1330,10 @@ const App = {
       pinError: '',
       pinVerifying: false,
       pinChecking: true,  // 正在检查 PIN 状态，此期间不显示锁屏
+      // Bottom sheet menu
+      sheetVisible: false,
+      sheetTitle: '',
+      sheetItems: [],     // [{ label, icon, danger, action }]
     };
   },
   computed: {
@@ -1387,7 +1448,14 @@ const App = {
     goTab(path) {
       if (this.$route.path === path) return;
       this.$router.push(path);
-    }
+    },
+    // ---- Bottom Sheet Menu ----
+    showSheet(title, items) {
+      this.sheetTitle = title;
+      this.sheetItems = items;
+      this.sheetVisible = true;
+    },
+    hideSheet() { this.sheetVisible = false; },
   },
   async created() {
     // Redirect to connect if no server configured

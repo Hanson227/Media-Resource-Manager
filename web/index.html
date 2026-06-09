@@ -107,6 +107,21 @@
       </nav>
     </template>
   </template>
+
+  <!-- Bottom Sheet Menu -->
+  <div v-if="sheetVisible" class="sheet-overlay" @click="hideSheet">
+    <div class="sheet-panel" @click.stop>
+      <div class="sheet-handle"></div>
+      <div v-if="sheetTitle" style="font-size:13px;color:var(--text-secondary);padding:0 var(--space-4) var(--space-3);text-align:center">{{ sheetTitle }}</div>
+      <button v-for="(item, i) in sheetItems" :key="i" class="sheet-item"
+        :class="{ danger: item.danger }" @click="item.action(); hideSheet()">
+        <span class="mdi" :class="item.icon"></span>{{ item.label }}
+      </button>
+      <button class="sheet-item sheet-cancel" @click="hideSheet">
+        <span class="mdi mdi-close"></span>取消
+      </button>
+    </div>
+  </div>
 </div>
 
 <script src="app.js"></script>
