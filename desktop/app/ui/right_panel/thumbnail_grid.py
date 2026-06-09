@@ -421,11 +421,20 @@ class ThumbnailGridView(QListView):
 
     # ---- 公开方法 ----
 
-    def load_unit(self, unit_id: int) -> None:
-        """加载指定单元的文件列表。"""
+    def load_unit(self, unit_id: int, restore_scroll: bool = False) -> None:
+        """加载指定单元的文件列表。
+
+        Args:
+            restore_scroll: True=加载后恢复到之前的滚动位置（删除后刷新用）；
+                           False=重置滚动到顶部（进入新单元时用）。
+        """
         self._cancel_all_workers()
-        # 保存当前滚动位置（文件夹卡片视图的位置）
-        self._saved_scroll = self.verticalScrollBar().value() if self.verticalScrollBar() else 0
+        # 保存当前滚动位置（文件夹卡片视图的位置或文件视图的位置）
+        if restore_scroll:
+            scrollbar = self.verticalScrollBar()
+            self._saved_scroll = scrollbar.value() if scrollbar else 0
+        else:
+            self._saved_scroll = 0
         self.setModel(self._file_model)  # 恢复文件模型
         self._reconnect_selection_signals()
         try:
@@ -435,6 +444,13 @@ class ThumbnailGridView(QListView):
                 unit_path = unit.path if unit else ""
             self._file_model.set_files(files)
             self._start_thumb_worker(unit_path)
+            # 删除后刷新：恢复滚动位置
+            if restore_scroll and self._saved_scroll > 0:
+                from PySide6.QtCore import QTimer
+                scrollbar = self.verticalScrollBar()
+                QTimer.singleShot(50, lambda: scrollbar.setValue(
+                    min(self._saved_scroll, scrollbar.maximum())
+                ))
             logger.info(f"加载单元 {unit_id}: {len(files)} 个文件")
         except Exception as e:
             logger.error(f"加载单元失败 {unit_id}: {e}")

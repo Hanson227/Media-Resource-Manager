@@ -553,11 +553,11 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_reload_current_unit(self) -> None:
-        """重新加载当前单元（删除文件后刷新网格+树）。"""
+        """重新加载当前单元（删除文件后刷新网格+树），保持滚动位置。"""
         uid = self._current_unit_id
         if uid is None:
             return
-        self._grid_view.load_unit(uid)
+        self._grid_view.load_unit(uid, restore_scroll=True)
         self._load_tree_files(uid)
 
     # ============================================================
