@@ -160,6 +160,15 @@ class DedupEngine:
         if not files_a or not files_b:
             return None
 
+        # ---- 早期过滤：文件数比例差异过大则跳过 ----
+        n_a, n_b = len(files_a), len(files_b)
+        ratio = n_a / n_b if n_b > n_a else n_b / n_a
+        if ratio < 0.05:  # 文件数差 20 倍以上，不可能达到阈值
+            logger.debug(
+                f"跳过: [{unit_a_name}] vs [{unit_b_name}] 文件数差异过大 ({n_a} vs {n_b})"
+            )
+            return None
+
         matches: list[FileMatch] = []
         matched_b_indices: set[int] = set()  # 已被匹配的 B 文件索引
 
@@ -189,8 +198,6 @@ class DedupEngine:
 
         # 计算杰卡德指数
         n_matches = len(matches)
-        n_a = len(files_a)
-        n_b = len(files_b)
         jaccard = n_matches / (n_a + n_b - n_matches) if (n_a + n_b - n_matches) > 0 else 0.0
 
         # 统计各类匹配数量
@@ -324,12 +331,64 @@ class DedupEngine:
                 ))
         return matches
 
+    @staticmethod
+    def _hash_prefix(hash_hex: str, bits: int = 8) -> str:
+        """取哈希十六进制字符串的前缀（bits 位对应 hex_chars = bits/4）。"""
+        if not hash_hex:
+            return ""
+        hex_chars = max(1, bits // 4)
+        return hash_hex[:hex_chars]
+
+    def _build_phash_buckets(self, files: list[dict], exclude: set[int],
+                              prefix_bits: int = 8) -> dict[str, list[tuple[int, dict, str]]]:
+        """按 pHash 前缀建桶。
+
+        返回: {prefix: [(idx, file_dict, phash_hex), ...]}
+        """
+        buckets: dict[str, list[tuple[int, dict, str]]] = {}
+        for idx, f in enumerate(files):
+            if idx in exclude:
+                continue
+            ph = f.get("phash")
+            if not ph:
+                continue
+            prefix = self._hash_prefix(ph, prefix_bits)
+            buckets.setdefault(prefix, []).append((idx, f, ph))
+        return buckets
+
+    @staticmethod
+    def _neighbor_prefixes(prefix: str) -> list[str]:
+        """获取给定十六进制前缀及其相邻前缀（用于桶查询）。
+
+        对于 2-char hex 前缀，检查 3 个连续桶确保不漏掉汉明距离接近的匹配。
+        """
+        if not prefix:
+            return []
+        try:
+            val = int(prefix, 16)
+        except ValueError:
+            return [prefix]
+        max_val = (1 << (len(prefix) * 4)) - 1
+        neighbors = [
+            f"{(val - 1) & max_val:0{len(prefix)}x}",
+            prefix,
+            f"{(val + 1) & max_val:0{len(prefix)}x}",
+        ]
+        return list(dict.fromkeys(neighbors))  # 去重保序
+
     def _match_by_perceptual_hash(self, files_a: list[dict], files_b: list[dict],
                                    exclude_b: set[int]) -> list[FileMatch]:
-        """pHash 感知哈希匹配（汉明距离）。"""
+        """pHash 感知哈希匹配（汉明距离，前缀桶优化）。
+
+        将 files_b 按 pHash 前 8 比特（2 个十六进制字符）分桶，
+        每个 files_a 只在同桶及相邻桶中搜索，将 O(|A|*|B|) 降为 ~O(|A|*|B|/64)。
+        """
         phash_algo = self._registry.get("phash")
         if not phash_algo:
             return []
+
+        # 建桶：按 hex 前缀（8 bits = 2 chars）
+        buckets = self._build_phash_buckets(files_b, exclude_b, prefix_bits=8)
 
         matches: list[FileMatch] = []
         for fa in files_a:
@@ -337,16 +396,18 @@ class DedupEngine:
             if not ph_a:
                 continue
 
+            prefix_a = self._hash_prefix(ph_a, 8)
+            candidates: list[tuple[int, dict, str]] = []
+            for pfx in self._neighbor_prefixes(prefix_a):
+                candidates.extend(buckets.get(pfx, []))
+
+            if not candidates:
+                continue
+
             best_match = None
             best_dist = self._phash_threshold + 1
 
-            for idx_b, fb in enumerate(files_b):
-                if idx_b in exclude_b:
-                    continue
-                ph_b = fb.get("phash")
-                if not ph_b:
-                    continue
-
+            for idx_b, fb, ph_b in candidates:
                 try:
                     dist = phash_algo.distance(ph_a, ph_b)
                     if dist < best_dist:
@@ -357,7 +418,7 @@ class DedupEngine:
 
             if best_match and best_dist <= self._phash_threshold:
                 idx_b, fb, dist = best_match
-                score = 1.0 - (dist / 64.0)  # 归一化到 [0, 1]
+                score = 1.0 - (dist / 64.0)
                 matches.append(FileMatch(
                     file_a_id=fa["id"],
                     file_b_id=fb["id"],
@@ -370,10 +431,21 @@ class DedupEngine:
 
     def _match_by_dhash(self, files_a: list[dict], files_b: list[dict],
                         exclude_b: set[int]) -> list[FileMatch]:
-        """dHash 差异哈希匹配（汉明距离）。"""
+        """dHash 差异哈希匹配（汉明距离，前缀桶优化）。"""
         dhash_algo = self._registry.get("dhash")
         if not dhash_algo:
             return []
+
+        # 建桶：按 hex 前缀（8 bits = 2 chars）
+        buckets: dict[str, list[tuple[int, dict, str]]] = {}
+        for idx, fb in enumerate(files_b):
+            if idx in exclude_b:
+                continue
+            dh = fb.get("dhash")
+            if not dh:
+                continue
+            prefix = self._hash_prefix(dh, 8)
+            buckets.setdefault(prefix, []).append((idx, fb, dh))
 
         matches: list[FileMatch] = []
         for fa in files_a:
@@ -381,16 +453,18 @@ class DedupEngine:
             if not dh_a:
                 continue
 
+            prefix_a = self._hash_prefix(dh_a, 8)
+            candidates: list[tuple[int, dict, str]] = []
+            for pfx in self._neighbor_prefixes(prefix_a):
+                candidates.extend(buckets.get(pfx, []))
+
+            if not candidates:
+                continue
+
             best_match = None
             best_dist = self._dhash_threshold + 1
 
-            for idx_b, fb in enumerate(files_b):
-                if idx_b in exclude_b:
-                    continue
-                dh_b = fb.get("dhash")
-                if not dh_b:
-                    continue
-
+            for idx_b, fb, dh_b in candidates:
                 try:
                     dist = dhash_algo.distance(dh_a, dh_b)
                     if dist < best_dist:
