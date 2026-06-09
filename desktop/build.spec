@@ -10,10 +10,11 @@ PyInstaller spec — Media Resource Manager 桌面应用打包配置。
     dist/影视资源管理器/影视资源管理器.exe
 """
 
+import os
 import sys
 from pathlib import Path
 
-_root = Path(__file__).parent  # desktop/
+_root = Path(SPECPATH).parent.resolve()  # desktop/
 
 a = Analysis(
     ['main.py'],
