@@ -11,17 +11,32 @@
 """
 
 import logging
+import socket
 from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
-    QStatusBar, QLabel, QProgressBar, QHBoxLayout,
+    QStatusBar, QLabel, QProgressBar, QHBoxLayout, QApplication,
 )
 
 from config import AppConfig
-from app.ui.theme import SUBTEXT_0, GREEN, RED
+from app.ui.theme import SUBTEXT_0, GREEN, RED, BLUE
 
 logger = logging.getLogger(__name__)
+
+
+def _get_local_ip() -> str:
+    """获取本机局域网 IPv4 地址。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.1)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 
 class MainStatusBar(QStatusBar):
@@ -65,10 +80,34 @@ class MainStatusBar(QStatusBar):
         self._api_label.setStyleSheet(f"color: {SUBTEXT_0}; padding-right: 8px;")
         self.addPermanentWidget(self._api_label)
 
+        # ==== 局域网 IP 地址（可点击复制） ====
+        ip = _get_local_ip()
+        self._ip_label = QLabel(f"📋 {ip}:{config.api_port}")
+        self._ip_label.setStyleSheet(
+            f"color: {BLUE}; padding-right: 12px; font-weight: 500;"
+        )
+        self._ip_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._ip_label.setToolTip("点击复制地址，手机浏览器打开即可访问 Web 端")
+        self._ip_label.mousePressEvent = lambda e: self._copy_ip()
+        self.addPermanentWidget(self._ip_label)
+
         # ==== 消息未读计数 ====
         self._msg_label = QLabel("消息: 0")
         self._msg_label.setStyleSheet(f"color: {SUBTEXT_0};")
         self.addPermanentWidget(self._msg_label)
+
+    def _copy_ip(self) -> None:
+        """复制局域网地址到剪贴板。"""
+        ip = _get_local_ip()
+        url = f"http://{ip}:{self._config.api_port}"
+        QApplication.clipboard().setText(url)
+        self._ip_label.setText(f"📋 {ip}:{self._config.api_port} ✅ 已复制")
+        self._ip_label.setStyleSheet(f"color: {GREEN}; padding-right: 12px; font-weight: 500;")
+        # 1.5 秒后恢复
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(1500, lambda: self._ip_label.setStyleSheet(
+            f"color: {BLUE}; padding-right: 12px; font-weight: 500;"
+        ))
 
     # ============================================================
     # 公开方法
