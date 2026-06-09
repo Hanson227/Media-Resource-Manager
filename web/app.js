@@ -112,18 +112,22 @@ const UnitsPage = {
             <div class="unit-grid">
               <div v-for="u in sortedUnits(group.units)" :key="u.id" class="unit-card"
                 @click="openUnit(u.id)">
-                <button class="card-action-btn" @click.stop="$root.showSheet(u.name, [
-                  { label: u.is_starred ? '取消收藏' : '收藏', icon: u.is_starred ? 'mdi-star-off' : 'mdi-star-outline',
-                    action: () => _toggleStar(u) }
-                ])"><span class="mdi mdi-dots-vertical"></span></button>
                 <div class="cover">
                   <img v-if="u.cover_file_id" :src="coverUrl(u.cover_file_id)" loading="lazy"
                     @load="onCoverLoad(u.id)" @error="onCoverError(u.id)">
                   <span v-if="!u.cover_file_id || coverFailed[u.id]" class="mdi mdi-folder-image"></span>
                 </div>
                 <div class="info">
-                  <div class="name">{{ u.name }}<span v-if="u.is_starred" class="star-icon">⭐</span></div>
-                  <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}<span v-if="u.created_at"> · {{ formatDate(u.created_at) }}</span></div>
+                  <div class="info-row">
+                    <div class="info-text">
+                      <div class="name">{{ u.name }}<span v-if="u.is_starred" class="star-icon">⭐</span></div>
+                      <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}<span v-if="u.created_at"> · {{ formatDate(u.created_at) }}</span></div>
+                    </div>
+                    <button class="card-more" @click.stop="$root.showSheet(u.name, [
+                      { label: u.is_starred ? '取消收藏' : '收藏', icon: u.is_starred ? 'mdi-star-off' : 'mdi-star-outline',
+                        action: () => _toggleStar(u) }
+                    ])" :title="u.is_starred ? '取消收藏' : '收藏'"><span class="mdi mdi-dots-horizontal"></span></button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -342,10 +346,6 @@ const UnitFilesPage = {
         <div class="feed-grid">
           <div v-for="f in sortedFiles" :key="f.id" class="feed-item"
             @click="preview(f)">
-            <button class="card-action-btn" @click.stop="$root.showSheet(f.filename, [
-              { label: '删除文件', icon: 'mdi-delete-outline', danger: true,
-                action: () => _deleteFile(f) }
-            ])"><span class="mdi mdi-dots-vertical"></span></button>
             <div class="thumb-wrap">
               <img :src="thumbUrl(f.id)" loading="lazy"
                 @load="onImgLoad(f.id)" @error="onImgError($event, f.id)"
@@ -358,8 +358,16 @@ const UnitFilesPage = {
               <span v-if="f.media_type === 'video' && f.duration_ms" class="dur-badge">{{ fmtDuration(f.duration_ms) }}</span>
             </div>
             <div class="file-info">
-              <div class="name">{{ f.filename }}</div>
-              <div class="meta">{{ formatSize(f.size_bytes) }}</div>
+              <div class="info-row">
+                <div class="info-text">
+                  <div class="name">{{ f.filename }}</div>
+                  <div class="meta">{{ formatSize(f.size_bytes) }}</div>
+                </div>
+                <button class="card-more" @click.stop="$root.showSheet(f.filename, [
+                  { label: '删除文件', icon: 'mdi-delete-outline', danger: true,
+                    action: () => _deleteFile(f) }
+                ])" title="更多操作"><span class="mdi mdi-dots-horizontal"></span></button>
+              </div>
             </div>
           </div>
         </div>
