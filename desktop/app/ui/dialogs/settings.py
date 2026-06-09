@@ -109,6 +109,12 @@ class SettingsDialog(QDialog):
         self._api_host_edit = QLineEdit()
         api_form.addRow("API 监听地址:", self._api_host_edit)
 
+        self._web_pin_edit = QLineEdit()
+        self._web_pin_edit.setMaxLength(4)
+        self._web_pin_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._web_pin_edit.setPlaceholderText("留空表示不启用密码")
+        api_form.addRow("Web 访问密码 (4位):", self._web_pin_edit)
+
         tabs.addTab(api_tab, "API 服务")
 
         # ==== 文件监控选项卡 ====
@@ -157,6 +163,7 @@ class SettingsDialog(QDialog):
         self._api_enabled_check.setChecked(cfg.api_enabled)
         self._api_port_spin.setValue(cfg.api_port)
         self._api_host_edit.setText(cfg.api_host)
+        self._web_pin_edit.setText(cfg.web_pin)
         self._watcher_enabled_check.setChecked(cfg.watcher_enabled)
         self._watcher_debounce_spin.setValue(cfg.watcher_debounce_ms)
         self._seek_percent_spin.setValue(cfg.preview_seek_percent)
@@ -194,6 +201,10 @@ class SettingsDialog(QDialog):
             window_height=self._config.window_height,
             grid_column_count=self._config.grid_column_count,
             grid_spacing=self._config.grid_spacing,
+            web_pin=self._web_pin_edit.text(),
+            splitter_ratio_left=self._config.splitter_ratio_left,
+            thumbnail_cache_dir=self._config.thumbnail_cache_dir,
+            smb_share_name_prefix=self._config.smb_share_name_prefix,
         )
         self.settings_saved.emit(new_config)
         self.accept()

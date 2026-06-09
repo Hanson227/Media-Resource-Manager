@@ -81,7 +81,7 @@ def create_app(config: AppConfig) -> FastAPI:
     async def auth_verify(request: Request):
         cfg = getattr(request.app.state, "config", None)
         if not cfg or not cfg.web_pin:
-            return {"verified": True}
+            return JSONResponse(status_code=400, content={"verified": False, "error": "未配置访问密码"})
         body = await request.json()
         if body.get("pin", "") == cfg.web_pin:
             return {"verified": True}

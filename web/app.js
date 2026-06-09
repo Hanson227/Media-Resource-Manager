@@ -139,6 +139,16 @@ const UnitsPage = {
     openUnit(id) {
       const main = document.querySelector('.app-main');
       if (main) _unitsScrollTop = main.scrollTop;
+      // 保存第一个可见单元的 id 作为锚点
+      const cards = document.querySelectorAll('.unit-card');
+      for (const card of cards) {
+        const rect = card.getBoundingClientRect();
+        if (rect.bottom > 80) {
+          const onclick = card.getAttribute('onclick') || '';
+          const m = onclick.match(/'\/units\/(\d+)'/);
+          if (m) { _fileScrollAnchor = parseInt(m[1]); break; }
+        }
+      }
       this.$router.push('/units/' + id);
     },
     toggleRoot(ri) { this.roots[ri].open = !this.roots[ri].open; },
@@ -235,7 +245,12 @@ const UnitsPage = {
       this.$nextTick(() => this.$nextTick(() => {
         if (_unitsScrollTop > 0) {
           const main = document.querySelector('.app-main');
-          if (main) main.scrollTop = _unitsScrollTop;
+          if (main) {
+            main.scrollTop = _unitsScrollTop;
+            requestAnimationFrame(() => {
+              if (main.scrollTop < _unitsScrollTop) main.scrollTop = _unitsScrollTop;
+            });
+          }
           _unitsScrollTop = 0;
         }
       }));
@@ -395,10 +410,12 @@ const UnitFilesPage = {
     preview(file) {
       const main = document.querySelector('.app-main');
       if (main) _fileScrollTop = main.scrollTop;
-      const idx = this.files.indexOf(file);
+      // 使用排序后的列表，确保预览中左右滑动顺序与文件夹排序一致
+      const sorted = this.sortedFiles;
+      const idx = sorted.indexOf(file);
       this.$router.push({
         path: '/preview/' + file.id,
-        state: { files: JSON.parse(JSON.stringify(this.files)), fileIndex: idx },
+        state: { files: JSON.parse(JSON.stringify(sorted)), fileIndex: idx },
       });
     },
     setSort(field) {
@@ -466,13 +483,9 @@ const UnitFilesPage = {
     } finally {
       this.loading = false;
       this.$emit('loading', false);
-      // 双重 $nextTick 确保 DOM 布局完成后恢复滚动位置
+      // 恢复滚动位置：优先用文件 id 锚定，降级用像素值
       this.$nextTick(() => this.$nextTick(() => {
-        if (_fileScrollTop > 0) {
-          const main = document.querySelector('.app-main');
-          if (main) main.scrollTop = _fileScrollTop;
-          _fileScrollTop = 0;
-        }
+        _restoreFileScroll();
       }));
       this.$nextTick(() => {
         // 下拉刷新：监听滚动到顶部继续下拉
@@ -509,7 +522,7 @@ const UnitFilesPage = {
 /* ========== Preview Page ========== */
 const PreviewPage = {
   template: `
-    <div class="preview-overlay">
+    <div class="preview-overlay" @contextmenu.prevent>
       <div class="preview-top">
         <button class="preview-back" @click="goBack"><span class="mdi mdi-arrow-left"></span></button>
         <span style="font-size:14px;color:rgba(255,255,255,.7);margin-left:8px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ filename }}</span>
@@ -527,7 +540,7 @@ const PreviewPage = {
           <div class="gesture-zone" @touchstart.prevent="onNavSwipeStart($event)" @touchend="onNavSwipeEnd" @touchmove.prevent="onNavSwipeMove($event)" @touchcancel="onNavSwipeEnd"></div>
         </template>
         <template v-else-if="mediaType === 'video'">
-          <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop :src="streamUrl" :poster="posterUrl"
+          <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop @contextmenu.prevent :src="streamUrl" :poster="posterUrl"
   class="gesture-follow" :class="{ dragging: navSwiping }"
   :style="{ transform: 'translateX(' + gestureOffsetX + 'px)' }"></video>
 
@@ -540,9 +553,9 @@ const PreviewPage = {
           <div class="gesture-feedback" :class="{ show: gestureShowFeedback }">
             <span v-if="gestureSwiping" class="icon mdi" :class="gestureSeekDir > 0 ? 'mdi-fast-forward' : 'mdi-rewind'"></span>
             <span v-else-if="gestureSide === 'right'" class="icon mdi mdi-fast-forward"></span>
-            <span v-else class="icon mdi mdi-rewind"></span>
+            <span v-else-if="gestureSide === 'left'" class="icon mdi mdi-rewind"></span>
             <span v-if="gestureSwiping" class="label">{{ gestureSeekLabel }}</span>
-            <span v-else class="label">{{ gestureSide === 'right' ? '2x 快进' : '2x 快退' }}</span>
+            <span v-else-if="gestureSide" class="label">{{ gestureSide === 'right' ? '2x 快进' : '2x 快退' }}</span>
           </div>
 
           <!-- Speed Menu -->
@@ -877,8 +890,8 @@ const PreviewPage = {
       const file = this.fileList[newIndex];
       if (!file) { this._navigating = false; return; }
       this.fileIndex = newIndex;
-      // Update back-button scroll target (2-column grid, ~200px per item)
-      _fileScrollTop = Math.floor(newIndex / 2) * 200;
+      // Update back-button scroll anchor to this file
+      _fileScrollAnchor = file.id;
       this.filename = file.filename;
       this.mediaType = file.media_type || 'image';
       this.streamUrl = this.serverUrl + '/api/files/' + file.id + '/stream';
@@ -1191,6 +1204,38 @@ const SettingsPage = {
   }
 };
 
+/* 恢复文件列表滚动位置：优先锚定到文件 id，降级像素值 */
+function _restoreFileScroll() {
+  const main = document.querySelector('.app-main');
+  if (!main) return;
+  if (_fileScrollAnchor) {
+    // 尝试定位到锚定文件的缩略图
+    const items = document.querySelectorAll('.feed-item');
+    for (const item of items) {
+      const img = item.querySelector('img');
+      if (img) {
+        const src = img.getAttribute('src') || '';
+        const m = src.match(/\/files\/(\d+)\/thumbnail/);
+        if (m && parseInt(m[1]) === _fileScrollAnchor) {
+          item.scrollIntoView({ block: 'start' });
+          _fileScrollAnchor = null;
+          _fileScrollTop = 0;
+          return;
+        }
+      }
+    }
+  }
+  // 降级：像素值恢复 + requestAnimationFrame 微调
+  if (_fileScrollTop > 0) {
+    main.scrollTop = _fileScrollTop;
+    requestAnimationFrame(() => {
+      if (main.scrollTop < _fileScrollTop) main.scrollTop = _fileScrollTop;
+    });
+    _fileScrollTop = 0;
+  }
+  _fileScrollAnchor = null;
+}
+
 /* ========== Router ========== */
 const routes = [
   { path: '/connect', component: ConnectPage },
@@ -1208,6 +1253,7 @@ const router = createRouter({ history: createWebHashHistory(), routes });
 
 /* 模块级变量：跨组件实例持久化 */
 let _fileScrollTop = 0;
+let _fileScrollAnchor = null;  // 返回时锚定的文件 id（优先于像素值）
 let _unitsScrollTop = 0;
 
 /* ========== Root App ========== */
@@ -1226,6 +1272,7 @@ const App = {
       pinValue: '',
       pinError: '',
       pinVerifying: false,
+      pinChecking: true,  // 正在检查 PIN 状态，此期间不显示锁屏
     };
   },
   computed: {
@@ -1264,10 +1311,10 @@ const App = {
   methods: {
     // ---- PIN (server-side verification) ----
     pinPress(d) {
-      if (this.pinValue.length >= 6 || this.pinVerifying) return;
+      if (this.pinValue.length >= 4 || this.pinVerifying) return;
       this.pinError = '';
       this.pinValue += d;
-      if (this.pinValue.length === 6) this.pinSubmit();
+      if (this.pinValue.length === 4) this.pinSubmit();
     },
     pinDelete() {
       if (this.pinVerifying) return;
@@ -1302,10 +1349,12 @@ const App = {
         const auth = await api(url, '/api/auth/status');
         if (auth.pin_required) {
           this.pinUnlocked = false;  // 需要输入密码
+          this.pinChecking = false;
           return;  // 停留在连接页（会显示密码锁屏）
         }
       } catch (e) { /* 兼容旧版服务端无此端点 */ }
       this.pinUnlocked = true;
+      this.pinChecking = false;
       this.$router.push('/units');
     },
     onDisconnected() {
@@ -1351,6 +1400,14 @@ const App = {
         const auth = await api(this.serverUrl, '/api/auth/status');
         if (!auth.pin_required) { this.pinUnlocked = true; }
       } catch (e) { this.pinUnlocked = true; /* 旧版服务端 */ }
+      // 检查完成 — 若仍需密码则显示锁屏
+      if (!this.pinUnlocked) {
+        this.pinChecking = false;
+      }
+    } else {
+      // 无服务器配置 — 连接页面不受 PIN 限制
+      this.pinUnlocked = true;
+      this.pinChecking = false;
     }
   },
   mounted() {

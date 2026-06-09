@@ -18,12 +18,12 @@
 <body>
 <div id="app">
   <!-- PIN Lock Screen -->
-  <div v-if="!pinUnlocked" class="pin-overlay">
+  <div v-if="!pinUnlocked && !pinChecking" class="pin-overlay">
     <div class="lock-icon"><span class="mdi mdi-lock-outline"></span></div>
     <h2>输入访问密码</h2>
-    <p class="hint">请输入 6 位数字密码</p>
+    <p class="hint">请输入 4 位数字密码</p>
     <div class="pin-input-wrap">
-      <div v-for="i in 6" :key="i" class="pin-dot" :class="{ filled: pinValue.length >= i, active: pinValue.length === i-1 && !pinError }">{{ pinValue.length >= i ? '●' : '' }}</div>
+      <div v-for="i in 4" :key="i" class="pin-dot" :class="{ filled: pinValue.length >= i, active: pinValue.length === i-1 && !pinError }">{{ pinValue.length >= i ? '●' : '' }}</div>
     </div>
     <div class="pin-error">{{ pinError }}</div>
     <div class="pin-keypad" v-if="!pinVerifying">
