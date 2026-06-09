@@ -64,6 +64,8 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
 
         tabs = QTabWidget()
+        # 修复标签栏文字在深色主题下不可见的问题
+        tabs.setPalette(palette)
 
         # ==== 数据库选项卡 ====
         db_tab = QWidget()
