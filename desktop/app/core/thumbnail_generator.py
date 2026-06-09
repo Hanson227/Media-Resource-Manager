@@ -14,7 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageFile, UnidentifiedImageError
+
+# 允许 Pillow 加载截断/损坏的 JPEG 图片（与 Qt QPixmap 行为一致）
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from app.core.exceptions import ThumbnailGenerationError, UnsupportedFormatError
 from app.utils.image_helpers import VideoCapture_unicode
