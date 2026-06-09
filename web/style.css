@@ -845,21 +845,21 @@ body {
   padding-top: var(--space-4);
 }
 
-/* ========== Card Action Button (⋯ menu) ========== */
-.card-action-btn {
-  position: absolute; top: 4px; right: 4px; z-index: 5;
-  width: 30px; height: 30px; border-radius: 50%;
-  background: rgba(0,0,0,.4); border: none; color: rgba(255,255,255,.7);
-  font-size: 18px; display: flex; align-items: center; justify-content: center;
-  cursor: pointer; transition: background .15s;
-  -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+/* ========== Info Row + Card Action Button ========== */
+.info-row {
+  display: flex; align-items: center; gap: var(--space-2);
 }
-.card-action-btn:hover, .card-action-btn:active { background: rgba(0,0,0,.6); color: #fff; }
-
-/* Image inside card has no context menu */
-.unit-card img, .feed-item img, .feed-item video {
-  -webkit-touch-callout: none;
-  pointer-events: none;
+.info-text { flex: 1; min-width: 0; }
+.card-more {
+  flex-shrink: 0; width: 28px; height: 28px; border-radius: 6px;
+  background: transparent; border: none; color: var(--text-tertiary);
+  font-size: 18px; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; transition: all .15s; opacity: 0;
+}
+.unit-card:hover .card-more,
+.feed-item:hover .card-more { opacity: 1; }
+.card-more:hover, .card-more:active {
+  background: var(--bg-card-hover); color: var(--text-primary);
 }
 
 @media (prefers-reduced-motion: reduce) {
