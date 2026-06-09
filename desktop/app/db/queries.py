@@ -271,6 +271,19 @@ def get_unindexed_files(session: Session, limit: int = 1000) -> list[MediaFile]:
     ).limit(limit).all()
 
 
+def get_unindexed_file_count(session: Session) -> int:
+    """获取所有活跃单元中未计算哈希的文件数量。"""
+    return session.query(MediaFile).join(
+        ResourceUnit, MediaFile.resource_unit_id == ResourceUnit.id
+    ).filter(
+        ResourceUnit.status == "active",
+        or_(
+            MediaFile.md5_hash == None,
+            MediaFile.phash == None,
+        )
+    ).count()
+
+
 def insert_media_file(session: Session, **kwargs: Any) -> MediaFile:
     """插入一条新媒体文件记录。"""
     mf = MediaFile(**kwargs)

@@ -191,13 +191,8 @@ class MainWindow(QMainWindow):
 
         dedup_btn = QPushButton("查重")
         dedup_btn.clicked.connect(self._on_start_dedup)
-        dedup_btn.setToolTip("对选中的资源单元执行查重 (Ctrl+D)")
+        dedup_btn.setToolTip("自动计算哈希+人脸索引，然后执行查重 (Ctrl+D)")
         toolbar.addWidget(dedup_btn)
-
-        index_btn = QPushButton("索引")
-        index_btn.clicked.connect(self._on_start_index)
-        index_btn.setToolTip("计算所有文件哈希和人脸索引")
-        toolbar.addWidget(index_btn)
 
         toolbar.addSeparator()
 
@@ -893,44 +888,18 @@ class MainWindow(QMainWindow):
     # 查重流程
     # ============================================================
 
-    @Slot()
-    def _on_start_dedup(self) -> None:
-        """启动查重。先检查哈希是否已完成。"""
-        try:
-            with DatabaseManager.session() as session:
-                units = q.get_all_active_units(session)
-                unit_ids = [u.id for u in units]
-                # 检查未索引文件数量
-                unindexed = q.get_unindexed_files(session, limit=1)
-                pending_count = len(unindexed)
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法获取资源单元: {e}")
-            return
-
-        if len(unit_ids) < 2:
-            QMessageBox.information(self, "提示", "至少需要 2 个资源单元才能执行查重，请先扫描媒体库。")
-            return
-
-        if pending_count > 0:
-            reply = QMessageBox.question(
-                self, "哈希未完成",
-                f"还有文件的哈希值未计算（至少 {pending_count} 个），这会导致查重漏检。\n\n"
-                "建议等后台哈希索引完成后（状态栏不再显示进度）再查重。\n\n"
-                "是否仍要继续？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-
+    def _start_dedup_after_hash(self, unit_ids: list[int]) -> None:
+        """哈希索引入口完成后的回调：启动真实查重。"""
         reply = QMessageBox.question(
             self, "确认查重",
-            f"将对 {len(unit_ids)} 个资源单元执行全量比对。\n"
+            f"哈希索引完成。将对 {len(unit_ids)} 个资源单元执行全量比对。\n"
             f"策略：人脸识别 → MD5 → pHash → dHash\n\n"
             f"确定继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
+            self._status_bar.set_status("查重已取消")
+            self._status_bar.hide_progress()
             return
 
         self._status_bar.set_status("正在查重...")
@@ -944,6 +913,53 @@ class MainWindow(QMainWindow):
             lambda e: self._status_bar.set_status(f"查重错误: {e}")
         )
         self._dedup_worker.start()
+
+    @Slot()
+    def _on_start_dedup(self) -> None:
+        """一键查重：先自动计算未索引文件的哈希+人脸，完成后自动进入查重。"""
+        try:
+            with DatabaseManager.session() as session:
+                units = q.get_all_active_units(session)
+                unit_ids = [u.id for u in units]
+                # 检查未索引文件数量
+                unindexed_total = q.get_unindexed_file_count(session)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"无法获取资源单元: {e}")
+            return
+
+        if len(unit_ids) < 2:
+            QMessageBox.information(self, "提示", "至少需要 2 个资源单元才能执行查重，请先扫描媒体库。")
+            return
+
+        # 有未索引文件 → 自动运行哈希索引，完成后自动衔接查重
+        if unindexed_total > 0:
+            reply = QMessageBox.question(
+                self, "需要先计算哈希索引",
+                f"还有 {unindexed_total} 个文件未计算哈希值（含人脸识别）。\n\n"
+                f"将先自动计算哈希索引，完成后自动进入查重。\n"
+                f"策略：人脸识别 → MD5 → pHash → dHash\n\n"
+                f"确定继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+            self._status_bar.set_status(f"正在计算哈希索引（{unindexed_total} 个文件）...")
+            self._status_bar.set_progress(0, 0)
+
+            self._hash_worker = HashWorker(self._config)
+            self._hash_worker.progress.connect(self._status_bar.set_progress)
+            self._hash_worker.finished.connect(
+                lambda count: self._start_dedup_after_hash(unit_ids)
+            )
+            self._hash_worker.error_occurred.connect(
+                lambda e: self._status_bar.set_status(f"哈希错误: {e}")
+            )
+            self._hash_worker.start()
+            return
+
+        # 全部已索引 → 直接查重
+        self._start_dedup_after_hash(unit_ids)
 
     @Slot(object)
     def _on_duplicate_found(self, dup) -> None:
