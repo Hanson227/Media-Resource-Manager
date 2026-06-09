@@ -32,6 +32,7 @@ build/
 *.egg-info/
 *.egg
 *.spec
+!build.spec  # PyInstaller 打包配置
 
 # Thumbnail cache
 .thumbnails/
