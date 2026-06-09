@@ -51,16 +51,39 @@ QMenu::separator {
     margin: 4px 12px;
 }
 
-/* ---- 按钮 ---- */
+/* ---- 工具栏按钮 ---- */
+QToolBar {
+    background-color: #181825;
+    border: none;
+    border-bottom: 1px solid #252538;
+    padding: 6px 10px;
+    spacing: 8px;
+}
+QToolBar QPushButton {
+    background-color: #252538;
+    color: #cdd6f4;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 500;
+}
+QToolBar QPushButton:hover {
+    background-color: #313244;
+}
+QToolBar QPushButton:pressed, QToolBar QPushButton:checked {
+    background-color: #45475a;
+}
+
+/* ---- 通用按钮 ---- */
 QPushButton {
     background-color: #313244;
     color: #cdd6f4;
     border: none;
-    border-radius: 8px;
+    border-radius: 6px;
     padding: 7px 16px;
     font-size: 12px;
     font-weight: 500;
-    transition: background-color 0.15s, transform 0.1s;
 }
 QPushButton:hover {
     background-color: #45475a;
@@ -83,7 +106,7 @@ QTabBar::tab {
     background-color: #181825;
     color: #a6adc8;
     border: none;
-    border-radius: 8px;
+    border-radius: 6px;
     padding: 8px 18px;
     margin: 4px 2px;
     font-size: 13px;
@@ -208,22 +231,20 @@ QListView {
     color: #cdd6f4;
     border: none;
     outline: none;
-    padding: 8px;
+    padding: 6px;
 }
 QListView::item {
-    background-color: #1c1c26;
-    border: 1px solid #252538;
-    border-radius: 10px;
+    background-color: transparent;
+    border: none;
+    border-radius: 8px;
     padding: 4px;
-    margin: 2px;
+    margin: 1px;
 }
 QListView::item:selected {
-    background-color: rgba(129, 140, 248, 0.15);
-    border-color: #818cf8;
+    background-color: rgba(129, 140, 248, 0.12);
 }
 QListView::item:hover {
     background-color: #252538;
-    border-color: #313244;
 }
 
 /* ---- 分割器 ---- */
