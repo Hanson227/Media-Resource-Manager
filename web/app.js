@@ -181,7 +181,7 @@ const UnitsPage = {
         const ep = unit.is_starred ? 'unstar' : 'star';
         await api(this.serverUrl, '/api/units/' + unit.id + '/' + ep, { method: 'POST' });
         unit.is_starred = !unit.is_starred;
-      } catch (e) { /* silently fail */ }
+      } catch (e) { alert('操作失败: ' + e.message); }
     },
 
     setSort(field) {

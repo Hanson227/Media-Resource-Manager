@@ -1234,6 +1234,11 @@ class MainWindow(QMainWindow):
         from app.api.server import _app
         if _app is not None:
             _app.state.config = new_config
+        # 刷新状态栏 IP 显示（端口可能已变更）
+        from app.ui.widgets.status_bar import _get_local_ip
+        ip = _get_local_ip()
+        self._status_bar._ip_label.setText(f"📋 {ip}:{new_config.api_port}")
+        self._status_bar.set_api_status(self._config.api_enabled)
         self._status_bar.set_status("设置已保存")
 
     def _update_message_badge(self) -> None:
