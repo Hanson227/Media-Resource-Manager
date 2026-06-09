@@ -5,7 +5,7 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import func
 
 from app.api.schemas import UnitItem, UnitListResponse
@@ -128,6 +128,38 @@ async def get_unit_files(unit_id: int):
                     for f in files[:200]
                 ],
             }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{unit_id}/star")
+async def star_unit(unit_id: int):
+    """收藏资源单元。"""
+    try:
+        with DatabaseManager.session() as session:
+            u = q.get_unit_by_id(session, unit_id)
+            if not u:
+                raise HTTPException(status_code=404, detail=f"单元不存在: {unit_id}")
+            q.set_unit_starred(session, unit_id, True)
+        return {"success": True, "starred": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{unit_id}/unstar")
+async def unstar_unit(unit_id: int):
+    """取消收藏资源单元。"""
+    try:
+        with DatabaseManager.session() as session:
+            u = q.get_unit_by_id(session, unit_id)
+            if not u:
+                raise HTTPException(status_code=404, detail=f"单元不存在: {unit_id}")
+            q.set_unit_starred(session, unit_id, False)
+        return {"success": True, "starred": False}
     except HTTPException:
         raise
     except Exception as e:

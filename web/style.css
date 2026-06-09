@@ -808,6 +808,50 @@ body {
   .feed-grid { grid-template-columns: repeat(5, 1fr); }
 }
 
+/* ========== Bottom Sheet Menu ========== */
+.sheet-overlay {
+  position: fixed; inset: 0; z-index: 300;
+  background: rgba(0,0,0,.4);
+  animation: fadeIn .2s ease;
+}
+.sheet-panel {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  z-index: 301; background: var(--bg-elevated);
+  border-radius: 16px 16px 0 0;
+  padding: var(--space-6) var(--space-6) calc(var(--space-6) + var(--safe-bottom));
+  animation: slideUp .25s cubic-bezier(.25, .46, .45, .94);
+}
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+.sheet-handle {
+  width: 36px; height: 4px; background: var(--border-light);
+  border-radius: 2px; margin: 0 auto var(--space-6);
+}
+.sheet-item {
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: var(--space-4) var(--space-4);
+  border-radius: var(--radius-md);
+  font-size: 15px; font-weight: 500; cursor: pointer;
+  transition: background .15s; color: var(--text-primary);
+  background: none; border: none; width: 100%; text-align: left;
+}
+.sheet-item:hover, .sheet-item:active { background: var(--bg-card-hover); }
+.sheet-item .mdi { font-size: 22px; width: 28px; text-align: center; }
+.sheet-item.danger { color: var(--red); }
+.sheet-cancel {
+  margin-top: var(--space-4); border-top: 1px solid var(--border);
+  padding-top: var(--space-4);
+}
+
+/* Anti-browser long-press for interactive elements */
+.unit-card, .feed-item, .card, .sheet-item, .tab-item {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
