@@ -51,27 +51,55 @@ QMenu::separator {
     margin: 4px 12px;
 }
 
-/* ---- 工具栏 ---- */
-QToolBar {
-    background-color: #181825;
-    border-bottom: 1px solid #313244;
-    padding: 6px 10px;
-    spacing: 8px;
-}
+/* ---- 按钮 ---- */
 QPushButton {
     background-color: #313244;
     color: #cdd6f4;
     border: none;
-    border-radius: 6px;
-    padding: 6px 14px;
+    border-radius: 8px;
+    padding: 7px 16px;
     font-size: 12px;
     font-weight: 500;
+    transition: background-color 0.15s, transform 0.1s;
 }
 QPushButton:hover {
     background-color: #45475a;
 }
 QPushButton:pressed, QPushButton:checked {
     background-color: #585b70;
+}
+QPushButton:disabled {
+    background-color: #252538;
+    color: #585b70;
+}
+
+/* ---- 选项卡标签（设置对话框等） ---- */
+QTabWidget::pane {
+    border: 1px solid #313244;
+    border-radius: 8px;
+    background-color: #1e1e2e;
+}
+QTabBar::tab {
+    background-color: #181825;
+    color: #a6adc8;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 18px;
+    margin: 4px 2px;
+    font-size: 13px;
+    font-weight: 500;
+}
+QTabBar::tab:selected {
+    background-color: #313244;
+    color: #f0f0f4;
+    font-weight: 600;
+}
+QTabBar::tab:hover:!selected {
+    background-color: #252538;
+    color: #cdd6f4;
+}
+QTabBar::tab:disabled {
+    color: #585b70;
 }
 
 /* ---- 输入框 ---- */
@@ -174,23 +202,28 @@ QTreeView QHeaderView::section:hover {
     background-color: #252538;
 }
 
-/* ---- 列表视图（右侧面板） ---- */
+/* ---- 列表视图（右侧面板缩略图网格） ---- */
 QListView {
     background-color: #1e1e2e;
     color: #cdd6f4;
     border: none;
     outline: none;
+    padding: 8px;
 }
 QListView::item {
-    background-color: transparent;
-    border-radius: 6px;
+    background-color: #1c1c26;
+    border: 1px solid #252538;
+    border-radius: 10px;
     padding: 4px;
+    margin: 2px;
 }
 QListView::item:selected {
     background-color: rgba(129, 140, 248, 0.15);
+    border-color: #818cf8;
 }
 QListView::item:hover {
     background-color: #252538;
+    border-color: #313244;
 }
 
 /* ---- 分割器 ---- */
