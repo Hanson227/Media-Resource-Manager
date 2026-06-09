@@ -1,13 +1,17 @@
 # 影视资源管理器 —— Python 依赖清单
 # 安装方式: pip install -r requirements.txt
+#
+# 打包说明：
+#   PyInstaller 打包后约 180-220 MB（含 Python 运行时）
+#   使用 opencv-python-headless 节省 ~30 MB（无 GUI 组件）
+#   pHash/dHash 纯 numpy 实现，无需 scipy/imagehash（节省 ~130 MB）
 
 # GUI 框架
 PySide6>=6.5.0
 
 # 图像处理
 Pillow>=10.0.0
-opencv-python>=4.8.0
-imagehash>=4.3.0
+opencv-python-headless>=4.8.0
 
 # 数值计算
 numpy>=1.24.0
@@ -35,5 +39,5 @@ send2trash>=1.8.0
 # HEIC/HEIF 图片支持
 pillow-heif>=0.15.0
 
-# RAW 图片格式支持
+# RAW 图片格式支持（可选，~2 MB）
 rawpy>=0.21.0

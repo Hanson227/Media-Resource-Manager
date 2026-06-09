@@ -4,6 +4,7 @@
 
 提供可插拔的哈希算法框架，通过注册机制支持
 MD5、感知哈希（pHash）、差异哈希（dHash）等算法。
+所有算法使用纯 numpy/Pillow 实现，无需 scipy/imagehash 依赖。
 """
 
 import hashlib
@@ -11,7 +12,7 @@ import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-import imagehash
+import numpy as np
 from PIL import Image
 
 from app.registry.base import Registry
@@ -98,6 +99,41 @@ class HashAlgorithmRegistry(Registry[str, HashAlgorithm]):
 
 
 # ============================================================
+# 纯 numpy 工具函数
+# ============================================================
+
+# Pre-compute DCT matrices up to size 64 (cached)
+_DCT_MATRICES: dict[int, np.ndarray] = {}
+
+
+def _get_dct_matrix(N: int) -> np.ndarray:
+    """返回 N×N DCT-II 变换矩阵（缓存复用）。"""
+    if N not in _DCT_MATRICES:
+        k = np.arange(N, dtype=np.float64)
+        n = np.arange(N, dtype=np.float64)
+        _DCT_MATRICES[N] = np.cos(np.pi * k[:, None] * (2 * n + 1) / (2 * N))
+    return _DCT_MATRICES[N]
+
+
+def _bits_to_hex(bits: np.ndarray) -> str:
+    """将布尔数组转为十六进制字符串（兼容 imagehash 格式）。"""
+    # bits: flat 1-D bool array, length = hash_size * hash_size
+    # 转为整数再 hex
+    val = 0
+    for b in bits:
+        val = (val << 1) | int(b)
+    return hex(val)[2:].zfill(len(bits) // 4)
+
+
+def _hamming_distance(hex_a: str, hex_b: str) -> int:
+    """计算两个十六进制哈希字符串的汉明距离。"""
+    try:
+        return bin(int(hex_a, 16) ^ int(hex_b, 16)).count("1")
+    except Exception:
+        return 999
+
+
+# ============================================================
 # 具体算法实现
 # ============================================================
 
@@ -111,14 +147,7 @@ class MD5Hash(HashAlgorithm):
     label = "MD5"
 
     def compute(self, file_path: Path) -> str:
-        """计算文件的 MD5 哈希值。
-
-        参数:
-            file_path: 文件路径。
-
-        返回:
-            32 位十六进制 MD5 字符串。
-        """
+        """计算文件的 MD5 哈希值。"""
         md5 = hashlib.md5()
         try:
             with open(file_path, "rb") as f:
@@ -138,9 +167,9 @@ class MD5Hash(HashAlgorithm):
 
 
 class PHash(HashAlgorithm):
-    """感知哈希（pHash）—— 基于频率域的图像相似度算法。
+    """感知哈希（pHash）—— 基于频率域（DCT）的图像相似度算法。
 
-    使用 imagehash 库实现，对图片的缩放、旋转、亮度调整具有鲁棒性。
+    纯 numpy 实现，无需 scipy。
     """
 
     name = "phash"
@@ -153,43 +182,61 @@ class PHash(HashAlgorithm):
             hash_size: 哈希尺寸，值越大越精确但计算越慢。
         """
         self._hash_size = hash_size
+        self._highfreq_factor = 4  # 高分辨率因子
 
     def compute(self, file_path: Path) -> str:
         """计算图片的感知哈希值。
 
-        参数:
-            file_path: 图片文件路径。
-
-        返回:
-            pHash 十六进制字符串。
+        DCT-based pHash:
+        1. 转灰度 + 缩放到 hash_size*4 × hash_size*4
+        2. 计算 2D DCT-II
+        3. 取左上角 hash_size×hash_size 低频系数
+        4. 与中位数比较 → 二进制哈希
         """
         try:
-            img = Image.open(file_path)
-            img = img.convert("L")  # 转为灰度图
-            phash = imagehash.phash(img, hash_size=self._hash_size)
-            return str(phash)
+            img = Image.open(file_path).convert("L")
+            size = self._hash_size * self._highfreq_factor
+            img = img.resize((size, size), Image.Resampling.LANCZOS)
+            pixels = np.array(img, dtype=np.float64)
+
+            # 2D DCT-II via separable transform
+            T = _get_dct_matrix(size)
+            dct = T @ pixels @ T.T
+
+            # 取左上角低频
+            dct_low = dct[:self._hash_size, :self._hash_size]
+
+            # 与中位数比较
+            median = np.median(dct_low)
+            bits = (dct_low > median).flatten()
+
+            return _bits_to_hex(bits)
         except Exception as e:
             logger.error(f"pHash 计算失败: {file_path} - {e}")
             raise
 
-    def distance(self, hash_a: str, hash_b: str) -> int:
-        """计算汉明距离。
+    def compute_from_image(self, img: Image.Image) -> str:
+        """从 PIL Image 对象直接计算 pHash（用于视频帧）。"""
+        img = img.convert("L")
+        size = self._hash_size * self._highfreq_factor
+        img = img.resize((size, size), Image.Resampling.LANCZOS)
+        pixels = np.array(img, dtype=np.float64)
+        T = _get_dct_matrix(size)
+        dct = T @ pixels @ T.T
+        dct_low = dct[:self._hash_size, :self._hash_size]
+        median = np.median(dct_low)
+        bits = (dct_low > median).flatten()
+        return _bits_to_hex(bits)
 
-        将十六进制字符串转为 imagehash 对象后比较。
-        """
-        try:
-            a = imagehash.hex_to_hash(hash_a)
-            b = imagehash.hex_to_hash(hash_b)
-            return a - b  # imagehash 重载了减号为汉明距离
-        except Exception:
-            # 回退：计算字符串差异
-            return bin(int(hash_a, 16) ^ int(hash_b, 16)).count("1")
+    def distance(self, hash_a: str, hash_b: str) -> int:
+        """计算汉明距离。"""
+        return _hamming_distance(hash_a, hash_b)
 
 
 class DHash(HashAlgorithm):
-    """差异哈希（dHash）—— 基于像素梯度方向的图像相似度算法。
+    """差异哈希（dHash）—— 基于像素水平梯度。
 
-    计算相邻像素之间的差异，对亮度变化不敏感。
+    纯 numpy 实现，无需 imagehash。
     """
 
     name = "dhash"
@@ -206,29 +253,28 @@ class DHash(HashAlgorithm):
     def compute(self, file_path: Path) -> str:
         """计算图片的差异哈希值。
 
-        参数:
-            file_path: 图片文件路径。
-
-        返回:
-            dHash 十六进制字符串。
+        1. 转灰度 + 缩放到 (hash_size+1) × hash_size
+        2. 逐行比较相邻像素：左边 > 右边 → 1, 否则 → 0
+        3. 得到 hash_size×hash_size 位
         """
         try:
-            img = Image.open(file_path)
-            img = img.convert("L")
-            dhash = imagehash.dhash(img, hash_size=self._hash_size)
-            return str(dhash)
+            img = Image.open(file_path).convert("L")
+            img = img.resize((self._hash_size + 1, self._hash_size),
+                             Image.Resampling.LANCZOS)
+            pixels = np.array(img, dtype=np.float64)
+
+            # 水平梯度：比较相邻列
+            diff = pixels[:, 1:] > pixels[:, :-1]
+            bits = diff.flatten()
+
+            return _bits_to_hex(bits)
         except Exception as e:
             logger.error(f"dHash 计算失败: {file_path} - {e}")
             raise
 
     def distance(self, hash_a: str, hash_b: str) -> int:
         """计算汉明距离。"""
-        try:
-            a = imagehash.hex_to_hash(hash_a)
-            b = imagehash.hex_to_hash(hash_b)
-            return a - b
-        except Exception:
-            return bin(int(hash_a, 16) ^ int(hash_b, 16)).count("1")
+        return _hamming_distance(hash_a, hash_b)
 
 
 # ============================================================

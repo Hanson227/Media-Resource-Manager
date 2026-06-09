@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-import imagehash
 import numpy as np
 from PIL import Image
 
@@ -319,7 +318,7 @@ class HashEngine:
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     pil_img = Image.fromarray(rgb)
                     try:
-                        ph = str(imagehash.phash(pil_img))
+                        ph = phash_algo.compute_from_image(pil_img)
                         frames.append((ts_ms, ph))
                     except Exception as e:
                         logger.debug(f"帧哈希计算失败: {video_path} @ {ts_ms}ms - {e}")
