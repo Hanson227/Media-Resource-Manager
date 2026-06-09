@@ -16,10 +16,10 @@ Media/
 ├── desktop/             # Windows 桌面应用（Python/PySide6）
 │   ├── main.py
 │   ├── app/
+│   ├── models/          # OpenCV DNN 人脸模型文件
 │   ├── tests/
-│   └── data/
+│   └── config.json
 ├── web/                 # Web 前端 SPA（Vue 3）
-├── docs/                # 设计文档和计划
 ├── API.md               # HTTP API 契约
 ├── README.md
 └── .gitignore
@@ -28,11 +28,13 @@ Media/
 ## 功能
 
 - **文件夹级资源管理** — 自动扫描本地文件夹，将包含媒体文件的目录识别为"资源单元"，支持嵌套场景
-- **多策略文件查重** — 逐层匹配：MD5（精确）→ pHash（感知）→ dHash（差异）→ 人脸识别，基于杰卡德指数判定单元级重复
-- **缩略图预览** — 图像/视频自动生成缩略图，支持网格浏览
+- **一键智能查重** — 自动计算哈希+人脸特征，多策略匹配：人脸识别 → MD5（精确）→ pHash（感知）→ dHash（差异），基于杰卡德指数判定单元级重复
+- **人脸识别** — Caffe SSD 检测 + OpenFace 128 维特征提取，同一人物在不同照片中也能识别
+- **缩略图预览** — 图像/视频自动生成缩略图，支持网格浏览、空格键快速预览
 - **实时文件监控** — watchdog 监测文件变更，支持去抖合并
-- **Web 前端** — Vue 3 SPA，支持手机/平板/桌面端响应式布局，左右滑动预览、视频播放
-- **局域网 API** — 内置 FastAPI 服务（默认 `0.0.0.0:19527`），可通过 HTTP 查询媒体库数据
+- **Web 前端** — Vue 3 SPA，支持手机/平板/桌面端响应式布局，左右滑动预览、视频播放、手势快进快退
+- **Web 访问密码** — 桌面端设置 4 位 PIN，手机浏览器输入后进入
+- **局域网 API** — 内置 FastAPI 服务（默认 `0.0.0.0:19527`），含认证端点
 - **深色主题** — Slate-Indigo 设计体系，全局 QSS + QPalette 统一渲染
 
 ## 桌面应用架构
@@ -44,7 +46,7 @@ desktop/app/
   core/                  # 纯业务逻辑（无 UI/DB 依赖）
     scanner.py           #   递归扫描，自动识别资源单元
     hash_engine.py       #   协调 MD5/pHash/dHash 计算
-    dedup_engine.py      #   多策略匹配 + 杰卡德评分
+    dedup_engine.py      #   多策略匹配（人脸→MD5→pHash→dHash）+ 前缀桶优化
     thumbnail_generator.py  # Pillow(图片) + OpenCV(视频)，磁盘缓存
     watcher.py           #   watchdog 实时监控 + 去抖
   db/
@@ -68,7 +70,7 @@ desktop/app/
   services/              # 消息中心、清理服务
   utils/                 # 枚举常量、文件辅助函数
 desktop/tests/
-  test_flow.py           # 端到端测试（369 项）
+  test_flow.py           # 后端 + API 端到端测试（369 项）
   test_web_playwright.py # Web 前端浏览器测试（32 项）
 ```
 
@@ -105,8 +107,9 @@ SQLite + WAL 模式，10 张表：
 ### 查重流程
 
 ```
-扫描 → 发现资源单元 → 计算 MD5/pHash/dHash
-  → 逐对单元进行多策略贪婪匹配（每个文件 B 最多匹配一次）
+点击 [查重] → 自动检测未索引文件 → 有则先计算 MD5/pHash/dHash/人脸
+  → 逐对单元进行多策略贪婪匹配：人脸 → MD5 → pHash → dHash
+  → pHash/dHash 使用 8-bit 前缀桶索引加速
   → 杰卡德相似度 = |匹配| / (|A| + |B| - |匹配|)
   → ≥ 阈值（默认 0.80）→ 创建 dedup_alert 消息
 ```
@@ -160,7 +163,9 @@ PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
   "jaccard_threshold": 0.80,
   "thumbnail_max_size": 256,
   "watcher_enabled": true,
-  "watcher_debounce_ms": 2000
+  "watcher_debounce_ms": 2000,
+  "web_pin": "",
+  "face_detection_enabled": true
 }
 ```
 
@@ -171,6 +176,8 @@ PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
 | 方法 | 路径 | 说明 |
 |--------|------|-------------|
 | GET | `/api/health` | 健康检查 |
+| GET | `/api/auth/status` | 查询是否启用访问密码 |
+| POST | `/api/auth/verify` | 验证 Web 访问密码 |
 | GET | `/api/units` | 列出资源单元 |
 | GET | `/api/units/{id}` | 单元详情 |
 | GET | `/api/units/{id}/files` | 单元内文件列表 |
@@ -204,9 +211,9 @@ Web 前端是基于 Vue 3 的 SPA，通过桌面端内置的 FastAPI 服务器�
 
 ## 已知限制
 
-- **人脸检测** — 模型文件（OpenCV DNN）需要用户自行下载，目前返回空列表
-- **搜索/筛选** — 网格视图中的搜索和媒体类型筛选为基础实现，接口已预留
-- **无用户认证** — API 在局域网内完全开放
+- **人脸检测性能** — CPU 上每张图 ~200-300ms，大量文件时请耐心等待索引完成；可考虑 GPU 加速
+- **Web 视频预览** — 依赖浏览器原生解码器，HEVC/Dolby Vision 等编码可能不兼容
+- **桌面端视频预览** — QMediaPlayer 依赖系统解码器，部分编码（HEVC/AV1）可能需额外安装
 - **非视频类型** — RAW 格式依赖 `rawpy`、HEIC 格式依赖 `pillow-heif`
 
 ## 开发

@@ -11,9 +11,9 @@ Media/                          # Git root — monorepo
 │   ├── main.py                 # Entry point
 │   ├── app/                    # Python source
 │   ├── tests/
-│   └── ...
-├── web/                        # Web 前端 SPA (Vue 3)
-├── docs/                       # 设计文档和计划
+│   ├── models/                 # OpenCV DNN 人脸模型文件
+│   └── config.json             # 运行时配置
+├── web/                        # Web 前端 SPA (Vue 3, 单文件)
 ├── API.md                      # HTTP API 契约
 ├── README.md
 └── CLAUDE.md
@@ -129,11 +129,13 @@ desktop/app/
 
 The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "resource unit" if it directly contains media files. If a parent also contains media files directly, both become units. Sub-folders without media files don't create separate units.
 
-## Dedup Pipeline
+## Dedup Pipeline (一键查重)
 
-1. Scan → discover resource units and their files
-2. Hash → compute MD5 (exact), pHash (perceptual), dHash (difference) for each file
-3. Compare → for each unit pair, run multi-strategy greedy matching: MD5 first, then pHash, then dHash (each file B matched at most once)
+1. 点击「查重」→ 自动检测未索引文件 → 有则先计算哈希+人脸
+2. Hash → compute MD5 (exact), pHash (perceptual), dHash (difference), face vectors (128-d)
+3. Compare → for each unit pair, run multi-strategy greedy matching: face → MD5 → pHash → dHash
+   - pHash/dHash 使用 8-bit 前缀桶索引优化，复杂度 O(|A|*|B|/64)
+   - 文件数比例 ≥ 20x 的单元对自动跳过
 4. Score → Jaccard similarity = matches / (|A| + |B| - matches); threshold default 0.80
 5. Alert → create `dedup_alert` messages and DedupCompareDialog for user resolution
 
@@ -143,12 +145,13 @@ SQLite with WAL mode + foreign keys enabled. Single-file at `desktop/data/media_
 
 Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desktop/config.json`, loaded into a frozen `AppConfig` dataclass at startup.
 
-## Limitations / Work-in-Progress
+## Current State
 
-- Face detection (`desktop/app/core/hash_engine.py:detect_faces`) is stubbed out — returns `[]`, waiting for OpenCV DNN model files
-- Search and media-type filtering in the grid are placeholder slots
-- No user authentication (API is open on LAN)
-- Config is mutable at runtime via settings dialog but frozen everywhere else
+- **Face detection** — 模型文件已就绪 (`desktop/models/`): Caffe SSD + OpenFace nn4, 一键查重自动运行
+- **Web PIN auth** — 桌面端设置 4 位密码，Web 端输入验证后进入
+- **API auth** — `/api/auth/status` + `/api/auth/verify` 端点
+- **One-click dedup** — 查重按钮自动衔接哈希索引 → 查重，无需手动分步
+- **Config** — 设置对话框支持 web_pin、缩略图、API 等全部字段
 
 
 ## Bug Fix 纪律
