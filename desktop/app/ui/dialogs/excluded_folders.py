@@ -38,7 +38,7 @@ class ExcludedFoldersDialog(QDialog):
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        header = QLabel("以下文件夹已被排除，不会参与扫描和查重：")
+        header = QLabel("以下文件夹已被排除，不会参与扫描和查重：\n（路径已删除的项显示为灰色）")
         header.setStyleSheet(f"color: {SUBTEXT_0}; padding: 4px;")
         layout.addWidget(header)
 
@@ -56,6 +56,10 @@ class ExcludedFoldersDialog(QDialog):
         self._restore_btn.setToolTip("将选中的文件夹恢复为活跃状态")
         self._restore_btn.clicked.connect(self._on_restore)
         btn_layout.addWidget(self._restore_btn)
+        self._clean_btn = QPushButton("清理无效记录")
+        self._clean_btn.setToolTip("删除所有路径已不存在的排除记录")
+        self._clean_btn.clicked.connect(self._on_clean_invalid)
+        btn_layout.addWidget(self._clean_btn)
         btn_layout.addStretch()
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(self.close)
@@ -72,14 +76,51 @@ class ExcludedFoldersDialog(QDialog):
                     empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
                     self._list_widget.addItem(empty_item)
                     self._restore_btn.setEnabled(False)
+                    self._clean_btn.setEnabled(False)
                     return
+                has_invalid = False
                 for unit in units:
-                    item = QListWidgetItem(f"{unit.name}\n{unit.path}")
+                    path_exists = Path(unit.path).is_dir()
+                    label = f"{unit.name}\n{unit.path}"
+                    if not path_exists:
+                        label += "\n[路径已不存在]"
+                        has_invalid = True
+                    item = QListWidgetItem(label)
                     item.setData(Qt.ItemDataRole.UserRole, unit.id)
+                    if not path_exists:
+                        from PySide6.QtGui import QColor
+                        item.setForeground(QColor("#6c7086"))  # 灰色标记
                     self._list_widget.addItem(item)
                 self._restore_btn.setEnabled(True)
+                self._clean_btn.setEnabled(has_invalid)
         except Exception as e:
             logger.error(f"加载已排除列表失败: {e}")
+
+    @Slot()
+    def _on_clean_invalid(self) -> None:
+        """清理所有路径已不存在的排除记录。"""
+        try:
+            with DatabaseManager.session() as session:
+                units = q.get_excluded_units(session)
+                invalid = [u for u in units if not Path(u.path).is_dir()]
+                if not invalid:
+                    QMessageBox.information(self, "清理完成", "没有无效记录需要清理。")
+                    return
+                reply = QMessageBox.question(
+                    self, "确认清理",
+                    f"将删除 {len(invalid)} 条路径已不存在的排除记录。\n\n确定继续？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+                for unit in invalid:
+                    q.delete_resource_unit(session, unit.id)
+                    logger.info(f"已清理无效排除记录: {unit.name} (id={unit.id})")
+            self.excluded_changed.emit()
+            self._load_excluded()
+        except Exception as e:
+            QMessageBox.critical(self, "清理失败", str(e))
 
     @Slot()
     def _on_restore(self) -> None:
