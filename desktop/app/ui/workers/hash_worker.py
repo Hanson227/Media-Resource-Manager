@@ -207,6 +207,11 @@ class HashWorker(QThread):
                                             face_index=fv.face_index,
                                             bbox=fv.bbox,
                                         )
+                                logger.debug(
+                                    f"人脸检测: {fpath.name} → {len(face_vectors)} 张人脸"
+                                )
+                            else:
+                                logger.debug(f"人脸检测: {fpath.name} → 未检测到人脸")
                         except BaseException as e:
                             logger.warning(f"人脸检测跳过 [{fpath.name}]: {type(e).__name__}: {e}")
 
