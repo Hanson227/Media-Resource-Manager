@@ -1230,6 +1230,10 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_settings_saved(self, new_config: AppConfig) -> None:
         self._config = new_config
+        # 同步更新 API 服务器的配置（否则 PIN 等设置不生效）
+        from app.api.server import _app
+        if _app is not None:
+            _app.state.config = new_config
         self._status_bar.set_status("设置已保存")
 
     def _update_message_badge(self) -> None:
