@@ -1,13 +1,18 @@
 # ============ Python (desktop) ============
 
-# ai
-.superpower/
+# Claude Code internal state
+.superpowers/
+.claude/
+.scripts/
 
 # Bytecode
 __pycache__/
 *.py[cod]
 *$py.class
 *.pyo
+
+# Test cache
+.pytest_cache/
 
 # Virtual env
 .venv/
@@ -31,14 +36,15 @@ build/
 # Thumbnail cache
 .thumbnails/
 
-# Runtime data
+# Runtime data & test artifacts
 desktop/data/
 data/
 
+# Docs (managed separately)
+docs/
+
 # Logs
 *.log
-.claude/logs/
-desktop/.claude/
 
 # IDE
 .idea/
@@ -50,5 +56,3 @@ desktop/.claude/
 Thumbs.db
 .DS_Store
 $RECYCLE.BIN/
-
-.scripts/
