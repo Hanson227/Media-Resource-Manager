@@ -111,11 +111,11 @@ const UnitsPage = {
             </div>
             <div class="unit-grid">
               <div v-for="u in sortedUnits(group.units)" :key="u.id" class="unit-card"
-                @click="openUnit(u.id)"
-                @contextmenu.prevent
-                @touchstart.prevent="onCardPress($event, u)"
-                @touchend="onCardRelease($event, u)"
-                @touchmove="onCardMove">
+                @click="openUnit(u.id)">
+                <button class="card-action-btn" @click.stop="$root.showSheet(u.name, [
+                  { label: u.is_starred ? '取消收藏' : '收藏', icon: u.is_starred ? 'mdi-star-off' : 'mdi-star-outline',
+                    action: () => _toggleStar(u) }
+                ])"><span class="mdi mdi-dots-vertical"></span></button>
                 <div class="cover">
                   <img v-if="u.cover_file_id" :src="coverUrl(u.cover_file_id)" loading="lazy"
                     @load="onCoverLoad(u.id)" @error="onCoverError(u.id)">
@@ -172,22 +172,6 @@ const UnitsPage = {
       const d = new Date(iso);
       return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
     },
-    // ---- Long-press context menu ----
-    onCardPress(e, unit) {
-      this._pressTarget = unit;
-      this._pressMoved = false;
-      this._pressTimer = setTimeout(() => {
-        if (!this._pressMoved) {
-          this.$root.showSheet(unit.name, [
-            { label: unit.is_starred ? '取消收藏' : '收藏',
-              icon: unit.is_starred ? 'mdi-star-off' : 'mdi-star-outline',
-              action: () => this._toggleStar(unit) },
-          ]);
-        }
-      }, 500);
-    },
-    onCardRelease() { clearTimeout(this._pressTimer); },
-    onCardMove() { this._pressMoved = true; clearTimeout(this._pressTimer); },
     async _toggleStar(unit) {
       try {
         const ep = unit.is_starred ? 'unstar' : 'star';
@@ -357,11 +341,11 @@ const UnitFilesPage = {
         </div>
         <div class="feed-grid">
           <div v-for="f in sortedFiles" :key="f.id" class="feed-item"
-            @click="preview(f)"
-            @contextmenu.prevent
-            @touchstart.prevent="onCardPress($event, f)"
-            @touchend="onCardRelease($event, f)"
-            @touchmove="onCardMove">
+            @click="preview(f)">
+            <button class="card-action-btn" @click.stop="$root.showSheet(f.filename, [
+              { label: '删除文件', icon: 'mdi-delete-outline', danger: true,
+                action: () => _deleteFile(f) }
+            ])"><span class="mdi mdi-dots-vertical"></span></button>
             <div class="thumb-wrap">
               <img :src="thumbUrl(f.id)" loading="lazy"
                 @load="onImgLoad(f.id)" @error="onImgError($event, f.id)"
@@ -424,21 +408,6 @@ const UnitFilesPage = {
     },
   },
   methods: {
-    // ---- Long-press context menu ----
-    onCardPress(e, file) {
-      this._pressTarget = file;
-      this._pressMoved = false;
-      this._pressTimer = setTimeout(() => {
-        if (!this._pressMoved) {
-          this.$root.showSheet(file.filename, [
-            { label: '删除文件', icon: 'mdi-delete-outline', danger: true,
-              action: () => this._deleteFile(file) },
-          ]);
-        }
-      }, 500);
-    },
-    onCardRelease() { clearTimeout(this._pressTimer); },
-    onCardMove() { this._pressMoved = true; clearTimeout(this._pressTimer); },
     async _deleteFile(file) {
       if (!confirm('确定删除「' + file.filename + '」？')) return;
       try {

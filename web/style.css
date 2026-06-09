@@ -845,11 +845,21 @@ body {
   padding-top: var(--space-4);
 }
 
-/* Anti-browser long-press for interactive elements */
-.unit-card, .feed-item, .card, .sheet-item, .tab-item {
+/* ========== Card Action Button (⋯ menu) ========== */
+.card-action-btn {
+  position: absolute; top: 4px; right: 4px; z-index: 5;
+  width: 30px; height: 30px; border-radius: 50%;
+  background: rgba(0,0,0,.4); border: none; color: rgba(255,255,255,.7);
+  font-size: 18px; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; transition: background .15s;
+  -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+}
+.card-action-btn:hover, .card-action-btn:active { background: rgba(0,0,0,.6); color: #fff; }
+
+/* Image inside card has no context menu */
+.unit-card img, .feed-item img, .feed-item video {
   -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
+  pointer-events: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
