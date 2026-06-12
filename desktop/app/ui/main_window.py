@@ -475,7 +475,7 @@ class MainWindow(QMainWindow):
             roots = model.get_roots()
             for row in range(model.rowCount()):
                 root_idx = model.index(row, 0)
-                root = roots[row] if row < len(roots) else None
+                root = roots[row]
                 if root and root.node_id != new_node.library_root_id:
                     self._tree_view.collapse(root_idx)
 
@@ -612,7 +612,7 @@ class MainWindow(QMainWindow):
         roots = model.get_roots()
         for row in range(model.rowCount()):
             root_idx = model.index(row, 0)
-            root = roots[row] if row < len(roots) else None
+            root = roots[row]
             if root and root.node_id == root_id:
                 target_root_idx = root_idx
                 target_unit_ids = model.get_selected_units(root_idx)
@@ -663,7 +663,7 @@ class MainWindow(QMainWindow):
         roots = model.get_roots()
         for row in range(model.rowCount()):
             root_idx = model.index(row, 0)
-            root = roots[row] if row < len(roots) else None
+            root = roots[row]
             root_unit_ids = set(model.get_selected_units(root_idx))
             if root_unit_ids == target_set or root_unit_ids.issuperset(target_set):
                 self._tree_view.expand(root_idx)
