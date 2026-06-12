@@ -514,7 +514,7 @@ class FolderTreeView(QTreeView):
         model = self._model
         keyword = keyword.strip().lower()
         self.expandAll()
-        for root_row, root in enumerate(model._roots):
+        for root_row, root in enumerate(model.get_roots()):
             root_idx = model.index(root_row, 0)
             any_visible = False
             for child_row, child in enumerate(root.children):
@@ -530,7 +530,7 @@ class FolderTreeView(QTreeView):
     def find_first_visible_unit(self) -> Optional[int]:
         """返回第一个可见的单元 node_id，没有则返回 None。"""
         model = self._model
-        for root_row, root in enumerate(model._roots):
+        for root_row, root in enumerate(model.get_roots()):
             root_idx = model.index(root_row, 0)
             for child_row, child in enumerate(root.children):
                 if not self.isRowHidden(child_row, root_idx):
@@ -540,7 +540,7 @@ class FolderTreeView(QTreeView):
     def select_unit(self, unit_id: int) -> None:
         """选中指定单元 ID 对应的树节点（用于右侧面板联动）。"""
         model = self._model
-        for root_row, root in enumerate(model._roots):
+        for root_row, root in enumerate(model.get_roots()):
             for child_row, child in enumerate(root.children):
                 if child.node_id == unit_id:
                     root_idx = model.index(root_row, 0)
@@ -556,7 +556,7 @@ class FolderTreeView(QTreeView):
         if sel:
             sel.blockSignals(True)
         try:
-            for root_row, root in enumerate(model._roots):
+            for root_row, root in enumerate(model.get_roots()):
                 for child_row, child in enumerate(root.children):
                     if child.node_id == unit_id:
                         root_idx = model.index(root_row, 0)
@@ -646,7 +646,7 @@ class FolderTreeView(QTreeView):
         self._syncing_file = True
         try:
             model = self._model
-            for root_row, root in enumerate(model._roots):
+            for root_row, root in enumerate(model.get_roots()):
                 root_idx = model.index(root_row, 0)
                 if not root_idx.isValid():
                     continue
