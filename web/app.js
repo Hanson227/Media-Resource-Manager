@@ -444,6 +444,7 @@ const UnitFilesPage = {
     preview(file) {
       const main = document.querySelector('.app-main');
       if (main) _fileScrollTop = main.scrollTop;
+      _fileScrollAnchor = file.id;  // 锚定文件 ID，优先于像素值恢复
       // 使用排序后的列表，确保预览中左右滑动顺序与文件夹排序一致
       const sorted = this.sortedFiles;
       const idx = sorted.indexOf(file);
@@ -1316,6 +1317,9 @@ function _restoreFileScroll() {
         const m = src.match(/\/files\/(\d+)\/thumbnail/);
         if (m && parseInt(m[1]) === _fileScrollAnchor) {
           item.scrollIntoView({ block: 'start' });
+          // 校正 header 遮挡偏移
+          const header = document.querySelector('.feed-header');
+          if (header) main.scrollTop -= header.offsetHeight + 8;
           _fileScrollAnchor = null;
           _fileScrollTop = 0;
           return;
@@ -1323,12 +1327,19 @@ function _restoreFileScroll() {
       }
     }
   }
-  // 降级：像素值恢复 + requestAnimationFrame 微调
+  // 降级：像素值恢复 + 多次重试微调（图片懒加载可能导致布局偏移）
   if (_fileScrollTop > 0) {
-    main.scrollTop = _fileScrollTop;
-    requestAnimationFrame(() => {
-      if (main.scrollTop < _fileScrollTop) main.scrollTop = _fileScrollTop;
-    });
+    const target = _fileScrollTop;
+    main.scrollTop = target;
+    let retries = 0;
+    const adjust = () => {
+      if (main.scrollTop < target && retries < 5) {
+        main.scrollTop = target;
+        retries++;
+        requestAnimationFrame(adjust);
+      }
+    };
+    requestAnimationFrame(adjust);
     _fileScrollTop = 0;
   }
   _fileScrollAnchor = null;
