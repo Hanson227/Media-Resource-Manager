@@ -127,6 +127,7 @@ class ThumbnailGridModel(QAbstractListModel):
         self._files: list[dict] = []
         self._full_files: list[dict] = []  # 未过滤的完整列表
         self._thumb_cache: dict[int, QPixmap] = {}
+        self._max_cache_size = 500  # 缩略图缓存上限
         self._search_text: str = ""
         self._media_filter: str = ""
         self._sort_field: str = ""     # ""=默认文件名顺序, "name"=名称, "size"=大小
@@ -362,6 +363,12 @@ class FolderCardModel(QAbstractListModel):
         self.endResetModel()
 
     def add_thumb(self, row: int, pixmap: QPixmap) -> None:
+        # 缓存淘汰：超过上限时移除最旧的条目
+        if len(self._thumb_cache) >= self._max_cache_size:
+            oldest_keys = list(self._thumb_cache.keys())[:self._max_cache_size // 4]
+            for k in oldest_keys:
+                del self._thumb_cache[k]
+        self._thumb_cache[row] = pixmap
         self._pixmaps[row] = pixmap
         idx = self.index(row, 0)
         self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
@@ -486,7 +493,7 @@ class ThumbnailGridView(QListView):
         cache_dir = config.thumbnail_cache_dir
         self._folder_worker = FolderPreviewWorker(unit_data, cache_dir, config)
         self._folder_worker.preview_ready.connect(
-            lambda row, path: folder_model.add_thumb(row, QPixmap(path))
+            lambda row, path: self.model().add_thumb(row, QPixmap(path)) if self.model() is folder_model else None
         )
         self._folder_worker.start()
 

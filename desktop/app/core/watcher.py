@@ -156,6 +156,14 @@ class MediaFileEventHandler(FileSystemEventHandler):
             logger.error(f"文件变更回调异常: {event.path} - {e}")
 
 
+    def cancel_all_pending(self) -> None:
+        """取消所有待处理的去抖动定时器。"""
+        with self._lock:
+            for timer, _ in self._pending_events.values():
+                timer.cancel()
+            self._pending_events.clear()
+
+
 class FileWatcher:
     """文件系统监控器。
 
@@ -190,6 +198,9 @@ class FileWatcher:
         """停止文件监控。"""
         if not self._running:
             return
+        # 清理待处理的去抖动定时器
+        if isinstance(self._event_handler, MediaFileEventHandler):
+            self._event_handler.cancel_all_pending()
         self._observer.stop()
         self._observer.join(timeout=5)
         self._running = False

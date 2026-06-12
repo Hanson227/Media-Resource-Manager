@@ -323,6 +323,7 @@ class QuickLookPreviewDialog(QDialog):
         from PySide6.QtGui import QImage
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
+        qimg._numpy_ref = rgb  # 防止 numpy 数组被 GC 回收导致悬空指针
         pixmap = QPixmap.fromImage(qimg)
         scaled = pixmap.scaled(
             available, Qt.AspectRatioMode.KeepAspectRatio,

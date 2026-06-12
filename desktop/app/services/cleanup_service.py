@@ -108,10 +108,10 @@ class CleanupService:
                 send2trash.send2trash(str(file_path))
                 logger.info(f"已放入回收站: {file_path}")
             except ImportError:
-                # 回退：直接永久删除
-                logger.warning("send2trash 不可用，将执行永久删除")
-                file_path.unlink()
-                logger.info(f"已永久删除: {file_path}")
+                # send2trash 不可用时，拒绝永久删除以避免数据不可恢复丢失
+                raise RuntimeError(
+                    f"send2trash 未安装，无法安全删除文件。请安装 send2trash 或手动删除: {file_path}"
+                )
 
             # 同步删除数据库记录
             if file_id is not None:
@@ -239,8 +239,10 @@ class CleanupService:
             with DatabaseManager.session() as session:
                 cached_ids = set()
                 for f in cache_dir.iterdir():
-                    if f.suffix == ".jpg" and f.stem.isdigit():
-                        cached_ids.add(int(f.stem))
+                    if f.suffix == ".jpg" and f.stem.endswith("_thumb"):
+                        id_str = f.stem.rsplit("_thumb", 1)[0]
+                        if id_str.isdigit():
+                            cached_ids.add(int(id_str))
 
                 if not cached_ids:
                     return 0
