@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QMenu, QToolBar, QSplitter, QWidget, QVBoxLayout,
     QLabel, QMessageBox, QSystemTrayIcon, QApplication,
     QFileDialog, QPushButton, QLineEdit, QComboBox,
-    QInputDialog,
+    QInputDialog, QAbstractItemView,
 )
 
 from config import AppConfig
@@ -467,6 +467,16 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+        # ---- 折叠其他根节点（手风琴：同一时间只展开一个媒体库） ----
+        model = self._tree_view.model()
+        new_node = model.get_node_by_unit_id(unit_id)
+        if new_node:
+            for row in range(model.rowCount()):
+                root_idx = model.index(row, 0)
+                root = model._roots[row] if row < len(model._roots) else None
+                if root and root.node_id != new_node.library_root_id:
+                    self._tree_view.collapse(root_idx)
+
         # ---- 加载文件 ----
         self._current_unit_id = unit_id
         self._grid_view.load_unit(unit_id)
@@ -541,6 +551,8 @@ class MainWindow(QMainWindow):
                 if child.node_id == unit_id and child.node_type == "unit" and child.node_subtype != "file":
                     unit_idx = tree_model.index(child_row, 0, root_idx)
                     self._tree_view.expand(unit_idx)
+                    # 展开后将单元节点滚动到视口顶部，防止被大量文件子节点顶出视口
+                    self._tree_view.scrollTo(unit_idx, QAbstractItemView.ScrollHint.PositionAtTop)
                     break
         self._tree_view.setAnimated(True)
         return file_dicts

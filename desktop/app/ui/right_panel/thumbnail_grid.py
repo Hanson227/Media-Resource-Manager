@@ -424,6 +424,7 @@ class ThumbnailGridView(QListView):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self._saved_scroll = 0  # 返回文件夹卡片时恢复的滚动位置
+        self._folder_card_scroll = 0  # 文件夹卡片视图的滚动位置（进入单元前保存）
 
     # ---- 公开方法 ----
 
@@ -435,9 +436,11 @@ class ThumbnailGridView(QListView):
                            False=重置滚动到顶部（进入新单元时用）。
         """
         self._cancel_all_workers()
+        # 进入文件视图前，保存当前卡片视图的滚动位置
+        scrollbar = self.verticalScrollBar()
+        self._folder_card_scroll = scrollbar.value() if scrollbar else 0
         # 保存当前滚动位置（文件夹卡片视图的位置或文件视图的位置）
         if restore_scroll:
-            scrollbar = self.verticalScrollBar()
             self._saved_scroll = scrollbar.value() if scrollbar else 0
         else:
             self._saved_scroll = 0
@@ -478,11 +481,11 @@ class ThumbnailGridView(QListView):
 
         # 主动导航时重置滚动，面包屑返回时恢复上次位置
         if reset_scroll:
-            self._saved_scroll = 0
-        elif self._saved_scroll > 0:
+            self._folder_card_scroll = 0
+        elif self._folder_card_scroll > 0:
             from PySide6.QtCore import QTimer
             QTimer.singleShot(50, lambda: self.verticalScrollBar().setValue(
-                min(self._saved_scroll, self.verticalScrollBar().maximum())
+                min(self._folder_card_scroll, self.verticalScrollBar().maximum())
             ))
 
         ts = config.thumbnail_max_size
