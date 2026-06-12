@@ -297,6 +297,10 @@ class FolderTreeModel(QAbstractItemModel):
             return len(node.children)
         return 0
 
+    def get_roots(self) -> list:
+        """返回根节点列表的只读副本。"""
+        return list(self._roots)
+
     def columnCount(self, parent=QModelIndex()) -> int:
         return 4
 
