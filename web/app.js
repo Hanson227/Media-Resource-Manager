@@ -181,6 +181,12 @@ const UnitsPage = {
         const ep = unit.is_starred ? 'unstar' : 'star';
         await api(this.serverUrl, '/api/units/' + unit.id + '/' + ep, { method: 'POST' });
         unit.is_starred = !unit.is_starred;
+        // 强制触发 Vue 响应式更新
+        const ri = this.roots.findIndex(g => g.units.includes(unit));
+        if (ri >= 0) {
+          const ui = this.roots[ri].units.indexOf(unit);
+          if (ui >= 0) this.roots[ri].units[ui] = { ...unit };
+        }
       } catch (e) { alert('操作失败: ' + e.message); }
     },
 
