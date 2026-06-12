@@ -976,6 +976,7 @@ const PreviewPage = {
       this.filename = data.filename || '';
       this.mediaType = data.media_type || 'image';
       this.streamUrl = this.serverUrl + '/api/files/' + id + '/stream';
+      this.posterUrl = this.serverUrl + '/api/files/' + id + '/thumbnail';
       // 如果 fileIndex 没设置，从 fileList 中查找匹配
       if (this.fileIndex < 0 && this.fileList.length) {
         this.fileIndex = this.fileList.findIndex(f => f.id == id);
@@ -1201,9 +1202,13 @@ const SettingsPage = {
         <span class="label">断开连接</span>
         <span class="mdi mdi-logout" style="color:var(--red);font-size:20px"></span>
       </div>
-      <div class="setting-item" v-if="hasPin">
+      <div class="setting-item" v-if="hasPin" @click="changePin">
         <span class="label"><span class="mdi mdi-lock-outline" style="font-size:16px;margin-right:6px"></span>访问密码已启用</span>
-        <span class="value">在桌面端设置中修改</span>
+        <span class="mdi mdi-pencil-outline" style="color:var(--accent);font-size:20px"></span>
+      </div>
+      <div class="setting-item" v-else @click="changePin">
+        <span class="label"><span class="mdi mdi-lock-open-outline" style="font-size:16px;margin-right:6px"></span>设置访问密码</span>
+        <span class="mdi mdi-chevron-right"></span>
       </div>
       <div class="setting-item" @click="showAbout = !showAbout">
         <span class="label">关于</span>
@@ -1214,6 +1219,32 @@ const SettingsPage = {
         通过浏览器访问桌面端媒体库<br>
         支持浏览、预览、查重和消息通知
       </div>
+
+      <!-- 修改密码弹窗 -->
+      <div v-if="showPinDialog" class="pin-dialog-overlay" @click.self="showPinDialog = false">
+        <div class="pin-dialog">
+          <h3>{{ hasPin ? '修改访问密码' : '设置访问密码' }}</h3>
+          <div v-if="hasPin" class="pin-field">
+            <label>当前密码</label>
+            <input type="password" v-model="pinOld" maxlength="4" placeholder="输入当前4位密码" autocomplete="off">
+          </div>
+          <div class="pin-field">
+            <label>新密码</label>
+            <input type="password" v-model="pinNew" maxlength="4" placeholder="留空则取消密码" autocomplete="off">
+          </div>
+          <div class="pin-field">
+            <label>确认新密码</label>
+            <input type="password" v-model="pinConfirm" maxlength="4" placeholder="再次输入新密码" autocomplete="off">
+          </div>
+          <div v-if="pinChangeError" class="pin-error">{{ pinChangeError }}</div>
+          <div class="pin-actions">
+            <button class="btn" @click="showPinDialog = false">取消</button>
+            <button class="btn btn-primary" @click="submitChangePin" :disabled="pinChanging">
+              {{ pinChanging ? '保存中...' : '保存' }}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   `,
   props: ['serverUrl'],
@@ -1221,6 +1252,12 @@ const SettingsPage = {
   data() { return {
     showAbout: false,
     pinEnabled: false,
+    showPinDialog: false,
+    pinOld: '',
+    pinNew: '',
+    pinConfirm: '',
+    pinChanging: false,
+    pinChangeError: '',
   };},
   computed: {
     hasPin() { return this.pinEnabled; }
@@ -1228,6 +1265,33 @@ const SettingsPage = {
   methods: {
     disconnect() {
       if (confirm('确定断开连接？')) this.$emit('disconnected');
+    },
+    changePin() {
+      this.pinOld = '';
+      this.pinNew = '';
+      this.pinConfirm = '';
+      this.pinChangeError = '';
+      this.showPinDialog = true;
+    },
+    async submitChangePin() {
+      if (this.pinNew.length > 4) { this.pinChangeError = '密码最长4位'; return; }
+      if (this.hasPin && !this.pinOld) { this.pinChangeError = '请输入当前密码'; return; }
+      if (this.pinNew && this.pinNew !== this.pinConfirm) { this.pinChangeError = '两次输入不一致'; return; }
+      this.pinChanging = true;
+      this.pinChangeError = '';
+      try {
+        const res = await api(this.serverUrl, '/api/auth/change-pin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ old_pin: this.pinOld, new_pin: this.pinNew }),
+        });
+        this.pinEnabled = res.pin_required || false;
+        this.showPinDialog = false;
+      } catch (e) {
+        this.pinChangeError = e.message || '修改失败';
+      } finally {
+        this.pinChanging = false;
+      }
     },
   },
   async mounted() {

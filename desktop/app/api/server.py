@@ -87,6 +87,64 @@ def create_app(config: AppConfig) -> FastAPI:
             return {"verified": True}
         return JSONResponse(status_code=403, content={"verified": False, "error": "密码错误"})
 
+    @app.post("/api/auth/change-pin")
+    async def auth_change_pin(request: Request):
+        """修改 Web 访问密码。需要提供当前密码验证身份。"""
+        import hmac
+        cfg = getattr(request.app.state, "config", None)
+        if not cfg:
+            return JSONResponse(status_code=500, content={"success": False, "error": "配置不可用"})
+        body = await request.json()
+        # 如果已设置密码，必须验证旧密码
+        if cfg.web_pin:
+            old_pin = body.get("old_pin", "")
+            if not hmac.compare_digest(old_pin, cfg.web_pin):
+                return JSONResponse(status_code=403, content={"success": False, "error": "当前密码错误"})
+        new_pin = body.get("new_pin", "")
+        if len(new_pin) > 4:
+            return JSONResponse(status_code=400, content={"success": False, "error": "密码最长4位"})
+        # 更新配置
+        new_config = AppConfig(
+            db_path=cfg.db_path,
+            thumbnail_cache_dir=cfg.thumbnail_cache_dir,
+            media_extensions=cfg.media_extensions,
+            exclude_patterns=cfg.exclude_patterns,
+            hash_algorithms=cfg.hash_algorithms,
+            phash_size=cfg.phash_size,
+            dhash_size=cfg.dhash_size,
+            video_frame_interval_sec=cfg.video_frame_interval_sec,
+            jaccard_threshold=cfg.jaccard_threshold,
+            phash_hamming_threshold=cfg.phash_hamming_threshold,
+            dhash_hamming_threshold=cfg.dhash_hamming_threshold,
+            face_distance_threshold=cfg.face_distance_threshold,
+            face_detection_enabled=cfg.face_detection_enabled,
+            face_model_dir=cfg.face_model_dir,
+            face_confidence_threshold=cfg.face_confidence_threshold,
+            window_title=cfg.window_title,
+            window_width=cfg.window_width,
+            window_height=cfg.window_height,
+            splitter_ratio_left=cfg.splitter_ratio_left,
+            grid_column_count=cfg.grid_column_count,
+            grid_spacing=cfg.grid_spacing,
+            watcher_enabled=cfg.watcher_enabled,
+            watcher_debounce_ms=cfg.watcher_debounce_ms,
+            api_enabled=cfg.api_enabled,
+            api_host=cfg.api_host,
+            api_port=cfg.api_port,
+            smb_share_name_prefix=cfg.smb_share_name_prefix,
+            preview_seek_percent=cfg.preview_seek_percent,
+            web_pin=new_pin,
+        )
+        # 持久化到磁盘
+        try:
+            new_config.save_to_file()
+        except Exception as e:
+            logger.error(f"保存配置失败: {e}")
+            return JSONResponse(status_code=500, content={"success": False, "error": "保存配置失败"})
+        # 更新内存中的配置
+        request.app.state.config = new_config
+        return {"success": True, "pin_required": bool(new_pin)}
+
     # ============================================================
     # 静态文件（Web 前端 SPA）
     # ============================================================

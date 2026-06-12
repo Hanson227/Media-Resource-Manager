@@ -557,6 +557,32 @@ body {
 .pin-key.empty { background: none; cursor: default; }
 .pin-key .mdi { font-size: 22px; color: var(--text-secondary); }
 
+/* ========== Pin Change Dialog ========== */
+.pin-dialog-overlay {
+  position: fixed; inset: 0; z-index: 998;
+  background: rgba(0,0,0,.5);
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--space-6);
+}
+.pin-dialog {
+  background: var(--bg-primary); border-radius: var(--radius-lg);
+  padding: var(--space-8); max-width: 340px; width: 100%;
+  box-shadow: 0 8px 32px rgba(0,0,0,.3);
+}
+.pin-dialog h3 { font-size: 17px; font-weight: 700; margin-bottom: var(--space-6); text-align: center; }
+.pin-field { margin-bottom: var(--space-4); }
+.pin-field label { display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: var(--space-1); }
+.pin-field input {
+  width: 100%; height: 44px; border-radius: var(--radius-md);
+  border: 1px solid var(--border); background: var(--bg-card);
+  color: var(--text-primary); font-size: 16px; padding: 0 var(--space-3);
+  box-sizing: border-box; outline: none;
+}
+.pin-field input:focus { border-color: var(--accent); }
+.pin-dialog .pin-error { text-align: center; }
+.pin-actions { display: flex; gap: var(--space-3); margin-top: var(--space-6); }
+.pin-actions .btn { flex: 1; }
+
 /* ========== Connection Page ========== */
 .connect-box {
   max-width: 360px; margin: 0 auto; padding: 48px var(--space-6);
