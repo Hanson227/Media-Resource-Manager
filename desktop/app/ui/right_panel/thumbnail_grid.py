@@ -251,6 +251,11 @@ class ThumbnailGridModel(QAbstractListModel):
         pixmap = QPixmap(thumb_path)
         if pixmap.isNull():
             return
+        # 缓存淘汰：超过上限时移除最旧的条目
+        if len(self._thumb_cache) >= self._max_cache_size:
+            oldest_keys = list(self._thumb_cache.keys())[:self._max_cache_size // 4]
+            for k in oldest_keys:
+                del self._thumb_cache[k]
         self._thumb_cache[file_id] = pixmap
         for row, f in enumerate(self._files):
             if f["id"] == file_id:
@@ -363,12 +368,6 @@ class FolderCardModel(QAbstractListModel):
         self.endResetModel()
 
     def add_thumb(self, row: int, pixmap: QPixmap) -> None:
-        # 缓存淘汰：超过上限时移除最旧的条目
-        if len(self._thumb_cache) >= self._max_cache_size:
-            oldest_keys = list(self._thumb_cache.keys())[:self._max_cache_size // 4]
-            for k in oldest_keys:
-                del self._thumb_cache[k]
-        self._thumb_cache[row] = pixmap
         self._pixmaps[row] = pixmap
         idx = self.index(row, 0)
         self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
