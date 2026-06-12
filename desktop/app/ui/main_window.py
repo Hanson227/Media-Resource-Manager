@@ -530,6 +530,8 @@ class MainWindow(QMainWindow):
 
         tree_model = self._tree_view.model()
         # 先折叠旧数据再展开（刷新文件节点）
+        # 禁用动画防止展开期间 scrollTo 定位错误
+        self._tree_view.setAnimated(False)
         tree_model.collapse_unit(unit_id)
         tree_model.expand_unit(unit_id, file_dicts)
         # 找到单元节点并展开
@@ -540,6 +542,7 @@ class MainWindow(QMainWindow):
                     unit_idx = tree_model.index(child_row, 0, root_idx)
                     self._tree_view.expand(unit_idx)
                     break
+        self._tree_view.setAnimated(True)
         return file_dicts
 
     @Slot(int)
@@ -574,6 +577,10 @@ class MainWindow(QMainWindow):
         # 收起树的文件子节点，并展开根层级显示所有单元
         unit_id = self._current_unit_id
         if unit_id:
+            # 折叠前先清除选择，避免子节点移除后选择指向无效索引
+            sel = self._tree_view.selectionModel()
+            if sel:
+                sel.clearSelection()
             try:
                 model.collapse_unit(unit_id)
                 QTimer.singleShot(0, lambda: self._tree_view.expandToDepth(1))
@@ -1237,7 +1244,7 @@ class MainWindow(QMainWindow):
         self._config = new_config
         # 持久化配置到磁盘（否则退出后密码等设置丢失）
         try:
-            new_config.save_to_file()
+            new_config.to_file(Path("config.json"))
         except Exception as e:
             logger.warning(f"配置保存到文件失败: {e}")
         # 同步更新 API 服务器的配置（否则 PIN 等设置不生效）

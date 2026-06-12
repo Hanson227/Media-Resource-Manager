@@ -486,7 +486,7 @@ class FolderTreeView(QTreeView):
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
         self.setAnimated(True)
-        self.setExpandsOnDoubleClick(True)
+        self.setExpandsOnDoubleClick(False)
         self.setIndentation(20)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         # 自定义三角形展开/收起指示器
@@ -556,6 +556,7 @@ class FolderTreeView(QTreeView):
                 for child_row, child in enumerate(root.children):
                     if child.node_id == unit_id:
                         root_idx = model.index(root_row, 0)
+                        self.expand(root_idx)  # 确保父根节点展开
                         child_idx = model.index(child_row, 0, root_idx)
                         self.setCurrentIndex(child_idx)
                         self.scrollTo(child_idx, QAbstractItemView.ScrollHint.PositionAtCenter)

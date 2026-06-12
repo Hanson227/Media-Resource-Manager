@@ -137,7 +137,7 @@ def create_app(config: AppConfig) -> FastAPI:
         )
         # 持久化到磁盘
         try:
-            new_config.save_to_file()
+            new_config.to_file(Path("config.json"))
         except Exception as e:
             logger.error(f"保存配置失败: {e}")
             return JSONResponse(status_code=500, content={"success": False, "error": "保存配置失败"})
