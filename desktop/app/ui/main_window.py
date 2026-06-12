@@ -1235,6 +1235,11 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_settings_saved(self, new_config: AppConfig) -> None:
         self._config = new_config
+        # 持久化配置到磁盘（否则退出后密码等设置丢失）
+        try:
+            new_config.save_to_file()
+        except Exception as e:
+            logger.warning(f"配置保存到文件失败: {e}")
         # 同步更新 API 服务器的配置（否则 PIN 等设置不生效）
         from app.api.server import _app
         if _app is not None:
