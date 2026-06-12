@@ -471,9 +471,10 @@ class MainWindow(QMainWindow):
         model = self._tree_view.model()
         new_node = model.get_node_by_unit_id(unit_id)
         if new_node:
+            roots = model.get_roots()
             for row in range(model.rowCount()):
                 root_idx = model.index(row, 0)
-                root = model._roots[row] if row < len(model._roots) else None
+                root = roots[row] if row < len(roots) else None
                 if root and root.node_id != new_node.library_root_id:
                     self._tree_view.collapse(root_idx)
 
@@ -545,7 +546,7 @@ class MainWindow(QMainWindow):
         tree_model.collapse_unit(unit_id)
         tree_model.expand_unit(unit_id, file_dicts)
         # 找到单元节点并展开
-        for root_row, root in enumerate(tree_model._roots):
+        for root_row, root in enumerate(tree_model.get_roots()):
             root_idx = tree_model.index(root_row, 0)
             for child_row, child in enumerate(root.children):
                 if child.node_id == unit_id and child.node_type == "unit" and child.node_subtype != "file":
