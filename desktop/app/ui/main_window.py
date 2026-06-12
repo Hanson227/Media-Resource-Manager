@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         self._hash_worker: Optional[HashWorker] = None
         self._dedup_worker: Optional[DedupWorker] = None
         self._current_expanded_unit_id: Optional[int] = None  # accordion: 当前展开文件层的单元 ID
+        self._current_root_id: Optional[int] = None  # 当前展开的媒体库根节点 ID
         self._scan_queue: list[str] = []  # 串行扫描队列
 
         # 搜索防抖定时器 — 每次按键重置，150ms 空闲后触发放行
@@ -480,6 +481,8 @@ class MainWindow(QMainWindow):
 
         # ---- 加载文件 ----
         self._current_unit_id = unit_id
+        if new_node:
+            self._current_root_id = new_node.library_root_id
         self._grid_view.load_unit(unit_id)
         self._breadcrumb.show()
         # 显示标签筛选栏
@@ -587,8 +590,9 @@ class MainWindow(QMainWindow):
         self._breadcrumb.hide()
         model = self._tree_view.model()
 
-        # 收起树的文件子节点，并展开根层级显示所有单元
+        # 收起树的文件子节点
         unit_id = self._current_unit_id
+        root_id = self._current_root_id
         if unit_id:
             # 折叠前先清除选择，避免子节点移除后选择指向无效索引
             sel = self._tree_view.selectionModel()
@@ -596,44 +600,47 @@ class MainWindow(QMainWindow):
                 sel.clearSelection()
             try:
                 model.collapse_unit(unit_id)
-                QTimer.singleShot(0, lambda: self._tree_view.expandToDepth(1))
             except Exception as e:
                 logger.error(f"收起单元文件树失败: {e}")
             finally:
                 self._current_unit_id = None
                 self._current_expanded_unit_id = None
 
-        # 遍历所有根，找到包含当前单元的根
+        # 通过 _current_root_id 直接定位目标根（避免遍历 + fallback 到第一个根）
+        target_root_idx = None
+        target_unit_ids = None
+        roots = model.get_roots()
         for row in range(model.rowCount()):
             root_idx = model.index(row, 0)
-            unit_ids = model.get_selected_units(root_idx)
-            if unit_id and unit_id in unit_ids:
-                # 阻塞信号避免 setCurrentIndex 触发 unit_selected 导致重复加载
-                sel = self._tree_view.selectionModel()
-                if sel:
-                    sel.blockSignals(True)
-                try:
-                    self._tree_view.setCurrentIndex(root_idx)
-                finally:
-                    if sel:
-                        sel.blockSignals(False)
-                self._show_folder_cards(unit_ids, reset_scroll=False)
-                return
-        # 回退：选第一个根
-        root_idx = model.index(0, 0)
-        if root_idx.isValid():
+            root = roots[row] if row < len(roots) else None
+            if root and root.node_id == root_id:
+                target_root_idx = root_idx
+                target_unit_ids = model.get_selected_units(root_idx)
+                break
+
+        # 回退：通过 unit_id 遍历查找
+        if target_root_idx is None and unit_id:
+            for row in range(model.rowCount()):
+                root_idx = model.index(row, 0)
+                unit_ids = model.get_selected_units(root_idx)
+                if unit_id in unit_ids:
+                    target_root_idx = root_idx
+                    target_unit_ids = unit_ids
+                    break
+
+        if target_root_idx is not None and target_root_idx.isValid():
+            # 仅展开目标根（保持手风琴一致性，不展开其他根）
+            self._tree_view.expand(target_root_idx)
             sel = self._tree_view.selectionModel()
             if sel:
                 sel.blockSignals(True)
             try:
-                self._tree_view.setCurrentIndex(root_idx)
+                self._tree_view.setCurrentIndex(target_root_idx)
             finally:
                 if sel:
                     sel.blockSignals(False)
-            # 补偿信号阻塞：手动显示文件夹卡片
-            unit_ids = model.get_selected_units(root_idx)
-            if unit_ids:
-                self._show_folder_cards(unit_ids, reset_scroll=False)
+            if target_unit_ids:
+                self._show_folder_cards(target_unit_ids, reset_scroll=False)
 
     @Slot(list)
     def _on_unit_selected(self, unit_ids: list[int]) -> None:
@@ -653,11 +660,15 @@ class MainWindow(QMainWindow):
         # 折叠其他根节点，只展开当前选中的根
         model = self._tree_view.model()
         target_set = set(unit_ids)
+        roots = model.get_roots()
         for row in range(model.rowCount()):
             root_idx = model.index(row, 0)
+            root = roots[row] if row < len(roots) else None
             root_unit_ids = set(model.get_selected_units(root_idx))
             if root_unit_ids == target_set or root_unit_ids.issuperset(target_set):
                 self._tree_view.expand(root_idx)
+                if root:
+                    self._current_root_id = root.node_id
             else:
                 self._tree_view.collapse(root_idx)
 
