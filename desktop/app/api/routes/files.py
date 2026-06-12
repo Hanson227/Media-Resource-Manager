@@ -7,6 +7,7 @@ import io
 import logging
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Query, HTTPException, Request
 from fastapi.responses import FileResponse, Response
@@ -68,7 +69,8 @@ async def list_files(
             ]
             return FileListResponse(files=items, total=total, page=page, per_page=per_page)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.get("/{file_id}", response_model=FileDetailResponse)
@@ -92,7 +94,8 @@ async def get_file(file_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.delete("/{file_id}", response_model=StatusResponse)
@@ -124,7 +127,8 @@ async def delete_file(file_id: int, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.get("/{file_id}/thumbnail")
@@ -165,7 +169,8 @@ async def get_file_thumbnail(file_id: int, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 MIME_MAP = {
@@ -205,8 +210,8 @@ async def stream_file(file_id: int):
                 rgb_img.save(buf, "JPEG", quality=90)
                 buf.seek(0)
             return Response(content=buf.read(), media_type="image/jpeg",
-                            headers={"Content-Disposition": f'inline; filename="{f.filename}.jpg"'})
+                            headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(f.filename + '.jpg')}"})
         except Exception as e:
-            logger.error(f"HEIC 转换失败 {f.path}: {e}")
-            raise HTTPException(status_code=500, detail=f"HEIC 转换失败: {e}")
+            logger.error(f"HEIC 转换失败 {f.path}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="内部服务器错误")
     return FileResponse(str(path), media_type=media_type, filename=f.filename)

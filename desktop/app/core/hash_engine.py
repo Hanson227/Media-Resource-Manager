@@ -133,6 +133,10 @@ class HashEngine:
         """取消当前哈希计算任务。"""
         self._cancelled = True
 
+    def _reset_cancel(self) -> None:
+        """重置取消状态，允许实例复用。"""
+        self._cancelled = False
+
     @property
     def _cv(self):
         """延迟加载 OpenCV。"""

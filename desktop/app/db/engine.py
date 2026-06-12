@@ -148,6 +148,7 @@ class DatabaseManager:
             return False
         try:
             with cls._engine.connect() as conn:
+                conn = conn.execution_options(isolation_level="AUTOCOMMIT")
                 conn.execute(text("PRAGMA integrity_check;"))
                 # VACUUM 重建数据库文件，可清除 WAL 不一致
                 conn.execute(text("VACUUM;"))
@@ -163,7 +164,6 @@ class DatabaseManager:
             return False
 
     @classmethod
-    @property
     def is_initialized(cls) -> bool:
         """检查数据库是否已初始化。"""
         return cls._engine is not None

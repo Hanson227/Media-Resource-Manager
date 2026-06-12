@@ -115,6 +115,14 @@ def convert_single(source: Path, target_dir: Optional[Path] = None,
             target.unlink(missing_ok=True)
             return ConversionResult(source=source, success=False, error="转换生成的文件无效")
 
+        # 进一步验证文件完整性
+        try:
+            with Image.open(target) as verify_img:
+                verify_img.verify()
+        except Exception:
+            target.unlink(missing_ok=True)
+            return ConversionResult(source=source, success=False, error="转换生成的文件已损坏")
+
         # 删除源文件（转换成功后才删）
         try:
             source.unlink()

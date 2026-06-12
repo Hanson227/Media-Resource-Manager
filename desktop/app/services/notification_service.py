@@ -107,7 +107,14 @@ class NotificationService:
             f"相似度 {similarity * 100:.1f}%，"
             f"共 {match_count} 对匹配文件。点击查看详情。"
         )
-        self.notify(title, message)
+        # 仅显示气泡通知，不通过 self.notify() 创建 info 消息（避免重复）
+        if self._tray_icon and hasattr(self._tray_icon, 'notify'):
+            try:
+                self._tray_icon.notify(message, title)
+            except Exception:
+                self._fallback_notify(title, message)
+        else:
+            self._fallback_notify(title, message)
         # 创建持久化消息
         MessageCenter.create_dedup_alert(
             unit_a_name=unit_a_name,

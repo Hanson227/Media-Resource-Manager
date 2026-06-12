@@ -140,11 +140,11 @@ class DedupCompareDialog(QDialog):
         btn_layout.addWidget(keep_b_btn)
 
         whitelist_btn = QPushButton("加入白名单（不再提醒）")
-        whitelist_btn.clicked.connect(lambda: self.whitelist_requested.emit(0))
+        whitelist_btn.clicked.connect(lambda: self.whitelist_requested.emit(self._result.unit_a_id))
         btn_layout.addWidget(whitelist_btn)
 
         ignore_btn = QPushButton("暂时忽略")
-        ignore_btn.clicked.connect(lambda: self.ignore_requested.emit(0))
+        ignore_btn.clicked.connect(lambda: self.ignore_requested.emit(self._result.unit_a_id))
         btn_layout.addWidget(ignore_btn)
 
         center_layout.addLayout(btn_layout)

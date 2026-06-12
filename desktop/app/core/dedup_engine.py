@@ -135,6 +135,10 @@ class DedupEngine:
         """取消当前查重任务。"""
         self._cancelled = True
 
+    def _reset_cancel(self) -> None:
+        """重置取消状态，允许实例复用。"""
+        self._cancelled = False
+
     def compare_units(
         self,
         files_a: list[dict],

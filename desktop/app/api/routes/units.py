@@ -3,6 +3,7 @@
 单元路由 —— /api/units 真实数据库查询端点。
 """
 
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -12,6 +13,8 @@ from app.api.schemas import UnitItem, UnitListResponse
 from app.db.engine import DatabaseManager
 from app.db import queries as q
 from app.db.models import MediaFile
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/units", tags=["资源单元"])
 
@@ -61,7 +64,8 @@ async def list_units():
             ]
             return UnitListResponse(units=items)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.get("/{unit_id}", response_model=UnitItem)
@@ -100,7 +104,8 @@ async def get_unit(unit_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.get("/{unit_id}/files")
@@ -131,7 +136,8 @@ async def get_unit_files(unit_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.post("/{unit_id}/star")
@@ -147,7 +153,8 @@ async def star_unit(unit_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.post("/{unit_id}/unstar")
@@ -163,4 +170,5 @@ async def unstar_unit(unit_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")

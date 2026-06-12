@@ -573,12 +573,26 @@ def get_unread_message_count(session: Session) -> int:
 
 def is_whitelisted(session: Session, path: str) -> bool:
     """判断指定路径是否在白名单中。"""
+    import re
     # 路径精确匹配
     exact = session.query(Whitelist).filter(
         Whitelist.pattern == path,
         Whitelist.is_regex == False,
     ).first()
-    return exact is not None
+    if exact is not None:
+        return True
+    # 正则匹配
+    regex_rules = session.query(Whitelist).filter(
+        Whitelist.is_regex == True,
+        Whitelist.match_type == "path",
+    ).all()
+    for rule in regex_rules:
+        try:
+            if re.search(rule.pattern, path):
+                return True
+        except re.error:
+            continue
+    return False
 
 
 def add_whitelist(session: Session, pattern: str, is_regex: bool = False,

@@ -28,15 +28,16 @@ logger = logging.getLogger(__name__)
 
 def _get_local_ip() -> str:
     """获取本机局域网 IPv4 地址。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.1)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
-        s.close()
         return ip
     except Exception:
         return "127.0.0.1"
+    finally:
+        s.close()
 
 
 class MainStatusBar(QStatusBar):

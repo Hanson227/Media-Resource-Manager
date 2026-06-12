@@ -123,8 +123,8 @@ class AppConfig:
     api_enabled: bool = True
     """是否在程序启动时一并启动 HTTP API 服务。"""
 
-    api_host: str = "0.0.0.0"
-    """API 监听地址，0.0.0.0 表示允许局域网内其他设备访问。"""
+    api_host: str = "127.0.0.1"
+    """API 监听地址，默认仅本机访问；如需局域网访问可改为 0.0.0.0。"""
 
     api_port: int = 19527
     """API 监听端口。"""

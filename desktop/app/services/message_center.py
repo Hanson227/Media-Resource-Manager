@@ -18,6 +18,20 @@ from app.db.queries import (
 )
 from app.db.models import Message
 
+
+def _msg_to_dict(msg: Message) -> dict:
+    """将 ORM Message 对象转为 dict，避免 detached session 问题。"""
+    return {
+        "id": msg.id,
+        "msg_type": msg.msg_type,
+        "title": msg.title,
+        "body": msg.body,
+        "is_read": msg.is_read,
+        "is_dismissed": msg.is_dismissed,
+        "created_at": msg.created_at.isoformat() if msg.created_at else None,
+        "extra_data": msg.extra_data,
+    }
+
 logger = logging.getLogger(__name__)
 
 
@@ -133,21 +147,23 @@ class MessageCenter:
     # ============================================================
 
     @staticmethod
-    def get_unread(limit: int = 50) -> list[Message]:
-        """获取未读消息列表。"""
+    def get_unread(limit: int = 50) -> list[dict]:
+        """获取未读消息列表（返回 dict 而非 ORM 对象，避免 detached session 问题）。"""
         try:
             with DatabaseManager.session() as session:
-                return get_unread_messages(session, limit=limit)
+                msgs = get_unread_messages(session, limit=limit)
+                return [_msg_to_dict(m) for m in msgs]
         except Exception as e:
             logger.error(f"获取未读消息失败: {e}")
             return []
 
     @staticmethod
-    def get_all(limit: int = 200) -> list[Message]:
-        """获取所有消息列表。"""
+    def get_all(limit: int = 200) -> list[dict]:
+        """获取所有消息列表（返回 dict 而非 ORM 对象）。"""
         try:
             with DatabaseManager.session() as session:
-                return get_all_messages(session, limit=limit)
+                msgs = get_all_messages(session, limit=limit)
+                return [_msg_to_dict(m) for m in msgs]
         except Exception as e:
             logger.error(f"获取消息列表失败: {e}")
             return []

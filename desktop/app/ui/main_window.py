@@ -389,6 +389,11 @@ class MainWindow(QMainWindow):
         self._status_bar.set_status(f"正在扫描: {root_path.name}...")
         self._status_bar.set_progress(0, 0)
 
+        # 取消旧 worker 避免信号冲突
+        if self._scan_worker and self._scan_worker.isRunning():
+            self._scan_worker.cancel()
+            self._scan_worker.wait(5000)
+
         self._scan_worker = ScanWorker(self._config, root_path)
         self._scan_worker.progress.connect(self._status_bar.set_progress)
         self._scan_worker.unit_found.connect(

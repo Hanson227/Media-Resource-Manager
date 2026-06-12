@@ -40,5 +40,5 @@ async def get_unread_events():
                 "latest": latest,
             }
     except Exception as e:
-        logger.error(f"获取未读事件简报失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"获取未读事件简报失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")

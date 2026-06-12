@@ -28,7 +28,8 @@ async def list_tags():
                 for t in tags
             ]}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.post("")
@@ -44,7 +45,8 @@ async def create_tag(name: str, color: Optional[str] = None):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.delete("/{tag_id}")
@@ -59,7 +61,8 @@ async def delete_tag(tag_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.get("/by-file/{file_id}")
@@ -73,7 +76,8 @@ async def get_file_tags(file_id: int):
                 for t in tags
             ]}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.put("/by-file/{file_id}")
@@ -84,7 +88,8 @@ async def set_file_tags(file_id: int, tag_ids: list[int]):
             q.set_file_tags(session, file_id, tag_ids)
             return StatusResponse(success=True, message="标签已更新")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.get("/mapped-files")
@@ -104,4 +109,5 @@ async def get_mapped_files(tag_ids: Optional[str] = Query(None, description="逗
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")

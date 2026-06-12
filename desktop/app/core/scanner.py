@@ -133,6 +133,10 @@ class MediaScanner:
         """取消当前扫描。"""
         self._cancelled = True
 
+    def _reset_cancel(self) -> None:
+        """重置取消状态，允许实例复用。"""
+        self._cancelled = False
+
     def scan_root(self, root_path: Path) -> ScanResult:
         """扫描单个媒体库根目录。
 

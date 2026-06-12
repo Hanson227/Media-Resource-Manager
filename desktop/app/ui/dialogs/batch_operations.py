@@ -187,7 +187,7 @@ class BatchOperationsDialog(QDialog):
                     })
                 else:
                     file_actions.append({
-                        "action": "delete" if send_to_trash else "delete",
+                        "action": "trash" if send_to_trash else "delete",
                         "path": Path(target["path"]),
                         "file_id": target.get("id"),
                     })

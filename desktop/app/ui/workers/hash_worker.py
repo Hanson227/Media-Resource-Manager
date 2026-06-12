@@ -72,6 +72,7 @@ def _detect_faces_for_file(engine: HashEngine, file_path: Path, media_type: str)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pil_img = PILImage.fromarray(rgb)
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jpg", prefix="vface_")
+        os.close(tmp_fd)  # 立即关闭 FD，PIL 会用自己打开的 FD 写入
         pil_img.save(tmp_path, format="JPEG", quality=85)
 
         return engine.detect_faces(Path(tmp_path))
@@ -212,7 +213,7 @@ class HashWorker(QThread):
                                 )
                             else:
                                 logger.debug(f"人脸检测: {fpath.name} → 未检测到人脸")
-                        except BaseException as e:
+                        except Exception as e:
                             logger.warning(f"人脸检测跳过 [{fpath.name}]: {type(e).__name__}: {e}")
 
                     hashed_count += 1

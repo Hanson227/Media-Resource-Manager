@@ -124,14 +124,14 @@ def main() -> None:
         logger.error(f"数据库初始化失败: {e}")
         sys.exit(1)
 
-        # 启动后自动清理孤儿缩略图（DB 中已删除文件的残留缓存）
-        try:
-            from app.services.cleanup_service import CleanupService
-            purged = CleanupService.purge_orphaned_thumbnails()
-            if purged > 0:
-                logger.info(f"已清理 {purged} 个孤儿缩略图")
-        except Exception as e:
-            logger.warning(f"孤儿缩略图清理失败: {e}")
+    # 启动后自动清理孤儿缩略图（DB 中已删除文件的残留缓存）
+    try:
+        from app.services.cleanup_service import CleanupService
+        purged = CleanupService.purge_orphaned_thumbnails()
+        if purged > 0:
+            logger.info(f"已清理 {purged} 个孤儿缩略图")
+    except Exception as e:
+        logger.warning(f"孤儿缩略图清理失败: {e}")
 
     # ============================================================
     # 3. 启动 API 服务器

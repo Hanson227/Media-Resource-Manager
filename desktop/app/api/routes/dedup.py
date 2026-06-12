@@ -3,6 +3,7 @@
 查重路由 —— /api/dedup 真实数据库查询端点。
 """
 
+import logging
 import threading
 
 from fastapi import APIRouter, Query, HTTPException, Request
@@ -13,6 +14,8 @@ from app.core.dedup_engine import DedupEngine
 from app.db.engine import DatabaseManager
 from app.db import queries as q
 from app.services.message_center import MessageCenter
+
+logger = logging.getLogger(__name__)
 
 _dedup_lock = threading.Lock()
 _dedup_running = False
@@ -58,7 +61,8 @@ async def list_dedup_results(
                 ))
             return DedupListResponse(results=items, total=total)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.get("/results/{result_id}")
@@ -93,7 +97,8 @@ async def get_dedup_detail(result_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.post("/results/{result_id}/resolve", response_model=StatusResponse)
@@ -109,7 +114,8 @@ async def resolve_dedup(result_id: int, body: DedupResolveRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @router.post("/run")
@@ -195,6 +201,7 @@ async def run_dedup(body: DedupRunRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
     finally:
         _dedup_running = False
