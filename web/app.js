@@ -125,7 +125,7 @@ const UnitsPage = {
                     </div>
                     <button class="card-more" @click.stop="$root.showSheet(u.name, [
                       { label: u.is_starred ? '取消收藏' : '收藏', icon: u.is_starred ? 'mdi-star-off' : 'mdi-star-outline',
-                        action: () => _toggleStar(u) }
+                        action: () => toggleStar(u) }
                     ])" :title="u.is_starred ? '取消收藏' : '收藏'"><span class="mdi mdi-dots-horizontal"></span></button>
                   </div>
                 </div>
@@ -176,7 +176,7 @@ const UnitsPage = {
       const d = new Date(iso);
       return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
     },
-    async _toggleStar(unit) {
+    async toggleStar(unit) {
       try {
         const ep = unit.is_starred ? 'unstar' : 'star';
         await api(this.serverUrl, '/api/units/' + unit.id + '/' + ep, { method: 'POST' });
