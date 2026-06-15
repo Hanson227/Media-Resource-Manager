@@ -1,8 +1,8 @@
 {
   "db_path": "data\\media_manager.db",
   "media_extensions": [
-    ".3gp",
     ".3fr",
+    ".3gp",
     ".arw",
     ".avi",
     ".bmp",
@@ -61,8 +61,9 @@
   "face_confidence_threshold": 0.7,
   "thumbnail_max_size": 256,
   "thumbnail_cache_subdir": ".thumbnails",
+  "thumbnail_cache_dir": "data\\.thumbnails",
   "thumbnail_format": "jpg",
-  "thumbnail_quality": 80,
+  "thumbnail_quality": 90,
   "window_title": "影视资源管理器",
   "window_width": 1400,
   "window_height": 900,
@@ -74,5 +75,7 @@
   "api_enabled": true,
   "api_host": "0.0.0.0",
   "api_port": 19527,
-  "smb_share_name_prefix": "Media_"
+  "smb_share_name_prefix": "Media_",
+  "preview_seek_percent": 5,
+  "web_pin": "2304"
 }

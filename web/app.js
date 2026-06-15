@@ -4,11 +4,12 @@ const { createRouter, createWebHashHistory } = VueRouter;
 /* ========== API Helper ========== */
 function api(server, path, opts = {}) {
   const url = `${server}${path}`;
+  const { headers: optHeaders, ...restOpts } = opts;
   return fetch(url, {
-    headers: { 'Accept': 'application/json', ...opts.headers },
-    ...opts,
+    ...restOpts,
+    headers: { 'Accept': 'application/json', ...optHeaders },
   }).then(r => {
-    if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+    if (!r.ok) return r.json().then(e => { throw new Error(e.error || e.detail || `HTTP ${r.status}`); });
     return r.json();
   });
 }
@@ -1450,7 +1451,15 @@ const App = {
         });
         if (data.verified) {
           this.pinUnlocked = true;
-          this.$router.push('/units');
+          this.pinChecking = false;
+          try {
+            await this.$router.push('/units');
+          } catch (navErr) {
+            // 路由已在目标页时 push 会静默失败，用 replace 兜底
+            if (this.$route.path !== '/units') {
+              this.$router.replace('/units');
+            }
+          }
         } else {
           this.pinError = '密码错误，请重试';
           this.pinValue = '';
