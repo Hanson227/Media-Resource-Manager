@@ -1450,6 +1450,7 @@ const App = {
         });
         if (data.verified) {
           this.pinUnlocked = true;
+          this.$router.push('/units');
         } else {
           this.pinError = '密码错误，请重试';
           this.pinValue = '';
