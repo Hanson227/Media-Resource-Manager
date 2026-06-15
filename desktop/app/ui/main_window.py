@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from config import AppConfig
 from app.db.engine import DatabaseManager
 from app.db import queries as q
+from app.ui.widgets.accordion_manager import AccordionManager
 from app.ui.widgets.status_bar import MainStatusBar
 from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView
 from app.ui.right_panel.thumbnail_grid import (
@@ -60,8 +61,6 @@ class MainWindow(QMainWindow):
         self._scan_worker: Optional[ScanWorker] = None
         self._hash_worker: Optional[HashWorker] = None
         self._dedup_worker: Optional[DedupWorker] = None
-        self._current_expanded_unit_id: Optional[int] = None  # accordion: 当前展开文件层的单元 ID
-        self._current_root_id: Optional[int] = None  # 当前展开的媒体库根节点 ID
         self._scan_queue: list[str] = []  # 串行扫描队列
 
         # 搜索防抖定时器 — 每次按键重置，150ms 空闲后触发放行
@@ -80,6 +79,9 @@ class MainWindow(QMainWindow):
         self._setup_central_area()
         self._setup_status_bar()
         self._setup_system_tray()
+
+        # 手风琴管理器（需在 _tree_view 创建后初始化）
+        self._accordion = AccordionManager(self._tree_view)
 
         # 核心：信号连线
         self._connect_signals()
@@ -452,55 +454,33 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_unit_double_clicked(self, unit_id: int) -> None:
         """双击进入文件夹：手风琴展开 + 加载文件 + 自动选中首文件。"""
-        # ---- 高亮树中的文件夹节点 ----
+        # 高亮树中的文件夹节点
         self._tree_view.select_unit_silent(unit_id)
 
-        # ---- Accordion: 同一根下之前的展开单元自动收起 ----
-        if (self._current_expanded_unit_id is not None
-                and self._current_expanded_unit_id != unit_id):
-            model_ref = self._tree_view.model()
-            prev_node = model_ref.get_node_by_unit_id(self._current_expanded_unit_id)
-            new_node = model_ref.get_node_by_unit_id(unit_id)
-            if (prev_node and new_node
-                    and prev_node.library_root_id == new_node.library_root_id):
-                try:
-                    model_ref.collapse_unit(self._current_expanded_unit_id)
-                except Exception:
-                    pass
+        # 手风琴展开（收起同根旧单元 + 折叠其他根）
+        if not self._accordion.expand_unit(unit_id):
+            return
 
-        # ---- 折叠其他根节点（手风琴：同一时间只展开一个媒体库） ----
-        model = self._tree_view.model()
-        new_node = model.get_node_by_unit_id(unit_id)
-        if new_node:
-            roots = model.get_roots()
-            for row in range(model.rowCount()):
-                root_idx = model.index(row, 0)
-                root = roots[row]
-                if root and root.node_id != new_node.library_root_id:
-                    self._tree_view.collapse(root_idx)
-
-        # ---- 加载文件 ----
+        # 加载文件和 UI 更新
         self._current_unit_id = unit_id
-        if new_node:
-            self._current_root_id = new_node.library_root_id
         self._grid_view.load_unit(unit_id)
         self._breadcrumb.show()
-        # 显示标签筛选栏
         self._tag_bar.reload_tags()
 
-        # ---- 展开树文件子节点 ----
+        # 展开树文件子节点
         self._load_tree_files(unit_id)
 
-        # ---- 自动选中第一个文件（仅网格高亮，树保持文件夹高亮） ----
+        # 自动选中第一个文件（仅网格高亮，树保持文件夹高亮）
         if self._grid_model.file_list:
             first_id = self._grid_model.file_list[0]["id"]
             # 50ms 延迟确保 load_unit 后的模型切换完成布局
             QTimer.singleShot(50, lambda fid=first_id: self._grid_view.select_file_by_id(fid))
 
-        # ---- 更新 accordion 状态 ----
-        self._current_expanded_unit_id = unit_id
+        # 更新头/脚信息
+        self._update_unit_header_footer(unit_id)
 
-        # ---- 更新头/脚信息 ----
+    def _update_unit_header_footer(self, unit_id: int) -> None:
+        """更新右侧头/脚信息：单元名称、文件数、总大小。"""
         try:
             with DatabaseManager.session() as session:
                 unit = q.get_unit_by_id(session, unit_id)
@@ -588,25 +568,20 @@ class MainWindow(QMainWindow):
         if not self._breadcrumb.isVisible():
             return
         self._breadcrumb.hide()
-        model = self._tree_view.model()
 
-        # 收起树的文件子节点
+        # 收起当前展开的单元
         unit_id = self._current_unit_id
-        root_id = self._current_root_id
+        root_id = self._accordion.current_root_id
         if unit_id:
             # 折叠前先清除选择，避免子节点移除后选择指向无效索引
             sel = self._tree_view.selectionModel()
             if sel:
                 sel.clearSelection()
-            try:
-                model.collapse_unit(unit_id)
-            except Exception as e:
-                logger.error(f"收起单元文件树失败: {e}")
-            finally:
-                self._current_unit_id = None
-                self._current_expanded_unit_id = None
+        self._accordion.collapse_current()
+        self._current_unit_id = None
 
-        # 通过 _current_root_id 直接定位目标根（避免遍历 + fallback 到第一个根）
+        # 通过 root_id 直接定位目标根（避免遍历 + fallback 到第一个根）
+        model = self._tree_view.model()
         target_root_idx = None
         target_unit_ids = None
         roots = model.get_roots()
@@ -649,12 +624,9 @@ class MainWindow(QMainWindow):
             return
 
         self._breadcrumb.hide()
-        if self._current_expanded_unit_id is not None:
-            try:
-                self._tree_view.model().collapse_unit(self._current_expanded_unit_id)
-            except Exception:
-                pass
-        self._current_expanded_unit_id = None
+
+        # 收起当前展开的单元
+        self._accordion.collapse_current()
         self._current_unit_id = None
 
         # 折叠其他根节点，只展开当前选中的根
@@ -668,7 +640,7 @@ class MainWindow(QMainWindow):
             if root_unit_ids == target_set or root_unit_ids.issuperset(target_set):
                 self._tree_view.expand(root_idx)
                 if root:
-                    self._current_root_id = root.node_id
+                    self._accordion.expand_root_only(root.node_id)
             else:
                 self._tree_view.collapse(root_idx)
 
@@ -826,7 +798,7 @@ class MainWindow(QMainWindow):
             self._grid_view.clear()
             self._breadcrumb.hide()
             self._current_unit_id = None
-            self._current_expanded_unit_id = None
+            self._accordion.reset()
             self._tree_view.refresh_model()
             root_idx = self._tree_view.model().index(0, 0)
             if root_idx.isValid():
@@ -907,7 +879,7 @@ class MainWindow(QMainWindow):
         try:
             self._grid_view.clear()
             self._current_unit_id = None
-            self._current_expanded_unit_id = None
+            self._accordion.reset()
             # 先清理缓存，再删数据库
             from app.services.cleanup_service import CleanupService
             CleanupService.remove_root_thumbnails(root_id)
@@ -1252,7 +1224,7 @@ class MainWindow(QMainWindow):
 
             reset_db(self._config.db_path)
             self._current_unit_id = None
-            self._current_expanded_unit_id = None
+            self._accordion.reset()
             self._tree_view.refresh_model()
             self._grid_view.load_unit(0)  # 清空网格
             self._right_header.setText("资源单元视图")
