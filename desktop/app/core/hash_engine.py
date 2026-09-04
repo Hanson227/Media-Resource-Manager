@@ -17,8 +17,9 @@ from typing import Callable, Optional, Sequence
 import numpy as np
 from PIL import Image
 
-from app.utils.constants import HASH_READ_CHUNK_SIZE, VIDEO_MIN_FRAME_BRIGHTNESS
+from app.utils.constants import VIDEO_MIN_FRAME_BRIGHTNESS
 from app.utils.image_helpers import imread_unicode, VideoCapture_unicode
+from app.utils.media_types import is_perceptual_image_extension, is_video_extension
 from app.registry.hash_registry import HashAlgorithmRegistry, create_default_registry
 from app.core.exceptions import HashComputationError, FaceDetectionError
 
@@ -109,6 +110,8 @@ class HashEngine:
         dhash_size: int = 8,
         video_frame_interval: int = 5,
         face_detection_enabled: bool = False,
+        model_dir: Optional[Path] = None,
+        face_confidence: float = 0.6,
     ) -> None:
         """初始化哈希引擎。
 
@@ -119,11 +122,15 @@ class HashEngine:
             dhash_size: dHash 哈希尺寸。
             video_frame_interval: 视频帧提取间隔（秒）。
             face_detection_enabled: 是否启用人脸检测。
+            model_dir: 人脸模型目录（Caffe SSD + OpenFace），默认相对当前目录的 models/。
+            face_confidence: 人脸检测置信度阈值。
         """
         self._algorithms = algorithms
         self._registry = registry or create_default_registry(phash_size, dhash_size)
         self._video_frame_interval = video_frame_interval
         self._face_enabled = face_detection_enabled
+        self._model_dir = Path(model_dir) if model_dir else Path("models")
+        self._face_confidence = face_confidence
         self._cancelled = False
 
         # 延迟导入 OpenCV（仅视频和人脸时需要）
@@ -166,13 +173,14 @@ class HashEngine:
             raise HashComputationError(str(file_path), "all", "文件不存在")
 
         ext = file_path.suffix.lower()
-        is_image = ext in {
-            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif',
-        }
-        is_video = ext in {
-            '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v',
-            '.mpg', '.mpeg', '.3gp', '.ts',
-        }
+        # 类型判定统一走 utils.media_types（单一事实源），此处不再维护内联扩展名表
+        is_image = is_perceptual_image_extension(ext)
+        is_video = is_video_extension(ext)
+
+        # 若扩展名被 config 扩展为媒体类型但既非可哈希图片也非视频（如 RAW），
+        # 仅计算 MD5，宽高/感知哈希留空，避免对不可解码文件刷错误日志。
+        if not is_image and not is_video:
+            logger.debug(f"非感知哈希/视频类型，仅计算 MD5: {file_path}")
 
         md5_val = None
         phash_val = None
@@ -398,7 +406,7 @@ class HashEngine:
             image_path: 图片文件路径。
 
         返回:
-            每张检测到的人脸对应一个 FaceVector。。
+            每张检测到的人脸对应一个 FaceVector。
         """
         if not self._face_enabled:
             return []
@@ -407,7 +415,7 @@ class HashEngine:
         if not cv2:
             return []
 
-        model_dir = Path("models")
+        model_dir = self._model_dir
         if not self._load_models(model_dir):
             return []
 
@@ -431,7 +439,7 @@ class HashEngine:
             face_index = 0
             for i in range(detections.shape[2]):
                 confidence = detections[0, 0, i, 2]
-                if confidence < 0.6:  # 过滤低置信度
+                if confidence < self._face_confidence:  # 过滤低置信度（阈值来自配置）
                     continue
 
                 # 边界框

@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/tags", tags=["标签"])
 
 
 @router.get("")
-async def list_tags():
+def list_tags():
     """获取所有标签。"""
     try:
         with DatabaseManager.session() as session:
@@ -33,7 +33,7 @@ async def list_tags():
 
 
 @router.post("")
-async def create_tag(name: str, color: Optional[str] = None):
+def create_tag(name: str, color: Optional[str] = None):
     """创建新标签。"""
     try:
         with DatabaseManager.session() as session:
@@ -50,7 +50,7 @@ async def create_tag(name: str, color: Optional[str] = None):
 
 
 @router.delete("/{tag_id}")
-async def delete_tag(tag_id: int):
+def delete_tag(tag_id: int):
     """删除标签。"""
     try:
         with DatabaseManager.session() as session:
@@ -66,7 +66,7 @@ async def delete_tag(tag_id: int):
 
 
 @router.get("/by-file/{file_id}")
-async def get_file_tags(file_id: int):
+def get_file_tags(file_id: int):
     """获取指定文件的所有标签。"""
     try:
         with DatabaseManager.session() as session:
@@ -81,7 +81,7 @@ async def get_file_tags(file_id: int):
 
 
 @router.put("/by-file/{file_id}")
-async def set_file_tags(file_id: int, tag_ids: list[int]):
+def set_file_tags(file_id: int, tag_ids: list[int]):
     """设置文件的标签（全量替换）。"""
     try:
         with DatabaseManager.session() as session:
@@ -93,7 +93,7 @@ async def set_file_tags(file_id: int, tag_ids: list[int]):
 
 
 @router.get("/mapped-files")
-async def get_mapped_files(tag_ids: Optional[str] = Query(None, description="逗号分隔的标签ID列表")):
+def get_mapped_files(tag_ids: Optional[str] = Query(None, description="逗号分隔的标签ID列表")):
     """批量查询文件标签映射。可选按标签筛选。"""
     try:
         tids = None

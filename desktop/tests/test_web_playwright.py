@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-# -*- coding: utf-8 -*-
 """
 Web 前端页面级功能测试 —— 基于 Playwright 的 Vue SPA 浏览器测试。
 
@@ -61,7 +60,15 @@ def ensure_db():
     """创建并填充测试数据库。"""
     test_db = Path(__file__).parent.parent / "data" / "test_web_playwright.db"
     if test_db.exists():
-        test_db.unlink()
+        try:
+            test_db.unlink()
+        except OSError as e:
+            # 某些受限环境（如回收站不可用的沙箱）无法删除文件：
+            # 改为先连上旧库并 drop_all，保证下方 init_db 得到干净 schema
+            print(f"  [INFO] 无法删除旧测试库（{e}），将通过 drop_all 重建")
+            DatabaseManager.initialize(test_db)
+            from app.db.models import Base
+            Base.metadata.drop_all(DatabaseManager.get_engine())
     DatabaseManager.initialize(test_db)
     from app.db.migrations import init_db, migrate_db
     init_db(test_db)
@@ -604,7 +611,12 @@ def main():
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(channel="chrome", headless=True)
+            try:
+                # 优先使用系统 Chrome；未安装时回退 Playwright 自带 Chromium
+                browser = pw.chromium.launch(channel="chrome", headless=True)
+            except Exception as launch_err:
+                print(f"  [INFO] 未找到系统 Chrome（{launch_err}），回退 Playwright Chromium")
+                browser = pw.chromium.launch(headless=True)
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 device_scale_factor=1,

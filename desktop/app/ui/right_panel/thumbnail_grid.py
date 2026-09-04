@@ -64,7 +64,7 @@ class ThumbLoadWorker(QThread):
             if not fpath.is_file():
                 continue
 
-            cache_file = self._cache_dir / f"{fid}_thumb.jpg"
+            cache_file = self._generator.get_thumbnail_path(fid, self._cache_dir)
             if cache_file.exists():
                 self.thumb_ready.emit(fid, str(cache_file))
                 count += 1

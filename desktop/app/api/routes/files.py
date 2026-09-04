@@ -38,26 +38,17 @@ router = APIRouter(prefix="/api/files", tags=["文件"])
 
 
 @router.get("", response_model=FileListResponse)
-async def list_files(
+def list_files(
     unit_id: Optional[int] = Query(None, description="资源单元ID"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
 ):
-    """列出媒体文件（支持按单元筛选和分页）。"""
+    """列出媒体文件（支持按单元筛选和 SQL 分页，避免全量载入内存）。"""
     try:
         with DatabaseManager.session() as session:
-            if unit_id:
-                all_files = q.get_files_by_unit(session, unit_id)
-            else:
-                all_files = []
-                units = q.get_all_active_units(session)
-                for u in units:
-                    all_files.extend(q.get_files_by_unit(session, u.id))
-
-            total = len(all_files)
-            start = (page - 1) * per_page
-            page_files = all_files[start:start + per_page]
-
+            page_files, total = q.get_files_page(
+                session, unit_id=unit_id, page=page, per_page=per_page,
+            )
             items = [
                 FileItem(
                     id=f.id, filename=f.filename, media_type=f.media_type,
@@ -74,7 +65,7 @@ async def list_files(
 
 
 @router.get("/{file_id}", response_model=FileDetailResponse)
-async def get_file(file_id: int):
+def get_file(file_id: int):
     """获取单个文件完整详情。"""
     try:
         with DatabaseManager.session() as session:
@@ -99,7 +90,7 @@ async def get_file(file_id: int):
 
 
 @router.delete("/{file_id}", response_model=StatusResponse)
-async def delete_file(file_id: int, request: Request):
+def delete_file(file_id: int, request: Request):
     """删除指定文件记录（同时清理缩略图缓存）。"""
     unit_path = None
     try:
@@ -132,7 +123,7 @@ async def delete_file(file_id: int, request: Request):
 
 
 @router.get("/{file_id}/thumbnail")
-async def get_file_thumbnail(file_id: int, request: Request):
+def get_file_thumbnail(file_id: int, request: Request):
     """返回缩略图图片二进制（供手机端直接显示）。"""
     try:
         with DatabaseManager.session() as session:
@@ -186,7 +177,7 @@ MIME_MAP = {
 
 
 @router.get("/{file_id}/stream")
-async def stream_file(file_id: int):
+def stream_file(file_id: int):
     """流式传输原始媒体文件（支持 Range 请求头）。"""
     with DatabaseManager.session() as session:
         f = q.get_file_by_id(session, file_id)

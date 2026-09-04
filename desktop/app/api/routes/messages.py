@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/messages", tags=["消息"])
 
 
 @router.get("", response_model=MessageListResponse)
-async def list_messages(
+def list_messages(
     unread_only: bool = Query(False, description="仅显示未读"),
     limit: int = Query(50, ge=1, le=200),
 ):
@@ -45,7 +45,7 @@ async def list_messages(
 
 
 @router.get("/unread-count")
-async def get_unread_count():
+def get_unread_count():
     """获取未读消息数量。"""
     try:
         with DatabaseManager.session() as session:
@@ -57,7 +57,7 @@ async def get_unread_count():
 
 
 @router.post("/{msg_id}/read", response_model=StatusResponse)
-async def mark_read(msg_id: int):
+def mark_read(msg_id: int):
     """标记消息为已读。"""
     try:
         with DatabaseManager.session() as session:
@@ -69,7 +69,7 @@ async def mark_read(msg_id: int):
 
 
 @router.post("/read-all", response_model=StatusResponse)
-async def mark_all_read():
+def mark_all_read():
     """标记所有消息为已读。"""
     try:
         with DatabaseManager.session() as session:
@@ -81,7 +81,7 @@ async def mark_all_read():
 
 
 @router.delete("/{msg_id}", response_model=StatusResponse)
-async def dismiss_message(msg_id: int):
+def dismiss_message(msg_id: int):
     """忽略/关闭一条消息。"""
     try:
         with DatabaseManager.session() as session:

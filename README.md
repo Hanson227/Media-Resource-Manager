@@ -51,7 +51,7 @@ desktop/app/
     watcher.py           #   watchdog 实时监控 + 去抖
   db/
     engine.py            #   DatabaseManager 单例（SQLite WAL 模式）
-    models.py            #   10 张 ORM 表
+    models.py            #   12 张 ORM 表
     queries.py           #   所有持久化查询（session 注入）
     migrations.py        #   Schema 版本管理与迁移
   ui/                    # PySide6 桌面界面
@@ -70,7 +70,7 @@ desktop/app/
   services/              # 消息中心、清理服务
   utils/                 # 枚举常量、文件辅助函数
 desktop/tests/
-  test_flow.py           # 后端 + API 端到端测试（369 项）
+  test_flow.py           # 后端 + API 端到端测试（376 项断言，含 PIN 鉴权）
   test_web_playwright.py # Web 前端浏览器测试（32 项）
 ```
 
@@ -79,7 +79,9 @@ desktop/tests/
 ```
 web/
 ├── index.html           # Vue 3 SPA 入口
-├── app.js               # 全部组件（路由、页面、手势）
+├── js-core.js           # API/令牌等基础工具（最先加载）
+├── js-pages.js          # 全部页面组件与滚动辅助
+├── js-app.js            # 路由 + 根组件 + 挂载（最后加载）
 ├── style.css            # Slate-Indigo 设计体系
 ├── manifest.json        # PWA 清单
 ├── sw.js                # Service Worker（离线缓存）
@@ -89,7 +91,7 @@ web/
 
 ### 数据库
 
-SQLite + WAL 模式，10 张表：
+SQLite + WAL 模式，12 张表：
 
 | 表 | 用途 |
 |------|---------|
@@ -98,11 +100,13 @@ SQLite + WAL 模式，10 张表：
 | `media_files` | 每个发现的媒体文件及哈希值 |
 | `face_vectors` | 128 维人脸特征向量 |
 | `video_frames` | 视频关键帧感知哈希 |
-| `dedup_results` | 单元级查重比对结果 |
+| `dedup_results` | 单元级查重比对结果（已处置状态持久保留，重跑不重置） |
 | `dedup_file_matches` | 文件级匹配对 |
 | `messages` | 系统消息/通知收件箱 |
-| `whitelist` | 查重白名单 |
+| `whitelist` | 查重白名单（"加入白名单"后重跑自动跳过该对/单元） |
 | `scan_sessions` | 扫描审计日志 |
+| `file_tags` | 文件分类标签 |
+| `file_tag_mappings` | 文件-标签多对多映射 |
 
 ### 查重流程
 
@@ -148,7 +152,7 @@ python main.py
 # 后端 + API 端到端测试
 cd desktop && python tests/test_flow.py
 
-# Web 前端浏览器测试（需 API 服务运行中）
+# Web 前端浏览器测试（自带 19528 测试服务与独立数据库；无系统 Chrome 时自动回退 Playwright Chromium）
 PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
 ```
 
@@ -175,25 +179,37 @@ PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
 
 | 方法 | 路径 | 说明 |
 |--------|------|-------------|
-| GET | `/api/health` | 健康检查 |
-| GET | `/api/auth/status` | 查询是否启用访问密码 |
-| POST | `/api/auth/verify` | 验证 Web 访问密码 |
+| GET | `/api/health` | 健康检查（免鉴权） |
+| GET | `/api/auth/status` | 查询是否启用访问密码（免鉴权） |
+| POST | `/api/auth/verify` | 验证 Web 访问密码，返回会话令牌 |
+| POST | `/api/auth/change-pin` | 修改访问密码（使旧令牌全部失效） |
 | GET | `/api/units` | 列出资源单元 |
 | GET | `/api/units/{id}` | 单元详情 |
-| GET | `/api/units/{id}/files` | 单元内文件列表 |
-| GET | `/api/files` | 列出媒体文件（支持 unit_id 筛选和分页） |
+| GET | `/api/units/{id}/files` | 单元内全部文件列表 |
+| POST | `/api/units/{id}/star` / `unstar` | 收藏 / 取消收藏 |
+| GET | `/api/files` | 列出媒体文件（SQL 分页，unit_id 筛选） |
 | GET | `/api/files/{id}` | 文件详情 |
-| GET | `/api/files/{id}/thumbnail` | 缩略图 |
-| GET | `/api/files/{id}/stream` | 流式传输原始文件（支持 Range） |
+| GET | `/api/files/{id}/thumbnail` | 缩略图二进制（缓存缺失时按需生成） |
+| GET | `/api/files/{id}/stream` | 流式传输原始文件（支持 Range，HEIC 转 JPEG） |
 | DELETE | `/api/files/{id}` | 删除文件记录 |
-| GET | `/api/dedup/results` | 查重结果列表 |
+| GET | `/api/dedup/results` | 查重结果列表（分页） |
 | GET | `/api/dedup/results/{id}` | 查重详情（含文件匹配列表） |
-| POST | `/api/dedup/results/{id}/resolve` | 处理查重结果 |
+| POST | `/api/dedup/results/{id}/resolve` | 处理查重结果（keep_a/keep_b/whitelist/ignore 等） |
+| POST | `/api/dedup/run` | 触发查重（异步，202 + task_id；与桌面端互斥，跳过已处置/白名单对） |
+| GET | `/api/dedup/run/{task_id}` | 轮询查重任务进度/结果 |
+| GET | `/api/events/unread` | 未读事件简报（角标轮询） |
 | GET | `/api/messages` | 消息列表 |
 | POST | `/api/messages/{id}/read` | 标记已读 |
 | POST | `/api/messages/read-all` | 全部标记已读 |
+| DELETE | `/api/messages/{id}` | 忽略/关闭消息 |
 | GET | `/api/tags` | 标签列表 |
-| GET | `/api/tags/mapped-files` | 标签-文件映射 |
+| POST/DELETE | `/api/tags` `/api/tags/{id}` | 标签 CRUD |
+| GET/PUT | `/api/tags/by-file/{id}` | 文件标签查询 / 全量替换 |
+| GET | `/api/tags/mapped-files` | 标签-文件批量映射 |
+
+> 鉴权：桌面端设置 4 位 Web 密码后，除 `/api/health`、`/api/auth/*` 外
+> 所有 `/api/*` 请求必须携带 `Authorization: Bearer <token>`
+> （token 由 `POST /api/auth/verify` 签发，12 小时有效，修改密码后全部失效）。
 
 完整文档在应用运行后访问 `http://localhost:19527/docs`。
 API 详细契约见 [API.md](API.md)。

@@ -13,7 +13,7 @@ from app.utils.constants import SIZE_UNITS
 
 
 def normalize_path(path: Path) -> Path:
-    """将路径标准化为绝对路径并统一大小写（Windows）。
+    """将路径标准化为绝对路径并解析符号链接（Windows 上统一分隔符与大小写写法）。
 
     参数:
         path: 原始路径。

@@ -6,10 +6,11 @@
 从 JSON 文件加载，支持运行时覆盖。
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import FrozenSet, Optional
+from typing import FrozenSet, Optional, get_type_hints, get_origin
 import json
+import warnings
 
 
 @dataclass(frozen=True)
@@ -142,9 +143,21 @@ class AppConfig:
 
     # ========== 工厂方法 ==========
 
+    @staticmethod
+    def _coerce(name: str, value, hint):
+        """将 JSON 值按字段类型注解转换（Path / frozenset / 原样）。"""
+        if hint is Path:
+            return Path(value)
+        if get_origin(hint) is frozenset:
+            return frozenset(value)
+        return value
+
     @classmethod
     def from_file(cls, path: Path) -> "AppConfig":
         """从 JSON 文件加载配置，文件中的值覆盖默认值。
+
+        仅接受当前字段名集合内的键；未知/遗留键会告警并忽略，
+        避免旧版本或手写配置中的多余字段导致整体回退默认值。
 
         参数:
             path: JSON 配置文件路径。
@@ -162,21 +175,21 @@ class AppConfig:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # 将字符串路径转为 Path 对象
-        if "db_path" in data:
-            data["db_path"] = Path(data["db_path"])
-        if "face_model_dir" in data:
-            data["face_model_dir"] = Path(data["face_model_dir"])
-        if "thumbnail_cache_dir" in data:
-            data["thumbnail_cache_dir"] = Path(data["thumbnail_cache_dir"])
+        hints = get_type_hints(cls)
+        unknown = [k for k in data if k not in hints]
+        if unknown:
+            warnings.warn(
+                f"配置文件含未知字段，已忽略: {', '.join(sorted(unknown))} ({path})"
+            )
+            data = {k: v for k, v in data.items() if k in hints}
 
-        # 将列表转为 frozenset
-        if "media_extensions" in data:
-            data["media_extensions"] = frozenset(data["media_extensions"])
-        if "exclude_patterns" in data:
-            data["exclude_patterns"] = frozenset(data["exclude_patterns"])
-        if "hash_algorithms" in data:
-            data["hash_algorithms"] = frozenset(data["hash_algorithms"])
+        # 将 JSON 值按字段类型注解转换（Path、frozenset 等）
+        for key, value in data.items():
+            try:
+                data[key] = cls._coerce(key, value, hints[key])
+            except (TypeError, ValueError) as e:
+                warnings.warn(f"配置字段 {key} 解析失败，使用默认值: {e}")
+                del data[key]
 
         # 使用默认配置为底，JSON 配置覆盖
         default = cls()
@@ -184,45 +197,22 @@ class AppConfig:
         return cls(**merged)
 
     def to_file(self, path: Path) -> None:
-        """将当前配置保存为 JSON 文件。
+        """将当前配置保存为 JSON 文件（按 dataclass 字段驱动，避免手抄遗漏）。
 
         参数:
             path: 目标 JSON 文件路径。
         """
-        data = {
-            "db_path": str(self.db_path),
-            "media_extensions": sorted(self.media_extensions),
-            "exclude_patterns": sorted(self.exclude_patterns),
-            "hash_algorithms": sorted(self.hash_algorithms),
-            "phash_size": self.phash_size,
-            "dhash_size": self.dhash_size,
-            "video_frame_interval_sec": self.video_frame_interval_sec,
-            "jaccard_threshold": self.jaccard_threshold,
-            "phash_hamming_threshold": self.phash_hamming_threshold,
-            "dhash_hamming_threshold": self.dhash_hamming_threshold,
-            "face_distance_threshold": self.face_distance_threshold,
-            "face_detection_enabled": self.face_detection_enabled,
-            "face_model_dir": str(self.face_model_dir),
-            "face_confidence_threshold": self.face_confidence_threshold,
-            "thumbnail_max_size": self.thumbnail_max_size,
-            "thumbnail_cache_subdir": self.thumbnail_cache_subdir,
-            "thumbnail_cache_dir": str(self.thumbnail_cache_dir),
-            "thumbnail_format": self.thumbnail_format,
-            "thumbnail_quality": self.thumbnail_quality,
-            "window_title": self.window_title,
-            "window_width": self.window_width,
-            "window_height": self.window_height,
-            "splitter_ratio_left": self.splitter_ratio_left,
-            "grid_column_count": self.grid_column_count,
-            "grid_spacing": self.grid_spacing,
-            "watcher_enabled": self.watcher_enabled,
-            "watcher_debounce_ms": self.watcher_debounce_ms,
-            "api_enabled": self.api_enabled,
-            "api_host": self.api_host,
-            "api_port": self.api_port,
-            "smb_share_name_prefix": self.smb_share_name_prefix,
-            "preview_seek_percent": self.preview_seek_percent,
-            "web_pin": self.web_pin,
-        }
+        def _to_json(value):
+            if isinstance(value, Path):
+                return str(value)
+            if isinstance(value, frozenset):
+                return sorted(value)
+            return value
+
+        data = {f.name: _to_json(getattr(self, f.name)) for f in fields(self)}
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def with_updates(self, **updates) -> "AppConfig":
+        """返回应用部分字段更新后的新实例（frozen dataclass 不可变语义）。"""
+        return replace(self, **updates)

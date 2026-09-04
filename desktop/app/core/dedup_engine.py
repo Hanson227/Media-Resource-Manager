@@ -19,6 +19,7 @@ import numpy as np
 from app.registry.hash_registry import HashAlgorithmRegistry, create_default_registry
 from app.core.hash_engine import FileHashes
 from app.utils.constants import MatchType
+from app.utils.hash_helpers import hamming_distance
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,7 @@ class DedupEngine:
         face_distance_threshold: float = 0.6,
         face_enabled: bool = True,
         registry: Optional[HashAlgorithmRegistry] = None,
+        file_count_ratio_limit: float = 0.05,
     ) -> None:
         """初始化查重引擎。
 
@@ -122,6 +124,8 @@ class DedupEngine:
             face_distance_threshold: 人脸欧氏距离阈值。
             face_enabled: 是否启用人脸比对。
             registry: 哈希算法注册器。
+            file_count_ratio_limit: 单元文件数比例下限（默认 0.05 = 1/20，
+                即两单元文件数相差 20 倍以上时杰卡德指数不可能达标，直接跳过）。
         """
         self._jaccard_threshold = jaccard_threshold
         self._phash_threshold = phash_hamming_threshold
@@ -129,6 +133,7 @@ class DedupEngine:
         self._face_threshold = face_distance_threshold
         self._face_enabled = face_enabled
         self._registry = registry or create_default_registry()
+        self._file_count_ratio_limit = file_count_ratio_limit
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -167,7 +172,7 @@ class DedupEngine:
         # ---- 早期过滤：文件数比例差异过大则跳过 ----
         n_a, n_b = len(files_a), len(files_b)
         ratio = n_a / n_b if n_b > n_a else n_b / n_a
-        if ratio < 0.05:  # 文件数差 20 倍以上，不可能达到阈值
+        if ratio < self._file_count_ratio_limit:  # 默认 20 倍以上差异
             logger.debug(
                 f"跳过: [{unit_a_name}] vs [{unit_b_name}] 文件数差异过大 ({n_a} vs {n_b})"
             )
@@ -239,6 +244,7 @@ class DedupEngine:
         unit_files_map: dict[int, list[dict]],
         unit_names: Optional[dict[int, str]] = None,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        skip_pairs: Optional[set] = None,
     ) -> DedupSession:
         """对多个资源单元执行全量两两比对。
 
@@ -246,6 +252,8 @@ class DedupEngine:
             unit_files_map: {unit_id: [file_dict, ...]} 映射。
             unit_names: {unit_id: unit_name} 映射（可选）。
             progress_callback: 进度回调 (已完成对数, 总对数)。
+            skip_pairs: 需要跳过的单元对集合（元素为 (小id, 大id)），
+                用于已处置/白名单对的重跑跳过。
 
         返回:
             DedupSession: 包含所有比对结果和重复结果。
@@ -253,6 +261,7 @@ class DedupEngine:
         start_time = time.time()
         unit_ids = list(unit_files_map.keys())
         n_units = len(unit_ids)
+        skip = skip_pairs or set()
         comparisons: list[UnitComparisonResult] = []
         duplicates: list[UnitComparisonResult] = []
 
@@ -267,6 +276,9 @@ class DedupEngine:
 
                 uid_a = unit_ids[i]
                 uid_b = unit_ids[j]
+                if (uid_a, uid_b) in skip or (uid_b, uid_a) in skip:
+                    completed_pairs += 1  # 跳过的对计入进度
+                    continue
                 name_a = unit_names.get(uid_a, "") if unit_names else ""
                 name_b = unit_names.get(uid_b, "") if unit_names else ""
 
@@ -570,8 +582,5 @@ class DedupEngine:
 
     @staticmethod
     def compute_hamming_distance_from_hex(hex_a: str, hex_b: str) -> int:
-        """从两个十六进制哈希字符串计算汉明距离。"""
-        try:
-            return bin(int(hex_a, 16) ^ int(hex_b, 16)).count("1")
-        except Exception:
-            return 999
+        """从两个十六进制哈希字符串计算汉明距离（统一实现见 utils.hash_helpers）。"""
+        return hamming_distance(hex_a, hex_b)

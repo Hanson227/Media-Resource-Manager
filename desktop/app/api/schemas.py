@@ -2,14 +2,15 @@
 """
 API 数据模式（Pydantic 请求/响应模型）。
 
-作为安卓手机端 API 的契约定义，先以桩端点返回模拟数据。
-后续阶段将这些模型连接到真实数据库查询。
+作为 Web/移动端 API 的契约定义，路由层将数据库结果映射到这些模型返回。
 """
 
 from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
+
+from app.utils.constants import ResolutionStatus
 
 
 # ============================================================
@@ -122,8 +123,13 @@ class DedupListResponse(BaseModel):
 
 
 class DedupResolveRequest(BaseModel):
-    """处理查重结果的请求体。"""
-    resolution: str = Field(..., pattern="^(keep_a|keep_b|merge|whitelist|ignore)$")
+    """处理查重结果的请求体（可选值以 ResolutionStatus 枚举为单一来源）。"""
+    resolution: str = Field(
+        ...,
+        pattern="^(" + "|".join(
+            e.value for e in ResolutionStatus if e.value != ResolutionStatus.PENDING.value
+        ) + ")$",
+    )
     """处理方式。"""
 
 

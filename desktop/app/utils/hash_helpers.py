@@ -14,12 +14,13 @@ def hamming_distance(hex_a: str, hex_b: str) -> int:
         hex_b: 第二个哈希值（十六进制字符串）。
 
     返回:
-        汉明距离（不同比特位的数量）。
+        汉明距离（不同比特位的数量）；输入非法时返回 999（视为“完全不同”，
+        与 registry/dedup 侧的约定一致，便于直接与阈值比较）。
     """
     try:
         return bin(int(hex_a, 16) ^ int(hex_b, 16)).count("1")
     except (ValueError, TypeError):
-        return -1
+        return 999
 
 
 def hamming_similarity(hex_a: str, hex_b: str, max_bits: int = 64) -> float:

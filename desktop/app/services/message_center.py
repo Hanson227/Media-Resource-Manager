@@ -29,7 +29,7 @@ def _msg_to_dict(msg: Message) -> dict:
         "is_read": msg.is_read,
         "is_dismissed": msg.is_dismissed,
         "created_at": msg.created_at.isoformat() if msg.created_at else None,
-        "extra_data": msg.extra_data,
+        "action_data": msg.action_data,
     }
 
 logger = logging.getLogger(__name__)

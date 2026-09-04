@@ -13,7 +13,7 @@ Media/                          # Git root — monorepo
 │   ├── tests/
 │   ├── models/                 # OpenCV DNN 人脸模型文件
 │   └── config.json             # 运行时配置
-├── web/                        # Web 前端 SPA (Vue 3, 单文件)
+├── web/                        # Web 前端 SPA (Vue 3, 无构建; js-core→js-pages→js-app 顺序加载)
 ├── API.md                      # HTTP API 契约
 ├── README.md
 └── CLAUDE.md
@@ -81,7 +81,7 @@ desktop/app/
     watcher.py           #   watchdog-based real-time filesystem monitoring with debounce
   db/
     engine.py            #   DatabaseManager singleton (SQLAlchemy, SQLite WAL mode)
-    models.py            #   10 ORM tables: MediaLibraryRoot, ResourceUnit, MediaFile, etc.
+    models.py            #   12 ORM tables: MediaLibraryRoot, ResourceUnit, MediaFile, FileTag, etc.
     queries.py           #   All persistence functions (session-injected, no raw SQL in business code)
     migrations.py        #   Schema bootstrap via Base.metadata.create_all
   ui/
@@ -141,7 +141,9 @@ The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "reso
 
 ## Database
 
-SQLite with WAL mode + foreign keys enabled. Single-file at `desktop/data/media_manager.db` (configurable via `config.json`). 10 tables with CHECK constraints enforcing enum values. `expire_on_commit=False` so ORM objects survive session close.
+SQLite with WAL mode + foreign keys enabled. Single-file at `desktop/data/media_manager.db` (configurable via `config.json`). 12 tables with CHECK constraints enforcing enum values. `expire_on_commit=False` so ORM objects survive session close.
+
+Dedup semantics: a pair marked keep_a/keep_b/whitelist/ignore stays resolved across re-runs (`upsert_dedup_result` does not reset `is_resolved`); re-running dedup skips resolved/whitelisted unit pairs (`queries.build_dedup_skip_pairs`), so user decisions are one-shot. "加入白名单" additionally writes unit-level rows into the `whitelist` table (same transaction).
 
 Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desktop/config.json`, loaded into a frozen `AppConfig` dataclass at startup.
 

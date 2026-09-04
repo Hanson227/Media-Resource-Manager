@@ -19,6 +19,12 @@ _IMAGE_EXTENSIONS: FrozenSet[str] = frozenset({
     '.pef', '.raf', '.3fr', '.x3f',
 })
 
+_RAW_EXTENSIONS: FrozenSet[str] = frozenset({
+    # RAW 相机格式：无法被 Pillow 直接解码，需要 rawpy 等专用库
+    '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2',
+    '.pef', '.raf', '.3fr', '.x3f',
+})
+
 _VIDEO_EXTENSIONS: FrozenSet[str] = frozenset({
     '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv',
     '.webm', '.m4v', '.mpg', '.mpeg', '.3gp', '.ts',
@@ -66,6 +72,26 @@ def is_image_extension(extension: str) -> bool:
 def is_video_extension(extension: str) -> bool:
     """判断扩展名是否属于视频类型。"""
     return extension.lower() in _VIDEO_EXTENSIONS
+
+
+def is_raw_extension(extension: str) -> bool:
+    """判断扩展名是否为 RAW 相机格式（Pillow 无法直接解码）。"""
+    return extension.lower() in _RAW_EXTENSIONS
+
+
+def get_raw_extensions() -> FrozenSet[str]:
+    """返回所有 RAW 相机扩展名集合。"""
+    return _RAW_EXTENSIONS
+
+
+def is_perceptual_image_extension(extension: str) -> bool:
+    """判断扩展名是否可进行像素级感知哈希（图片且非 RAW）。
+
+    RAW 文件（.cr2/.nef/...）未经 rawpy 解码无法计算 pHash/dHash，
+    由调用方决定是否走专用解码路径；此处统一排除以免各处重复维护清单。
+    """
+    ext = extension.lower()
+    return ext in _IMAGE_EXTENSIONS and ext not in _RAW_EXTENSIONS
 
 
 def get_image_extensions() -> FrozenSet[str]:

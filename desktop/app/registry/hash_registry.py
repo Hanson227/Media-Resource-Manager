@@ -16,11 +16,10 @@ import numpy as np
 from PIL import Image
 
 from app.registry.base import Registry
+from app.utils.constants import HASH_READ_CHUNK_SIZE
+from app.utils.hash_helpers import hamming_distance as _hamming_distance
 
 logger = logging.getLogger(__name__)
-
-# 文件读取分块大小
-_CHUNK_SIZE = 64 * 1024  # 64KB
 
 
 # ============================================================
@@ -125,14 +124,6 @@ def _bits_to_hex(bits: np.ndarray) -> str:
     return hex(val)[2:].zfill(len(bits) // 4)
 
 
-def _hamming_distance(hex_a: str, hex_b: str) -> int:
-    """计算两个十六进制哈希字符串的汉明距离。"""
-    try:
-        return bin(int(hex_a, 16) ^ int(hex_b, 16)).count("1")
-    except Exception:
-        return 999
-
-
 # ============================================================
 # 具体算法实现
 # ============================================================
@@ -152,7 +143,7 @@ class MD5Hash(HashAlgorithm):
         try:
             with open(file_path, "rb") as f:
                 while True:
-                    chunk = f.read(_CHUNK_SIZE)
+                    chunk = f.read(HASH_READ_CHUNK_SIZE)
                     if not chunk:
                         break
                     md5.update(chunk)

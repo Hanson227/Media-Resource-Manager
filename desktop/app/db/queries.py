@@ -17,6 +17,9 @@ from app.db.models import (
     VideoFrame, DedupResult, DedupFileMatch, Message,
     Whitelist, ScanSession, FileTag, FileTagMapping,
 )
+from app.utils.constants import (
+    MessageType, ResolutionStatus, UnitStatus, WhitelistMatchType,
+)
 
 
 # ============================================================
@@ -66,7 +69,7 @@ def set_root_enabled(session: Session, root_id: int, enabled: bool) -> None:
 
 def get_all_active_units(session: Session) -> list[ResourceUnit]:
     """获取所有活跃状态的资源单元。"""
-    return session.query(ResourceUnit).filter(ResourceUnit.status == "active").all()
+    return session.query(ResourceUnit).filter(ResourceUnit.status == UnitStatus.ACTIVE.value).all()
 
 
 def get_unit_by_id(session: Session, unit_id: int) -> Optional[ResourceUnit]:
@@ -83,7 +86,7 @@ def get_units_by_root(session: Session, root_id: int) -> list[ResourceUnit]:
     """获取指定根目录下的所有资源单元。"""
     return session.query(ResourceUnit).filter(
         ResourceUnit.library_root_id == root_id,
-        ResourceUnit.status == "active",
+        ResourceUnit.status == UnitStatus.ACTIVE.value,
     ).all()
 
 
@@ -117,7 +120,7 @@ def update_unit_stats(session: Session, unit_id: int, file_count: int, total_siz
 def mark_unit_merged(session: Session, unit_id: int, parent_id: int) -> None:
     """将资源单元标记为已合并到父单元。"""
     session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
-        "status": "merged",
+        "status": UnitStatus.MERGED.value,
         "parent_id": parent_id,
         "updated_at": datetime.now(),
     })
@@ -167,7 +170,7 @@ def get_starred_units(session: Session) -> list[ResourceUnit]:
     """获取所有已收藏的资源单元。"""
     return session.query(ResourceUnit).filter(
         ResourceUnit.is_starred == True,
-        ResourceUnit.status == "active",
+        ResourceUnit.status == UnitStatus.ACTIVE.value,
     ).all()
 
 
@@ -175,7 +178,7 @@ def mark_unit_excluded(session: Session, unit_id: int) -> None:
     """将资源单元标记为排除状态。"""
     unit = session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).first()
     if unit:
-        unit.status = "excluded"
+        unit.status = UnitStatus.EXCLUDED.value
         unit.updated_at = datetime.now()
         session.flush()
 
@@ -183,14 +186,14 @@ def mark_unit_excluded(session: Session, unit_id: int) -> None:
 def get_excluded_units(session: Session) -> list[ResourceUnit]:
     """获取所有已排除的资源单元。"""
     return session.query(ResourceUnit).filter(
-        ResourceUnit.status == "excluded"
+        ResourceUnit.status == UnitStatus.EXCLUDED.value
     ).all()
 
 
 def unexclude_unit(session: Session, unit_id: int) -> None:
     """将已排除的资源单元恢复为活跃状态。"""
     session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
-        "status": "active",
+        "status": UnitStatus.ACTIVE.value,
         "updated_at": datetime.now(),
     })
 
@@ -198,7 +201,7 @@ def unexclude_unit(session: Session, unit_id: int) -> None:
 def unmerge_unit(session: Session, unit_id: int) -> None:
     """取消合并，将资源单元恢复为活跃状态。"""
     session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
-        "status": "active",
+        "status": UnitStatus.ACTIVE.value,
         "parent_id": None,
         "updated_at": datetime.now(),
     })
@@ -218,6 +221,37 @@ def get_unit_file_count(session: Session, unit_id: int) -> int:
 def get_files_by_unit(session: Session, unit_id: int) -> list[MediaFile]:
     """获取指定资源单元内的所有媒体文件。"""
     return session.query(MediaFile).filter(MediaFile.resource_unit_id == unit_id).all()
+
+
+def get_files_page(session: Session, unit_id: Optional[int] = None,
+                   page: int = 1, per_page: int = 50) -> tuple[list[MediaFile], int]:
+    """分页获取媒体文件（SQL 层 LIMIT/OFFSET，避免全量载入内存）。
+
+    参数:
+        session: 数据库会话。
+        unit_id: 指定资源单元（None 时返回所有活跃单元的文件）。
+        page: 页码（从 1 开始）。
+        per_page: 每页数量。
+
+    返回:
+        (当前页文件列表, 总条数)。
+    """
+    query = session.query(MediaFile)
+    if unit_id is not None:
+        query = query.filter(MediaFile.resource_unit_id == unit_id)
+    else:
+        query = query.join(
+            ResourceUnit, MediaFile.resource_unit_id == ResourceUnit.id
+        ).filter(ResourceUnit.status == UnitStatus.ACTIVE.value)
+
+    total = query.count()
+    files = (
+        query.order_by(MediaFile.id)
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+    return files, total
 
 
 def get_file_by_id(session: Session, file_id: int) -> Optional[MediaFile]:
@@ -259,11 +293,16 @@ def get_files_without_hash(session: Session, hash_type: str = "md5",
 
 
 def get_unindexed_files(session: Session, limit: int = 1000) -> list[MediaFile]:
-    """获取所有活跃单元中未计算任何哈希的文件。"""
+    """获取所有活跃单元中未计算任何哈希的文件。
+
+    说明：索引侧对计算失败/文件缺失会写空串占位（''）以避开重复重试；
+    占位记录由 clear_stale_hash_placeholders() 在后续扫描发现文件恢复时
+    重置为 NULL，从而重新进入待索引队列。
+    """
     return session.query(MediaFile).join(
         ResourceUnit, MediaFile.resource_unit_id == ResourceUnit.id
     ).filter(
-        ResourceUnit.status == "active",
+        ResourceUnit.status == UnitStatus.ACTIVE.value,
         or_(
             MediaFile.md5_hash == None,
             MediaFile.phash == None,
@@ -276,12 +315,26 @@ def get_unindexed_file_count(session: Session) -> int:
     return session.query(MediaFile).join(
         ResourceUnit, MediaFile.resource_unit_id == ResourceUnit.id
     ).filter(
-        ResourceUnit.status == "active",
+        ResourceUnit.status == UnitStatus.ACTIVE.value,
         or_(
             MediaFile.md5_hash == None,
             MediaFile.phash == None,
         )
     ).count()
+
+
+def clear_stale_hash_placeholders(session: Session, file_id: int) -> None:
+    """清除文件记录上的空串哈希占位（'' → NULL）。
+
+    占位表示历史上某次计算失败/文件缺失；当文件已恢复（如再次被扫描到）
+    时调用本函数，让该文件重新进入待索引队列完成自愈。
+    """
+    session.query(MediaFile).filter(MediaFile.id == file_id).update({
+        "md5_hash": None,
+        "phash": None,
+        "dhash": None,
+        "updated_at": datetime.now(),
+    })
 
 
 def insert_media_file(session: Session, **kwargs: Any) -> MediaFile:
@@ -418,7 +471,11 @@ def upsert_dedup_result(session: Session, unit_a_id: int, unit_b_id: int,
                         similarity_score: float, match_count: int,
                         total_files_a: int, total_files_b: int,
                         match_types: str) -> DedupResult:
-    """插入或更新查重结果（按单元对去重）。"""
+    """插入或更新查重结果（按单元对去重）。
+
+    注意：已处置（is_resolved=True）的记录不会被重置为 pending ——
+    用户对某对单元的处置是一次性决定，重复查重不应推翻它。
+    """
     # 统一顺序：确保小 ID 在前，大 ID 在后
     if unit_a_id > unit_b_id:
         unit_a_id, unit_b_id = unit_b_id, unit_a_id
@@ -434,8 +491,10 @@ def upsert_dedup_result(session: Session, unit_a_id: int, unit_b_id: int,
         existing.total_files_a = total_files_a
         existing.total_files_b = total_files_b
         existing.match_types = match_types
-        existing.is_resolved = False
-        existing.resolution = "pending"
+        if not existing.is_resolved:
+            # 仅在用户尚未处置时保持 pending；已处置的保留原状态
+            existing.is_resolved = False
+            existing.resolution = ResolutionStatus.PENDING.value
         existing.updated_at = datetime.now()
         session.flush()
         return existing
@@ -454,6 +513,104 @@ def upsert_dedup_result(session: Session, unit_a_id: int, unit_b_id: int,
         return dr
 
 
+def _pair_key(a: int, b: int) -> tuple[int, int]:
+    """规范化单元对键（小 ID 在前），与 dedup_results 存储顺序一致。"""
+    return (a, b) if a < b else (b, a)
+
+
+def get_resolved_dedup_pairs(session: Session, unit_ids: list[int]) -> set[tuple[int, int]]:
+    """返回给定单元集合中已被用户处置（is_resolved）的单元对。
+
+    查重编排在重跑前用此集合跳过已处置的对，避免重复告警。
+    """
+    if not unit_ids:
+        return set()
+    rows = session.query(DedupResult.unit_a_id, DedupResult.unit_b_id).filter(
+        DedupResult.is_resolved == True,  # noqa: E712
+        or_(
+            DedupResult.unit_a_id.in_(unit_ids),
+            DedupResult.unit_b_id.in_(unit_ids),
+        ),
+    ).all()
+    return {_pair_key(a, b) for a, b in rows}
+
+
+def get_whitelisted_unit_paths(session: Session) -> set[str]:
+    """返回所有白名单（match_type='unit'，精确路径）的单元路径集合。"""
+    rows = session.query(Whitelist.pattern).filter(
+        Whitelist.match_type == WhitelistMatchType.UNIT.value,
+        Whitelist.is_regex == False,  # noqa: E712
+    ).all()
+    return {r[0] for r in rows}
+
+
+def build_dedup_skip_pairs(session: Session, unit_ids: list[int]) -> set[tuple[int, int]]:
+    """构建重跑查重时应跳过的单元对集合。
+
+    跳过条件（任一命中即跳过，避免再次打扰用户）：
+    1. 该对已有 is_resolved=True 的处置记录；
+    2. 该对任一单元已被加入白名单（unit 级）。
+    """
+    skip = get_resolved_dedup_pairs(session, unit_ids)
+    whitelisted = get_whitelisted_unit_paths(session)
+    if whitelisted and unit_ids:
+        units = session.query(ResourceUnit).filter(
+            ResourceUnit.id.in_(unit_ids),
+            ResourceUnit.path.in_(whitelisted),
+        ).all()
+        wl_ids = {u.id for u in units}
+        for a in unit_ids:
+            for b in unit_ids:
+                if a < b and (a in wl_ids or b in wl_ids):
+                    skip.add((a, b))
+    return skip
+
+
+def resolve_dedup_pair(session: Session, unit_a_id: int, unit_b_id: int,
+                       resolution: str) -> Optional[int]:
+    """按单元对将查重结果标记为已处理（GUI 侧处置入口）。
+
+    返回:
+        命中的查重结果 ID；无记录时返回 None。
+    """
+    a, b = _pair_key(unit_a_id, unit_b_id)
+    dr = session.query(DedupResult).filter(
+        DedupResult.unit_a_id == a,
+        DedupResult.unit_b_id == b,
+    ).first()
+    if not dr:
+        return None
+    _apply_dedup_resolution(session, dr, resolution)
+    return dr.id
+
+
+def _apply_dedup_resolution(session: Session, dr: DedupResult, resolution: str) -> None:
+    """应用处置：更新状态；resolution='whitelist' 时同时写入白名单（unit 级）。"""
+    dr.is_resolved = True
+    dr.resolution = resolution
+    dr.resolved_by = "user"
+    dr.updated_at = datetime.now()
+
+    if resolution == ResolutionStatus.WHITELIST.value:
+        unit_a = session.query(ResourceUnit).filter(ResourceUnit.id == dr.unit_a_id).first()
+        unit_b = session.query(ResourceUnit).filter(ResourceUnit.id == dr.unit_b_id).first()
+        for unit in (unit_a, unit_b):
+            if not unit:
+                continue
+            dup = session.query(Whitelist).filter(
+                Whitelist.pattern == unit.path,
+                Whitelist.match_type == WhitelistMatchType.UNIT.value,
+                Whitelist.is_regex == False,  # noqa: E712
+            ).first()
+            if dup is None:
+                session.add(Whitelist(
+                    pattern=unit.path,
+                    match_type=WhitelistMatchType.UNIT.value,
+                    note=f"查重白名单 (dedup_result={dr.id})",
+                ))
+    session.flush()
+
+
 def get_unresolved_duplicates(session: Session, limit: int = 100) -> list[DedupResult]:
     """获取未处理的查重结果。"""
     return session.query(DedupResult).filter(
@@ -462,14 +619,25 @@ def get_unresolved_duplicates(session: Session, limit: int = 100) -> list[DedupR
     ).order_by(DedupResult.similarity_score.desc()).limit(limit).all()
 
 
+def get_all_dedup_results(session: Session, limit: int = 200) -> list[DedupResult]:
+    """获取全部查重结果（按相似度降序）。"""
+    return session.query(DedupResult).order_by(
+        DedupResult.similarity_score.desc()
+    ).limit(limit).all()
+
+
+def get_units_by_ids(session: Session, unit_ids: list[int]) -> list[ResourceUnit]:
+    """按 ID 批量获取资源单元（避免逐条查询的 N+1）。"""
+    if not unit_ids:
+        return []
+    return session.query(ResourceUnit).filter(ResourceUnit.id.in_(unit_ids)).all()
+
+
 def resolve_dedup(session: Session, result_id: int, resolution: str) -> None:
-    """将查重结果标记为已处理。"""
-    session.query(DedupResult).filter(DedupResult.id == result_id).update({
-        "is_resolved": True,
-        "resolution": resolution,
-        "resolved_by": "user",
-        "updated_at": datetime.now(),
-    })
+    """将查重结果标记为已处理（旧版桩函数，语义见 _apply_dedup_resolution）。"""
+    dr = session.query(DedupResult).filter(DedupResult.id == result_id).first()
+    if dr:
+        _apply_dedup_resolution(session, dr, resolution)
 
 
 def get_dedup_by_id(session: Session, result_id: int) -> Optional[DedupResult]:
@@ -562,6 +730,15 @@ def dismiss_message(session: Session, msg_id: int) -> None:
 def get_unread_message_count(session: Session) -> int:
     """获取未读消息数。"""
     return session.query(func.count(Message.id)).filter(
+        Message.is_read == False,
+        Message.is_dismissed == False,
+    ).scalar() or 0
+
+
+def get_unread_dedup_alert_count(session: Session) -> int:
+    """获取未读的查重提醒消息数（角标红点判断用）。"""
+    return session.query(func.count(Message.id)).filter(
+        Message.msg_type == MessageType.DEDUP_ALERT.value,
         Message.is_read == False,
         Message.is_dismissed == False,
     ).scalar() or 0
