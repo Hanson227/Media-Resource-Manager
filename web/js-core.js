@@ -35,3 +35,13 @@ function api(server, path, opts = {}) {
   });
 }
 
+/* ========== 媒体 URL ========== */
+/* <img>/<video> 标签的请求无法携带 Authorization 头，
+   缩略图/视频流改用 ?token= 查询参数鉴权（服务端已支持）。 */
+function mediaUrl(server, path) {
+  const url = `${server}${path}`;
+  const token = getAuthToken(server);
+  if (!token) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
+}
+
