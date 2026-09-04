@@ -71,6 +71,10 @@ def list_units():
                     ),
                     cover_file_id=cover_file_map.get(u.id) or first_map.get(u.id),
                     created_at=u.created_at.isoformat() if u.created_at else None,
+                    content_modified_at=(
+                        u.content_modified_at.isoformat()
+                        if u.content_modified_at else None
+                    ),
                 )
                 for u in units
             ]
@@ -112,6 +116,11 @@ def get_unit(unit_id: int):
                 library_root_id=u.library_root_id,
                 library_root_name=Path(u.library_root.path).name if u.library_root else None,
                 cover_file_id=cover_file_id,
+                created_at=u.created_at.isoformat() if u.created_at else None,
+                content_modified_at=(
+                    u.content_modified_at.isoformat()
+                    if u.content_modified_at else None
+                ),
             )
     except HTTPException:
         raise

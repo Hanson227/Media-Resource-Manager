@@ -2573,6 +2573,134 @@ def test_convert_batch():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_content_modified_at():
+    """单元内容真实修改日期：扫描聚合 max(mtime) → 入库 → 迁移回填 → API 暴露。
+
+    背景：文件夹被移动到新位置后，其文件系统 mtime/ctime 变为移动当天日期，
+    应用必须以"单元内媒体文件的最新 st_mtime"作为排序与显示依据，
+    否则按日期排序无法还原真实时间顺序。
+    """
+    section("测试: 单元内容真实修改日期 content_modified_at")
+    from datetime import datetime
+    from PIL import Image as _Img
+
+    tmp = Path(tempfile.mkdtemp(prefix="content_mtime_"))
+    unit_dir = tmp / "老片段"
+    unit_dir.mkdir(parents=True)
+    img = _Img.new("RGB", (32, 32), color=(10, 20, 30))
+    f_old = unit_dir / "旧.jpg"; img.save(f_old)
+    f_mid = unit_dir / "中.png"; img.save(f_mid)
+    f_new = unit_dir / "新.jpg"; img.save(f_new)
+    ts_old = datetime(2023, 5, 20, 8, 30, 0).timestamp()
+    ts_mid = datetime(2023, 11, 1, 9, 0, 0).timestamp()
+    ts_new = datetime(2024, 6, 15, 12, 0, 0).timestamp()
+    os.utime(f_old, (ts_old, ts_old))
+    os.utime(f_mid, (ts_mid, ts_mid))
+    os.utime(f_new, (ts_new, ts_new))
+    expected_dt = datetime.fromtimestamp(ts_new)
+    unit_id = None
+
+    try:
+        # ---- 1) 扫描聚合 max mtime ----
+        from app.core.scanner import MediaScanner as _MS
+        config = AppConfig()
+        scanner = _MS(extensions=config.media_extensions,
+                      exclude_patterns=config.exclude_patterns)
+        result = scanner.scan_root(tmp)
+        check("扫描识别 1 个单元", len(result.units) == 1)
+        if not result.units:
+            return
+        scanned_unit = result.units[0]
+        check("扫描结果含 latest_mtime 属性", hasattr(scanned_unit, "latest_mtime"))
+        if not hasattr(scanned_unit, "latest_mtime") or scanned_unit.latest_mtime is None:
+            return
+        check("unit.latest_mtime == 单元内最新文件 mtime",
+              abs(scanned_unit.latest_mtime - ts_new) < 1.0)
+
+        # ---- 2) 入库：create_unit / update_unit_stats ----
+        with DatabaseManager.session() as session:
+            root = q.get_root_by_path(session, str(tmp))
+            if not root:
+                root = q.add_library_root(session, str(tmp))
+            root_id = root.id
+            try:
+                new_unit = q.create_unit(
+                    session, path=str(unit_dir), name="老片段",
+                    library_root_id=root_id, is_manual=False,
+                    file_count=3,
+                    total_size=sum(f.size_bytes for f in scanned_unit.files),
+                    content_modified_at=expected_dt,
+                )
+                unit_id = new_unit.id
+            except TypeError:
+                check("create_unit 支持 content_modified_at 参数", False)
+                return
+        check("create_unit 支持 content_modified_at 参数", True)
+        with DatabaseManager.session() as session:
+            row = q.get_unit_by_id(session, unit_id)
+            check("create_unit 落库 content_modified_at",
+                  row.content_modified_at is not None
+                  and row.content_modified_at.date() == expected_dt.date())
+            q.update_unit_stats(session, unit_id, 3, 12345,
+                                content_modified_at=datetime.fromtimestamp(ts_mid))
+        with DatabaseManager.session() as session:
+            row = q.get_unit_by_id(session, unit_id)
+            check("update_unit_stats 更新 content_modified_at",
+                  row.content_modified_at is not None
+                  and row.content_modified_at.date()
+                  == datetime.fromtimestamp(ts_mid).date())
+
+        # ---- 3) media_files 关联 + 迁移回填 ----
+        from app.db.models import MediaFile as _MF, ResourceUnit as _RU
+        with DatabaseManager.session() as session:
+            for f in scanned_unit.files:
+                session.add(_MF(
+                    path=str(f.path), filename=f.filename,
+                    extension=f.extension, media_type=f.media_type,
+                    size_bytes=f.size_bytes, resource_unit_id=unit_id,
+                ))
+            # 模拟旧库：全部单元的内容日期为 NULL
+            session.query(_RU).update({"content_modified_at": None})
+        # 模拟 v3 旧库（test_db() 已把版本升到 4，重置后重新走 v3→v4 迁移）
+        from sqlalchemy import text as _text
+        engine = DatabaseManager.get_engine()
+        with engine.connect() as conn:
+            conn.execute(_text("PRAGMA user_version = 3;"))
+            conn.commit()
+        migrate_db()
+        with DatabaseManager.session() as session:
+            row = q.get_unit_by_id(session, unit_id)
+            check("迁移回填 content_modified_at == 文件真实最新 mtime",
+                  row.content_modified_at is not None
+                  and row.content_modified_at.date() == expected_dt.date())
+
+        # ---- 4) API 暴露 ----
+        from app.api.server import create_app
+        from fastapi.testclient import TestClient
+        app = create_app(AppConfig())
+        client = TestClient(app)
+        resp = client.get("/api/units")
+        check("/api/units 返回 200", resp.status_code == 200)
+        if resp.status_code != 200:
+            return
+        target = next((u for u in resp.json().get("units", [])
+                       if u["path"] == str(unit_dir)), None)
+        check("/api/units 包含测试单元", target is not None)
+        if target:
+            check("/api/units 返回 content_modified_at",
+                  bool(target.get("content_modified_at"))
+                  and target["content_modified_at"].startswith("2024-06-15"))
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+        with DatabaseManager.session() as session:
+            if unit_id is not None:
+                q.delete_resource_unit(session, unit_id)
+            root = q.get_root_by_path(session, str(tmp))
+            if root:
+                session.delete(root)
+
+
 def main():
     global _passed, _failed
     _passed = 0
@@ -2646,6 +2774,7 @@ def main():
         test_watcher_event_handler()
         test_whitelist_and_scan_queries()
         test_unit_metadata_queries()
+        test_content_modified_at()
         test_api_tags_endpoints()
         test_api_messages_endpoints()
         test_api_detail_endpoints()

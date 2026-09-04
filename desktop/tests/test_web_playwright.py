@@ -87,6 +87,17 @@ def ensure_db():
         Image.new("RGB", (100, 100), color=(i * 50, 100, 200)).save(unit_a / f"照片{i+1:02d}.jpg")
         Image.new("RGB", (100, 100), color=(200, 100, i * 50)).save(unit_b / f"视频{i+1:02d}.jpg")
 
+    # 设置不同的文件真实 mtime：片段A=2024-01-01（较早），片段B=2025-06-01（较新）
+    # 使两个单元的 content_modified_at 可区分，供日期排序测试使用
+    import os as _os
+    from datetime import datetime as _dt
+    ts_a = _dt(2024, 1, 1, 10, 0, 0).timestamp()
+    ts_b = _dt(2025, 6, 1, 10, 0, 0).timestamp()
+    for f in unit_a.glob("*.jpg"):
+        _os.utime(f, (ts_a, ts_a))
+    for f in unit_b.glob("*.jpg"):
+        _os.utime(f, (ts_b, ts_b))
+
     from app.core.scanner import MediaScanner
     scanner = MediaScanner(
         extensions=AppConfig().media_extensions,
@@ -96,9 +107,15 @@ def ensure_db():
     with DatabaseManager.session() as session:
         db_root = q.add_library_root(session, str(result.root_path))
         for unit in result.units:
+            # 写入单元内容的真实最新修改时间（与桌面端扫描入库逻辑一致）
+            content_dt = (
+                _dt.fromtimestamp(unit.latest_mtime)
+                if unit.latest_mtime is not None else None
+            )
             new_unit = q.create_unit(
                 session, str(unit.path), unit.name, db_root.id,
                 file_count=unit.file_count, total_size=unit.total_size,
+                content_modified_at=content_dt,
             )
             for df in unit.files:
                 q.insert_media_file(
@@ -198,6 +215,65 @@ def test_units_page_shows_data(page):
                 sort_btns.first.click()
                 page.wait_for_timeout(300)
                 check("排序切换正常", True)
+
+
+def test_units_date_sort_by_content(page):
+    """验证单元按"日期"排序与显示使用内容真实修改时间（content_modified_at）。
+
+    片段A 内容日期 2024-01-01（早），片段B 2025-06-01（晚）。
+    """
+    section("Web 测试 10: 单元日期排序按内容真实日期")
+
+    # 重置排序状态，保证首次点击"日期"为升序
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    page.evaluate("""
+        () => {
+            localStorage.setItem('unit_sort_by', 'name');
+            localStorage.setItem('unit_sort_order', 'asc');
+        }
+    """)
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    page.wait_for_load_state("networkidle")
+
+    page.locator(".root-group").first.wait_for(state="attached", timeout=5000)
+    cards = page.locator(".unit-card")
+    cards.first.wait_for(state="attached", timeout=5000)
+    if cards.count() < 2:
+        check("日期排序测试: 单元不足 2 个，跳过", True)
+        return
+
+    # 找到"日期"排序按钮
+    sort_btns = page.locator(".sort-btn")
+    date_btn = None
+    for i in range(sort_btns.count()):
+        if "日期" in (sort_btns.nth(i).text_content() or ""):
+            date_btn = sort_btns.nth(i)
+            break
+    if date_btn is None:
+        check("日期排序按钮存在", False)
+        return
+    check("日期排序按钮存在", True)
+
+    def first_card_name() -> str:
+        return (page.locator(".unit-card").first.locator(".name")
+                .text_content() or "").strip()
+
+    # 升序（首次点击）：内容日期较早的 片段A 在前
+    date_btn.click()
+    page.wait_for_timeout(300)
+    check("升序: 内容日期较早的片段A在前", "片段A" in first_card_name())
+
+    # 降序（再次点击）：内容日期较新的 片段B 在前
+    date_btn.click()
+    page.wait_for_timeout(300)
+    check("降序: 内容日期较新的片段B在前", "片段B" in first_card_name())
+
+    # 卡片元信息显示的是内容日期而非导入日期
+    metas = page.locator(".unit-card .meta")
+    meta_texts = [metas.nth(i).text_content() or "" for i in range(metas.count())]
+    has_a = any("2024-01-01" in t for t in meta_texts)
+    has_b = any("2025-06-01" in t for t in meta_texts)
+    check("卡片显示内容真实日期", has_a and has_b)
 
 
 def test_unit_files_page(page):
@@ -636,6 +712,7 @@ def main():
             # 运行各测试
             test_home_page_loads(page)
             test_units_page_shows_data(page)
+            test_units_date_sort_by_content(page)
             test_unit_files_page(page)
 
             # 预览导航测试

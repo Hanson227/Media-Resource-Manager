@@ -51,6 +51,9 @@ class DiscoveredFile:
     size_bytes: int
     """文件字节数。"""
 
+    mtime: float
+    """文件修改时间戳（stat.st_mtime，用于聚合单元内容真实日期）。"""
+
     relative_to_root: Path
     """相对于媒体库根目录的路径（用于显示）。"""
 
@@ -83,6 +86,15 @@ class ResourceUnit:
     def total_size(self) -> int:
         """该单元内所有文件的总大小（字节）。"""
         return sum(f.size_bytes for f in self.files)
+
+    @property
+    def latest_mtime(self) -> Optional[float]:
+        """该单元内所有文件的最新修改时间戳（无文件时为 None）。
+
+        这是"文件夹内容真实日期"的来源：文件夹被移动后其自身
+        mtime/ctime 会失真，只有内部文件的 mtime 能反映真实时间顺序。
+        """
+        return max((f.mtime for f in self.files), default=None)
 
 
 @dataclass(frozen=True)
@@ -423,6 +435,7 @@ class MediaScanner:
                                 extension=entry.suffix.lower(),
                                 media_type=media_type,
                                 size_bytes=stat.st_size,
+                                mtime=stat.st_mtime,
                                 relative_to_root=relative,
                             )
                             discovered.append(df)

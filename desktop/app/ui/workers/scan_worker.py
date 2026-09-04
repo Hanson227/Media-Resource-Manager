@@ -7,6 +7,7 @@
 """
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -123,11 +124,19 @@ class ScanWorker(QThread):
                     # 检查已存在的单元
                     existing_unit = q.get_unit_by_path(session, str(unit.path))
 
+                    # 单元内容的真实最新修改时间（文件夹被移动后自身
+                    # mtime/ctime 失真，必须用内部文件的 mtime 聚合值）
+                    content_dt = (
+                        datetime.fromtimestamp(unit.latest_mtime)
+                        if unit.latest_mtime is not None else None
+                    )
+
                     if existing_unit:
                         unit_id = existing_unit.id
                         q.update_unit_stats(
                             session, unit_id,
                             unit.file_count, unit.total_size,
+                            content_modified_at=content_dt,
                         )
                     else:
                         new_unit = q.create_unit(
@@ -138,6 +147,7 @@ class ScanWorker(QThread):
                             is_manual=False,
                             file_count=unit.file_count,
                             total_size=unit.total_size,
+                            content_modified_at=content_dt,
                         )
                         unit_id = new_unit.id
 
@@ -208,12 +218,25 @@ class ScanWorker(QThread):
                     ).delete(synchronize_session=False)
                 if stale_file_count:
                     logger.info(f"清理了 {stale_file_count} 个已不存在的文件记录及缩略图")
-                    # 更新受影响单元的 file_count / total_size
+                    # 更新受影响单元的 file_count / total_size / 内容日期
                     for uid in affected_units:
                         remaining = q.get_files_by_unit(session, uid)
                         new_count = len(remaining)
                         new_size = sum(f.size_bytes for f in remaining)
-                        q.update_unit_stats(session, uid, new_count, new_size)
+                        latest = None
+                        for f in remaining:
+                            try:
+                                m = Path(f.path).stat().st_mtime
+                            except OSError:
+                                continue
+                            latest = m if latest is None else max(latest, m)
+                        q.update_unit_stats(
+                            session, uid, new_count, new_size,
+                            content_modified_at=(
+                                datetime.fromtimestamp(latest)
+                                if latest is not None else None
+                            ),
+                        )
 
                 # 更新扫描会话
                 q.update_scan_session(session, scan_id,

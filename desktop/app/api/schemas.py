@@ -90,6 +90,8 @@ class UnitItem(BaseModel):
     library_root_name: Optional[str] = None
     cover_file_id: Optional[int] = None
     created_at: Optional[str] = None
+    content_modified_at: Optional[str] = None
+    """单元内媒体文件的最新真实修改时间（ISO 格式）；None 表示未采集。"""
 
 
 class UnitListResponse(BaseModel):

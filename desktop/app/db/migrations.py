@@ -6,6 +6,7 @@
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -18,7 +19,7 @@ from app.db.models import Base
 logger = logging.getLogger(__name__)
 
 # 当前数据库 Schema 版本号
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 def init_db(db_path: Optional[Path] = None) -> None:
@@ -61,6 +62,36 @@ def _set_schema_version(engine, version: int) -> None:
     with engine.connect() as conn:
         conn.execute(text(f"PRAGMA user_version = {int(version)};"))
         conn.commit()
+
+
+def _backfill_content_modified_at(engine) -> None:
+    """回填 resource_units.content_modified_at（v3→v4 迁移的存量数据修复）。
+
+    对每个单元，stat 其 media_files 已记录的文件路径，取最新 st_mtime
+    作为单元内容的真实修改日期。文件已不可访问（移动/离线/删除）时跳过；
+    全部不可访问的单元保持 NULL，显示层回退到 created_at。
+    幂等：重复执行结果一致。
+    """
+    from datetime import datetime
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT resource_unit_id, path FROM media_files;"
+        )).all()
+        buckets: dict[int, float] = {}
+        for uid, path in rows:
+            try:
+                m = os.stat(path).st_mtime
+            except OSError:
+                continue  # 文件缺失/离线，跳过
+            buckets[uid] = max(buckets.get(uid, 0.0), m)
+        for uid, m in buckets.items():
+            conn.execute(
+                text("UPDATE resource_units SET content_modified_at = :m WHERE id = :u"),
+                {"m": datetime.fromtimestamp(m), "u": uid},
+            )
+        conn.commit()
+    logger.info(f"回填 content_modified_at 完成: {len(buckets)} 个单元")
 
 
 def migrate_db() -> None:
@@ -118,6 +149,21 @@ def migrate_db() -> None:
                 logger.info("迁移 v2→v3: 创建 file_tags 和 file_tag_mappings 表")
         _set_schema_version(engine, 3)
         current = 3
+
+    if current < 4:
+        inspector = inspect(engine)
+        columns = [c["name"] for c in inspector.get_columns("resource_units")]
+        if "content_modified_at" not in columns:
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "ALTER TABLE resource_units ADD COLUMN content_modified_at DATETIME;"
+                ))
+                conn.commit()
+                logger.info("迁移 v3→v4: 添加 resource_units.content_modified_at 列")
+        # 存量数据回填（幂等）：以文件真实 mtime 修复单元内容日期
+        _backfill_content_modified_at(engine)
+        _set_schema_version(engine, 4)
+        current = 4
 
     logger.info(f"数据库迁移完成，当前版本: v{current}")
 

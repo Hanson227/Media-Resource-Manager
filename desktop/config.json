@@ -73,7 +73,7 @@
   "watcher_enabled": true,
   "watcher_debounce_ms": 2000,
   "api_enabled": true,
-  "api_host": "127.0.0.1",
+  "api_host": "0.0.0.0",
   "api_port": 19527,
   "web_pin": "5678",
   "preview_seek_percent": 5,
