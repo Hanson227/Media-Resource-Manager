@@ -60,6 +60,10 @@ Authorization: Bearer <token>
 令牌通过 `POST /api/auth/verify`（密码正确）获取，有效期 12 小时；
 修改/取消密码会使全部已签发令牌立即失效。令牌仅存于桌面端进程内存。
 
+**查询参数回退**：`<img>`/`<video>` 等标签发起的请求（缩略图 `/api/files/{id}/thumbnail`、
+视频流 `/api/files/{id}/stream`）无法携带自定义请求头，这类请求可改用
+查询参数传递令牌：`?token=<token>`。两种方式对服务端等价。
+
 未鉴权访问返回 `401 {"detail": "未授权或会话已过期"}`。
 
 桌面端未设置密码时，API 保持局域网完全开放；仍不建议将端口暴露到公网。
@@ -631,7 +635,7 @@ struct MediaApi {
 |-----------|-------|----------------|
 | **缩略图 HTTP 服务** | 已支持（见 4.1），`/api/files/{id}/thumbnail` 直接返回图片二进制 | 无需额外处理 |
 | **文件下载/流媒体** | `/api/files/{id}/stream` 支持 Range 请求与常见容器格式 | HEVC/AV1 等需浏览器原生解码支持，或走 SMB |
-| **鉴权** | 设置 4 位 Web 密码后 `/api/*` 强制 Bearer 令牌 | token 由 verify 签发，12h 有效；修改密码即失效 |
+| **鉴权** | 设置 4 位 Web 密码后 `/api/*` 强制 Bearer 令牌 | token 由 verify 签发，12h 有效；修改密码即失效；标签类请求可用 `?token=` 回退 |
 | **搜索** | API 不支持模糊搜索文件名 | 可在 APP 端拉取数据后本地过滤 |
 | **分页** | 部分端点有 hard limit（如 per_page <= 200） | 如有更大需求可回调参 |
 | **变更通知** | 无 WebSocket 推送 | APP 侧定时轮询 `/api/events/unread` |

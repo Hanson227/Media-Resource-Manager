@@ -65,11 +65,15 @@ def _revoke_all_auth_tokens() -> None:
 
 
 def _extract_bearer_token(request: Request) -> str:
-    """从 Authorization 头提取 Bearer token（无/非法格式返回空串）。"""
+    """从请求提取访问令牌：优先 Authorization 头，回退 ?token= 查询参数。
+
+    <img>/<video> 等标签发起的请求（缩略图/视频流）无法携带自定义
+    Authorization 头，因此允许以 ?token= 查询参数传递令牌。
+    """
     header = request.headers.get("authorization", "")
     if header.startswith("Bearer "):
         return header[7:].strip()
-    return ""
+    return (request.query_params.get("token") or "").strip()
 
 
 class AuthVerifyBody(BaseModel):

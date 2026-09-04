@@ -147,7 +147,7 @@ const UnitsPage = {
       this.$router.push('/units/' + id);
     },
     toggleRoot(ri) { this.roots[ri].open = !this.roots[ri].open; },
-    coverUrl(fid) { return fid ? this.serverUrl + '/api/files/' + fid + '/thumbnail' : ''; },
+    coverUrl(fid) { return fid ? mediaUrl(this.serverUrl, '/api/files/' + fid + '/thumbnail') : ''; },
     onCoverLoad(id) { this.coverFailed[id] = false; },
     onCoverError(id) { this.coverFailed[id] = true; },
     formatSize(bytes) {
@@ -418,7 +418,7 @@ const UnitFilesPage = {
       } catch (e) { alert('删除失败: ' + e.message); }
     },
 
-    thumbUrl(id) { return this.serverUrl + '/api/files/' + id + '/thumbnail'; },
+    thumbUrl(id) { return mediaUrl(this.serverUrl, '/api/files/' + id + '/thumbnail'); },
     onImgLoad(id) { this.loaded.add(id); },
     onImgError(e, id) { this.errored.add(id); },
     formatSize(bytes) {
@@ -923,8 +923,8 @@ const PreviewPage = {
       _fileScrollAnchor = file.id;
       this.filename = file.filename;
       this.mediaType = file.media_type || 'image';
-      this.streamUrl = this.serverUrl + '/api/files/' + file.id + '/stream';
-      this.posterUrl = this.serverUrl + '/api/files/' + file.id + '/thumbnail';
+      this.streamUrl = mediaUrl(this.serverUrl, '/api/files/' + file.id + '/stream');
+      this.posterUrl = mediaUrl(this.serverUrl, '/api/files/' + file.id + '/thumbnail');
       // Reset zoom and video state when switching
       this.zoomed = false;
       this.playing = false;
@@ -970,8 +970,8 @@ const PreviewPage = {
       const data = await api(this.serverUrl, '/api/files/' + id);
       this.filename = data.filename || '';
       this.mediaType = data.media_type || 'image';
-      this.streamUrl = this.serverUrl + '/api/files/' + id + '/stream';
-      this.posterUrl = this.serverUrl + '/api/files/' + id + '/thumbnail';
+      this.streamUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/stream');
+      this.posterUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/thumbnail');
       // 如果 fileIndex 没设置，从 fileList 中查找匹配
       if (this.fileIndex < 0 && this.fileList.length) {
         this.fileIndex = this.fileList.findIndex(f => f.id == id);

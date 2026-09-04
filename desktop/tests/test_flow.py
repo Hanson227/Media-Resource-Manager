@@ -1203,6 +1203,27 @@ def test_pin_auth_api():
               client.get("/api/units", headers={"Authorization": f"Bearer {token}"}).status_code == 200)
         check("伪造令牌 → 401",
               client.get("/api/units", headers={"Authorization": "Bearer forged"}).status_code == 401)
+
+        # ---- <img>/<video> 标签请求无法携带 Authorization 头 → ?token= 回退 ----
+        from app.db.models import MediaFile as _MF
+        with DatabaseManager.session() as session:
+            row = session.query(_MF.id).first()
+        fid = row[0] if row else None
+        if fid is None:
+            check("媒体端点鉴权: 无文件可测，跳过", True)
+        else:
+            check("缩略图未带令牌 → 401",
+                  client.get(f"/api/files/{fid}/thumbnail").status_code == 401)
+            check("缩略图伪造 ?token → 401",
+                  client.get(f"/api/files/{fid}/thumbnail?token=forged").status_code == 401)
+            r_q = client.get(f"/api/files/{fid}/thumbnail?token={token}")
+            check("缩略图 ?token= 有效令牌 → 200", r_q.status_code == 200)
+            r_h = client.get(f"/api/files/{fid}/thumbnail",
+                             headers={"Authorization": f"Bearer {token}"})
+            check("缩略图 Authorization 头仍有效 → 200", r_h.status_code == 200)
+            r_s = client.get(f"/api/files/{fid}/stream?token={token}", headers={"Range": "bytes=0-9"})
+            check("视频流 ?token= 有效令牌 → 206/200",
+                  r_s.status_code in (200, 206))
     finally:
         _revoke_all_auth_tokens()
 
