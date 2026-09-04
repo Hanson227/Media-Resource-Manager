@@ -112,6 +112,14 @@ class ResourceUnit(Base):
     cover_path = Column(String(2048), nullable=True, default=None)
     """用户手动设置的封面图片路径。"""
 
+    content_modified_at = Column(DateTime, nullable=True, default=None)
+    """单元内媒体文件的最新真实修改时间（max st_mtime）。
+
+    用于按日期排序/显示，避免依赖文件夹自身的 mtime/ctime——
+    文件夹被移动到新位置后其时间戳会变成移动当天日期，无法反映内容时间顺序。
+    NULL 表示尚未采集（旧数据回填前），显示与排序时回退到 created_at。
+    """
+
     library_root_id = Column(Integer, ForeignKey("media_library_roots.id", ondelete="CASCADE"), nullable=False)
     """所属媒体库根目录 ID。"""
 

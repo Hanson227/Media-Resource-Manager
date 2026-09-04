@@ -8,9 +8,7 @@
 """
 
 import logging
-import os
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -28,13 +26,17 @@ from app.ui.left_panel.context_menu import FolderTreeContextMenu
 logger = logging.getLogger(__name__)
 
 
-def _get_ctime(path: str) -> str:
-    """获取文件系统创建日期（YYYY-MM-DD），路径不存在时返回空串。"""
-    try:
-        ts = os.path.getctime(path)
-        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-    except OSError:
-        return ""
+def _unit_date_str(unit) -> str:
+    """单元显示/排序用日期（ISO 字符串，取前 10 位即 YYYY-MM-DD）。
+
+    优先使用 content_modified_at（单元内媒体文件的最新真实修改时间），
+    文件夹被移动后该值依然正确；未采集时回退 created_at（导入时间）。
+    """
+    if unit.content_modified_at is not None:
+        return unit.content_modified_at.isoformat()
+    if unit.created_at is not None:
+        return unit.created_at.isoformat()
+    return ""
 
 
 # ============================================================
@@ -119,7 +121,7 @@ class FolderTreeModel(QAbstractItemModel):
                             is_starred=unit.is_starred or False,
                             status=unit.status or "active",
                             library_root_id=root.id,
-                            created_at=_get_ctime(unit.path),
+                            created_at=_unit_date_str(unit),
                         )
                         root_node.children.append(unit_node)
                     self._roots.append(root_node)

@@ -107,7 +107,7 @@ const UnitsPage = {
                   <div class="info-row">
                     <div class="info-text">
                       <div class="name"><span v-if="u.is_starred" class="star-icon">⭐ </span>{{ u.name }}</div>
-                      <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}<span v-if="u.created_at"> · {{ formatDate(u.created_at) }}</span></div>
+                      <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}<span v-if="u.content_modified_at || u.created_at"> · {{ formatDate(u.content_modified_at || u.created_at) }}</span></div>
                     </div>
                     <button class="card-more" @click.stop="$root.showSheet(u.name, [
                       { label: u.is_starred ? '取消收藏' : '收藏', icon: u.is_starred ? 'mdi-star-off' : 'mdi-star-outline',
@@ -206,7 +206,9 @@ const UnitsPage = {
       } else if (this.sortBy === 'date') {
         arr.sort((a, b) => {
           if (a.is_starred !== b.is_starred) return a.is_starred ? -1 : 1;
-          const da = a.created_at || '', db = b.created_at || '';
+          // 内容真实日期优先；旧数据无值时回退导入时间
+          const da = a.content_modified_at || a.created_at || '';
+          const db = b.content_modified_at || b.created_at || '';
           return this.sortOrder === 'asc' ? da.localeCompare(db) : db.localeCompare(da);
         });
       }

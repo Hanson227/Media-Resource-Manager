@@ -39,6 +39,7 @@ from app.ui.workers.hash_worker import HashWorker
 from app.ui.workers.dedup_worker import DedupWorker
 from app.utils.constants import MediaType
 from app.utils.file_helpers import format_size
+from app.utils.media_types import is_media_file
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +509,8 @@ class MainWindow(QMainWindow):
                     tags_list = all_mapped.get(f.id, [])
                     tags_str = ", ".join(t["name"] for t in tags_list) if tags_list else ""
                     try:
-                        ts = Path(f.path).stat().st_ctime
+                        # 用修改时间而非创建时间：跨盘移动后 ctime 同样会失真
+                        ts = Path(f.path).stat().st_mtime
                         file_date = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
                     except OSError:
                         file_date = ""
@@ -652,6 +654,14 @@ class MainWindow(QMainWindow):
         try:
             with DatabaseManager.session() as session:
                 parent = q.get_unit_by_id(session, parent_id)
+                # 内容日期取父/子单元中的最新值
+                latest_content = parent.content_modified_at if parent else None
+                child_units = q.get_units_by_ids(session, child_ids) if child_ids else []
+                for cu in child_units:
+                    if cu.content_modified_at is not None and (
+                            latest_content is None
+                            or cu.content_modified_at > latest_content):
+                        latest_content = cu.content_modified_at
                 for cid in child_ids:
                     q.mark_unit_merged(session, cid, parent_id)
                 # 重新统计父单元
@@ -662,7 +672,8 @@ class MainWindow(QMainWindow):
                     files = q.get_files_by_unit(session, uid)
                     total_files += len(files)
                     total_size += sum(f.size_bytes for f in files)
-                q.update_unit_stats(session, parent_id, total_files, total_size)
+                q.update_unit_stats(session, parent_id, total_files, total_size,
+                                    content_modified_at=latest_content)
             self._tree_view.refresh_model()
             self._status_bar.set_status(f"已合并 {len(child_ids)} 个单元")
         except Exception as e:
@@ -697,8 +708,24 @@ class MainWindow(QMainWindow):
                     roots = q.get_all_roots(session)
                     root_id = roots[0].id if roots else None
                     if root_id:
+                        # 采集文件夹内媒体文件的真实最新修改时间
+                        content_dt = None
+                        latest = None
+                        for entry in p.rglob("*"):
+                            if not entry.is_file():
+                                continue
+                            if not is_media_file(entry, self._config.media_extensions):
+                                continue
+                            try:
+                                m = entry.stat().st_mtime
+                            except OSError:
+                                continue
+                            latest = m if latest is None else max(latest, m)
+                        if latest is not None:
+                            content_dt = datetime.fromtimestamp(latest)
                         q.create_unit(session, str(p), p.name, root_id,
-                                     is_manual=True, file_count=0, total_size=0)
+                                     is_manual=True, file_count=0, total_size=0,
+                                     content_modified_at=content_dt)
             self._tree_view.refresh_model()
             self._status_bar.set_status(f"已标记: {Path(folder_path).name}")
         except Exception as e:
@@ -1305,6 +1332,10 @@ class MainWindow(QMainWindow):
                         "preview_path": preview_path,
                         "preview_file_id": preview_file_id,
                         "created_at": u.created_at.isoformat() if u.created_at else None,
+                        "content_modified_at": (
+                            u.content_modified_at.isoformat()
+                            if u.content_modified_at else None
+                        ),
                     })
                     total_files += u.file_count or 0
                     total_size += u.total_size or 0

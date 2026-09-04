@@ -97,24 +97,36 @@ def get_child_units(session: Session, parent_id: int) -> list[ResourceUnit]:
 
 def create_unit(session: Session, path: str, name: str, library_root_id: int,
                 is_manual: bool = False, file_count: int = 0,
-                total_size: int = 0) -> ResourceUnit:
-    """创建新的资源单元记录。"""
+                total_size: int = 0,
+                content_modified_at: Optional[datetime] = None) -> ResourceUnit:
+    """创建新的资源单元记录。
+
+    content_modified_at: 单元内媒体文件的最新真实修改时间（None 表示未采集）。
+    """
     unit = ResourceUnit(
         path=path, name=name, library_root_id=library_root_id,
         is_manual=is_manual, file_count=file_count, total_size=total_size,
+        content_modified_at=content_modified_at,
     )
     session.add(unit)
     session.flush()
     return unit
 
 
-def update_unit_stats(session: Session, unit_id: int, file_count: int, total_size: int) -> None:
-    """更新资源单元的文件统计信息。"""
-    session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
+def update_unit_stats(session: Session, unit_id: int, file_count: int, total_size: int,
+                      content_modified_at: Optional[datetime] = None) -> None:
+    """更新资源单元的文件统计信息。
+
+    content_modified_at 非 None 时一并更新（None 不覆盖已有值）。
+    """
+    updates = {
         "file_count": file_count,
         "total_size": total_size,
         "updated_at": datetime.now(),
-    })
+    }
+    if content_modified_at is not None:
+        updates["content_modified_at"] = content_modified_at
+    session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update(updates)
 
 
 def mark_unit_merged(session: Session, unit_id: int, parent_id: int) -> None:

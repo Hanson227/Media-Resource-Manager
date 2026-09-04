@@ -171,11 +171,21 @@ GET /api/units
       "total_size": 2457600,
       "is_manual": false,
       "is_starred": false,
-      "status": "active"
+      "status": "active",
+      "library_root_id": 1,
+      "library_root_name": "Media",
+      "cover_file_id": 101,
+      "created_at": "2026-01-01T10:00:00",
+      "content_modified_at": "2025-12-30T18:22:31"
     }
   ]
 }
 ```
+
+> `created_at` 为单元入库时间；`content_modified_at` 为单元内媒体文件的
+> 最新真实修改时间（max st_mtime），**按日期排序/显示应使用该字段**——
+> 文件夹被移动后其文件系统时间戳会失真，此字段不受影响。
+> `content_modified_at` 为 null 时（未采集/文件全部不可访问）回退 `created_at`。
 
 #### 获取单个单元详情
 

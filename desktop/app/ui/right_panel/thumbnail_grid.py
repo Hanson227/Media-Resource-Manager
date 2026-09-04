@@ -364,7 +364,12 @@ class FolderCardModel(QAbstractListModel):
         elif field == "size":
             self._data.sort(key=lambda x: x.get("total_size", 0), reverse=rev)
         elif field == "date":
-            self._data.sort(key=lambda x: x.get("created_at", ""), reverse=rev)
+            # 优先内容真实日期；旧数据无值时回退导入时间
+            self._data.sort(
+                key=lambda x: (x.get("content_modified_at")
+                               or x.get("created_at", "")),
+                reverse=rev,
+            )
         self.endResetModel()
 
     def add_thumb(self, row: int, pixmap: QPixmap) -> None:
