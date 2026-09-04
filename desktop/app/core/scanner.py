@@ -20,6 +20,13 @@ from app.core.exceptions import ScanError, AccessDeniedError
 
 logger = logging.getLogger(__name__)
 
+# 单元识别启发式阈值（集中定义，便于调优与测试）
+MIN_FILES_FOR_LEAF_UNIT = 2
+"""叶子单元最少媒体文件数：少于该数量且无子目录的候选视为零散文件，不成单元。"""
+
+MIN_DIRECT_MEDIA_FOR_CONTAINER = 2
+"""容器单元直接媒体文件阈值：直接媒体 ≤ 该值且含独立子单元时，视为松散容器跳过。"""
+
 
 # ============================================================
 # 不可变结果类型
@@ -272,7 +279,7 @@ class MediaScanner:
         # 如果一个非候选父文件夹内有且仅有一个候选子文件夹，
         # 将父文件夹提升为候选（解决 "父无媒体/子有媒体" 时子文件夹名无意义的问题）
         promoted: set[Path] = set()
-        for c in list(candidates):
+        for c in sorted(candidates):  # 有序处理，保证确定性
             if c == root:
                 continue  # 根本身不参与提升
             parent = c.parent
@@ -290,8 +297,7 @@ class MediaScanner:
 
         # ---- 跳过单文件叶子单元 ----
         # 文件夹内只有零散文件（无子目录、少于最少文件数），跳过避免产生无意义单元
-        MIN_FILES_FOR_LEAF_UNIT = 2
-        for c in list(candidates):
+        for c in sorted(candidates):
             if c == root or c in promoted:
                 continue
             try:
@@ -311,36 +317,40 @@ class MediaScanner:
             except OSError:
                 continue
 
-        # 计算每个候选有多少个子候选
-        def count_child_candidates(parent: Path) -> int:
-            count = 0
-            for c in candidates:
-                if c == parent:
-                    continue
-                try:
-                    c.relative_to(parent)
-                    count += 1
-                except ValueError:
-                    continue
-            return count
+        # ---- 吞并过滤（原 O(n³) 全量重扫 → O(n × 目录深度) 预计算）----
+        # 语义与历史实现保持一致：
+        #   desc_count[p]    = p 路径下（任意层级）的候选单元数
+        #   子候选 C 的“最近候选祖先”候选数 ≤ 1 → 并入父单元
+        # 仅统计路径祖先而非两两 relative_to，避免候选上千时的组合爆炸。
+        desc_count: dict[Path, int] = {}
+        nearest_parent: dict[Path, Optional[Path]] = {}
+        for c in candidates:
+            p = c.parent
+            first: Optional[Path] = None
+            while p != c:  # 爬祖先链到文件系统根
+                if p in candidates:
+                    desc_count[p] = desc_count.get(p, 0) + 1
+                    if first is None:
+                        first = p
+                if p == p.parent:  # 已到文件系统根
+                    break
+                p = p.parent
+            nearest_parent[c] = first
 
         # 过滤：父候选吞并子候选的条件是父只有1个子候选
         # （父有多个子候选时，子候选各自独立，例如"网友自拍"下有多个"片段X"）
         removed: set[Path] = set()
-        for child in sorted(candidates, key=lambda p: str(p)):
-            if child in removed:
+        for child in sorted(candidates):  # 祖先路径字典序先于后代 → 父先处理
+            if child == root or child in removed:
                 continue
-            for parent in candidates:
-                if parent == child or parent in removed:
-                    continue
-                try:
-                    child.relative_to(parent)
-                    # child 是 parent 的子目录
-                    if count_child_candidates(parent) <= 1:
-                        removed.add(child)
-                    break  # 只检查最近的父候选
-                except ValueError:
-                    continue
+            # 取“最近且尚未被移除”的候选祖先（最近祖先被吞并时向上继续）
+            anc = nearest_parent.get(child)
+            while anc is not None and anc in removed:
+                anc = nearest_parent.get(anc)
+            if anc is None:
+                continue
+            if desc_count.get(anc, 0) <= 1:
+                removed.add(child)
 
         top_level = [p for p in candidates if p not in removed]
 
@@ -356,7 +366,7 @@ class MediaScanner:
                     e for e in entries
                     if e.is_file() and is_media_file(e, self._extensions)
                 ]
-                if len(direct_media) > 2:
+                if len(direct_media) > MIN_DIRECT_MEDIA_FOR_CONTAINER:
                     continue  # 文件足够多，保留
                 # 检查子目录中是否有独立单元
                 child_candidates = [

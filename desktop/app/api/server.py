@@ -2,20 +2,23 @@
 """
 API 服务器 —— FastAPI 应用创建和 uvicorn 线程管理。
 
-在后台线程中启动 HTTP 服务，监听 0.0.0.0:19527。
-当前版本所有端点返回模拟数据，后续可通过替换 route 实现对接真实数据库。
+在后台线程中启动 HTTP 服务，监听 config.api_host:config.api_port（默认 127.0.0.1:19527）。
+路由接入真实数据库查询；内嵌 Web 前端静态文件服务。
 """
 
 import logging
+import secrets
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from config import AppConfig
 from app.api.routes import files, units, dedup, messages, events, tags
@@ -24,6 +27,60 @@ logger = logging.getLogger(__name__)
 
 # 全局 FastAPI 应用实例
 _app: Optional[FastAPI] = None
+
+# ============================================================
+# Web PIN 会话令牌（进程内，简单过期）
+# ============================================================
+_AUTH_TOKEN_TTL = 12 * 3600  # 12 小时
+_AUTH_ALLOWED_UNAUTH_PREFIXES = (
+    "/api/health", "/api/auth/status", "/api/auth/verify", "/api/auth/change-pin",
+)
+_auth_tokens: dict[str, float] = {}          # token -> 过期时间戳
+_auth_tokens_lock = threading.Lock()
+
+
+def _issue_auth_token() -> str:
+    """签发新令牌并记录过期时间。"""
+    token = secrets.token_urlsafe(32)
+    with _auth_tokens_lock:
+        _auth_tokens[token] = time.time() + _AUTH_TOKEN_TTL
+    return token
+
+
+def _validate_auth_token(token: str) -> bool:
+    """校验令牌是否有效（存在且未过期），顺带清理过期项。"""
+    now = time.time()
+    with _auth_tokens_lock:
+        expired = [t for t, exp in _auth_tokens.items() if exp < now]
+        for t in expired:
+            _auth_tokens.pop(t, None)
+        exp = _auth_tokens.get(token)
+        return exp is not None and exp > now
+
+
+def _revoke_all_auth_tokens() -> None:
+    """使全部令牌失效（PIN 变更后调用）。"""
+    with _auth_tokens_lock:
+        _auth_tokens.clear()
+
+
+def _extract_bearer_token(request: Request) -> str:
+    """从 Authorization 头提取 Bearer token（无/非法格式返回空串）。"""
+    header = request.headers.get("authorization", "")
+    if header.startswith("Bearer "):
+        return header[7:].strip()
+    return ""
+
+
+class AuthVerifyBody(BaseModel):
+    """Web PIN 校验请求体。"""
+    pin: str = Field(default="", max_length=16)
+
+
+class ChangePinBody(BaseModel):
+    """修改 Web PIN 请求体。"""
+    old_pin: str = Field(default="", max_length=16)
+    new_pin: str = Field(default="", max_length=16)
 
 
 def create_app(config: AppConfig) -> FastAPI:
@@ -37,7 +94,7 @@ def create_app(config: AppConfig) -> FastAPI:
     """
     app = FastAPI(
         title="影视资源管理器 API",
-        description="本地影视资源管理查重工具的 HTTP API，为安卓手机端预留。当前版本返回模拟数据。",
+        description="本地影视资源管理查重工具的 HTTP API，供 Web 前端与局域网移动端访问。",
         version="0.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
@@ -65,85 +122,68 @@ def create_app(config: AppConfig) -> FastAPI:
 
     # 健康检查
     @app.get("/api/health")
-    async def health():
+    def health():
         return {"status": "ok"}
 
     # ============================================================
     # Web 访问认证
     # ============================================================
     @app.get("/api/auth/status")
-    async def auth_status(request: Request):
+    def auth_status(request: Request):
         cfg = getattr(request.app.state, "config", None)
         pin = cfg.web_pin if cfg else ""
         return {"pin_required": bool(pin)}
 
     @app.post("/api/auth/verify")
-    async def auth_verify(request: Request):
+    def auth_verify(body: AuthVerifyBody, request: Request):
         cfg = getattr(request.app.state, "config", None)
         if not cfg or not cfg.web_pin:
             return JSONResponse(status_code=400, content={"verified": False, "error": "未配置访问密码"})
-        body = await request.json()
-        if body.get("pin", "") == cfg.web_pin:
-            return {"verified": True}
+        if body.pin == cfg.web_pin:
+            return {"verified": True, "token": _issue_auth_token()}
         return JSONResponse(status_code=403, content={"verified": False, "error": "密码错误"})
 
     @app.post("/api/auth/change-pin")
-    async def auth_change_pin(request: Request):
+    def auth_change_pin(body: ChangePinBody, request: Request):
         """修改 Web 访问密码。需要提供当前密码验证身份。"""
         import hmac
         cfg = getattr(request.app.state, "config", None)
         if not cfg:
             return JSONResponse(status_code=500, content={"success": False, "error": "配置不可用"})
-        body = await request.json()
         # 如果已设置密码，必须验证旧密码
         if cfg.web_pin:
-            old_pin = body.get("old_pin", "")
-            if not hmac.compare_digest(old_pin, cfg.web_pin):
+            if not hmac.compare_digest(body.old_pin, cfg.web_pin):
                 return JSONResponse(status_code=403, content={"success": False, "error": "当前密码错误"})
-        new_pin = body.get("new_pin", "")
+        new_pin = body.new_pin
         if len(new_pin) > 4:
             return JSONResponse(status_code=400, content={"success": False, "error": "密码最长4位"})
-        # 更新配置
-        new_config = AppConfig(
-            db_path=cfg.db_path,
-            thumbnail_cache_dir=cfg.thumbnail_cache_dir,
-            media_extensions=cfg.media_extensions,
-            exclude_patterns=cfg.exclude_patterns,
-            hash_algorithms=cfg.hash_algorithms,
-            phash_size=cfg.phash_size,
-            dhash_size=cfg.dhash_size,
-            video_frame_interval_sec=cfg.video_frame_interval_sec,
-            jaccard_threshold=cfg.jaccard_threshold,
-            phash_hamming_threshold=cfg.phash_hamming_threshold,
-            dhash_hamming_threshold=cfg.dhash_hamming_threshold,
-            face_distance_threshold=cfg.face_distance_threshold,
-            face_detection_enabled=cfg.face_detection_enabled,
-            face_model_dir=cfg.face_model_dir,
-            face_confidence_threshold=cfg.face_confidence_threshold,
-            window_title=cfg.window_title,
-            window_width=cfg.window_width,
-            window_height=cfg.window_height,
-            splitter_ratio_left=cfg.splitter_ratio_left,
-            grid_column_count=cfg.grid_column_count,
-            grid_spacing=cfg.grid_spacing,
-            watcher_enabled=cfg.watcher_enabled,
-            watcher_debounce_ms=cfg.watcher_debounce_ms,
-            api_enabled=cfg.api_enabled,
-            api_host=cfg.api_host,
-            api_port=cfg.api_port,
-            smb_share_name_prefix=cfg.smb_share_name_prefix,
-            preview_seek_percent=cfg.preview_seek_percent,
-            web_pin=new_pin,
-        )
-        # 持久化到磁盘
+        # 更新配置（frozen dataclass 仅替换 web_pin 字段）
         try:
+            new_config = cfg.with_updates(web_pin=new_pin)
             new_config.to_file(Path("config.json"))
         except Exception as e:
             logger.error(f"保存配置失败: {e}")
             return JSONResponse(status_code=500, content={"success": False, "error": "保存配置失败"})
         # 更新内存中的配置
         request.app.state.config = new_config
+        # PIN 已变更：使旧令牌全部失效，需重新验证
+        _revoke_all_auth_tokens()
         return {"success": True, "pin_required": bool(new_pin)}
+
+    # ============================================================
+    # Web PIN 强制（配置 web_pin 时 /api/* 均需携带有效令牌）
+    # ============================================================
+    @app.middleware("http")
+    async def enforce_web_pin(request: Request, call_next):
+        cfg = getattr(request.app.state, "config", None)
+        pin = cfg.web_pin if cfg else ""
+        path = request.url.path
+        if (pin and path.startswith("/api")
+                and not path.startswith(_AUTH_ALLOWED_UNAUTH_PREFIXES)
+                and request.method != "OPTIONS"):
+            if not _validate_auth_token(_extract_bearer_token(request)):
+                return JSONResponse(status_code=401, content={"detail": "未授权或会话已过期"})
+        return await call_next(request)
 
     # ============================================================
     # 静态文件（Web 前端 SPA）
@@ -152,7 +192,7 @@ def create_app(config: AppConfig) -> FastAPI:
     if web_dir.is_dir():
         # 根端点：浏览器返回 index.html，API 客户端返回 JSON
         @app.get("/")
-        async def root(request: Request):
+        def root(request: Request):
             accept = request.headers.get("accept", "")
             if "text/html" in accept:
                 return FileResponse(str(web_dir / "index.html"), media_type="text/html")
@@ -177,13 +217,33 @@ def create_app(config: AppConfig) -> FastAPI:
     else:
         # 没有 web 目录时回退
         @app.get("/")
-        async def root():
+        def root():
             return {
                 "name": "影视资源管理器 API",
                 "version": "0.1.0",
                 "status": "running",
                 "docs": "/docs",
             }
+
+    # ============================================================
+    # 全局异常兜底：保证错误响应始终为 JSON
+    # ============================================================
+    from app.core.exceptions import MediaManagerError as _MediaManagerError
+
+    @app.exception_handler(_MediaManagerError)
+    def _handle_media_error(request: Request, exc):
+        logger.error(f"业务异常 {request.url.path}: {exc}")
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+    @app.exception_handler(HTTPException)
+    def _handle_http_error(request: Request, exc):
+        # 路由层显式抛出的 HTTPException：透传状态码与 detail
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    @app.exception_handler(Exception)
+    def _handle_unexpected(request: Request, exc):
+        logger.exception(f"未捕获异常 {request.url.path}: {exc!r}")
+        return JSONResponse(status_code=500, content={"detail": "内部服务器错误"})
 
     return app
 

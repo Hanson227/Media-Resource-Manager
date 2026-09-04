@@ -2,7 +2,10 @@
 """
 数据库 ORM 模型定义。
 
-使用 SQLAlchemy DeclarativeBase 定义全部 10 张表。
+使用 SQLAlchemy DeclarativeBase 定义全部 12 张表：
+media_library_roots / resource_units / media_files / face_vectors / video_frames /
+dedup_results / dedup_file_matches / messages / whitelist / scan_sessions /
+file_tags / file_tag_mappings。
 所有字段名使用英文，注释使用中文。
 """
 
@@ -14,12 +17,25 @@ from sqlalchemy import (
     DateTime, Text, BLOB, ForeignKey, Index, UniqueConstraint,
     CheckConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, relationship, backref
+from sqlalchemy.orm import DeclarativeBase, relationship
+
+from app.utils.constants import (
+    MatchType, MediaType, MessageType, ResolutionStatus,
+    ScanStatus, UnitStatus, WhitelistMatchType,
+)
 
 
 class Base(DeclarativeBase):
     """SQLAlchemy 声明式基类。"""
     pass
+
+
+def _enum_in(enum_cls) -> str:
+    """将枚举类转为 CHECK 约束的 IN 列表（'a', 'b', ...），消除状态值双写。
+
+    注意：枚举定义顺序需与既有历史约束一致，保证新旧建库 SQL 完全兼容。
+    """
+    return ", ".join(f"'{e.value}'" for e in enum_cls)
 
 
 # ============================================================
@@ -61,7 +77,7 @@ class ResourceUnit(Base):
         Index("ix_resource_units_status", "status"),
         Index("ix_resource_units_library_root", "library_root_id"),
         CheckConstraint(
-            "status IN ('active', 'merged', 'excluded')",
+            f"status IN ({_enum_in(UnitStatus)})",
             name="ck_resource_units_status",
         ),
     )
@@ -123,7 +139,7 @@ class MediaFile(Base):
         Index("ix_media_files_unit", "resource_unit_id"),
         Index("ix_media_files_type", "media_type"),
         Index("ix_media_files_ext", "extension"),
-        CheckConstraint("media_type IN ('image', 'video')", name="ck_media_files_type"),
+        CheckConstraint(f"media_type IN ({_enum_in(MediaType)})", name="ck_media_files_type"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -259,7 +275,7 @@ class DedupResult(Base):
         UniqueConstraint("unit_a_id", "unit_b_id", name="uq_dedup_pair"),
         Index("ix_dedup_results_score", "similarity_score"),
         CheckConstraint(
-            "resolution IN ('pending', 'keep_a', 'keep_b', 'merge', 'whitelist', 'ignore')",
+            f"resolution IN ({_enum_in(ResolutionStatus)})",
             name="ck_dedup_results_resolution",
         ),
     )
@@ -316,7 +332,7 @@ class DedupFileMatch(Base):
         Index("ix_dedup_file_matches_result", "dedup_result_id"),
         UniqueConstraint("dedup_result_id", "file_a_id", "file_b_id", name="uq_file_pair"),
         CheckConstraint(
-            "match_type IN ('md5', 'phash', 'dhash', 'face')",
+            f"match_type IN ({_enum_in(MatchType)})",
             name="ck_dedup_file_matches_type",
         ),
     )
@@ -358,7 +374,7 @@ class Message(Base):
         Index("ix_messages_type", "msg_type"),
         Index("ix_messages_created", "created_at"),
         CheckConstraint(
-            "msg_type IN ('info', 'warning', 'error', 'dedup_alert')",
+            f"msg_type IN ({_enum_in(MessageType)})",
             name="ck_messages_type",
         ),
     )
@@ -402,7 +418,7 @@ class Whitelist(Base):
     __tablename__ = "whitelist"
     __table_args__ = (
         CheckConstraint(
-            "match_type IN ('path', 'unit', 'extension')",
+            f"match_type IN ({_enum_in(WhitelistMatchType)})",
             name="ck_whitelist_type",
         ),
     )
@@ -437,7 +453,7 @@ class ScanSession(Base):
     __tablename__ = "scan_sessions"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('running', 'completed', 'failed', 'cancelled')",
+            f"status IN ({_enum_in(ScanStatus)})",
             name="ck_scan_sessions_status",
         ),
     )

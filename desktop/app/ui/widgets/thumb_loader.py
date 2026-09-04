@@ -40,7 +40,6 @@ class ThumbLoader(QObject):
         self._config = config
         self._generator = ThumbnailGenerator(
             max_size=config.thumbnail_max_size,
-            cache_subdir=config.thumbnail_cache_subdir,
             format=config.thumbnail_format,
             quality=config.thumbnail_quality,
         )

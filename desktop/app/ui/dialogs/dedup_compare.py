@@ -38,16 +38,20 @@ class DedupCompareDialog(QDialog):
     """查重对比对话框。
 
     信号:
-        keep_a_requested: 保留单元 A 的所有文件 (dedup_result_id)。
-        keep_b_requested: 保留单元 B 的所有文件 (dedup_result_id)。
-        whitelist_requested: 加入白名单 (dedup_result_id)。
-        ignore_requested: 忽略此对比结果 (dedup_result_id)。
+        keep_a_requested: 保留单元 A 的所有文件 (unit_a_id, unit_b_id)。
+        keep_b_requested: 保留单元 B 的所有文件 (unit_a_id, unit_b_id)。
+        whitelist_requested: 加入白名单 (unit_a_id, unit_b_id)。
+        ignore_requested: 忽略此对比结果 (unit_a_id, unit_b_id)。
+
+    注意：对话框持有的是内存中的 UnitComparisonResult（尚未持久化），
+    因此处置信号携带单元对 ID，由调用方按 (unit_a, unit_b) 解析数据库中的
+    dedup_results 记录（参见 queries.resolve_dedup_pair）。
     """
 
-    keep_a_requested = Signal(int)
-    keep_b_requested = Signal(int)
-    whitelist_requested = Signal(int)
-    ignore_requested = Signal(int)
+    keep_a_requested = Signal(int, int)
+    keep_b_requested = Signal(int, int)
+    whitelist_requested = Signal(int, int)
+    ignore_requested = Signal(int, int)
 
     def __init__(self, result: UnitComparisonResult, config: AppConfig,
                  parent=None) -> None:
@@ -132,19 +136,27 @@ class DedupCompareDialog(QDialog):
         btn_layout = QVBoxLayout()
 
         keep_a_btn = QPushButton(f"保留单元 A 的全部文件 ({self._result.unit_a_name})")
-        keep_a_btn.clicked.connect(lambda: self.keep_a_requested.emit(self._result.unit_a_id))
+        keep_a_btn.clicked.connect(
+            lambda: self.keep_a_requested.emit(self._result.unit_a_id, self._result.unit_b_id)
+        )
         btn_layout.addWidget(keep_a_btn)
 
         keep_b_btn = QPushButton(f"保留单元 B 的全部文件 ({self._result.unit_b_name})")
-        keep_b_btn.clicked.connect(lambda: self.keep_b_requested.emit(self._result.unit_b_id))
+        keep_b_btn.clicked.connect(
+            lambda: self.keep_b_requested.emit(self._result.unit_a_id, self._result.unit_b_id)
+        )
         btn_layout.addWidget(keep_b_btn)
 
         whitelist_btn = QPushButton("加入白名单（不再提醒）")
-        whitelist_btn.clicked.connect(lambda: self.whitelist_requested.emit(self._result.unit_a_id))
+        whitelist_btn.clicked.connect(
+            lambda: self.whitelist_requested.emit(self._result.unit_a_id, self._result.unit_b_id)
+        )
         btn_layout.addWidget(whitelist_btn)
 
         ignore_btn = QPushButton("暂时忽略")
-        ignore_btn.clicked.connect(lambda: self.ignore_requested.emit(self._result.unit_a_id))
+        ignore_btn.clicked.connect(
+            lambda: self.ignore_requested.emit(self._result.unit_a_id, self._result.unit_b_id)
+        )
         btn_layout.addWidget(ignore_btn)
 
         center_layout.addLayout(btn_layout)

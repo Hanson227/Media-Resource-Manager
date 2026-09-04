@@ -38,14 +38,24 @@ def test_page_loads():
     check("首页返回 200", resp.status_code == 200)
     check("响应包含 HTML", "text/html" in resp.headers.get("content-type", ""))
     check("响应包含 Vue 挂载标记", 'id="app"' in resp.text)
-    check("app.js 可访问", requests.get("http://localhost:19527/app.js", timeout=5).status_code == 200)
+    check("js-core.js 可访问", requests.get("http://localhost:19527/js-core.js", timeout=5).status_code == 200)
+    check("js-pages.js 可访问", requests.get("http://localhost:19527/js-pages.js", timeout=5).status_code == 200)
+    check("js-app.js 可访问", requests.get("http://localhost:19527/js-app.js", timeout=5).status_code == 200)
     check("style.css 可访问", requests.get("http://localhost:19527/style.css", timeout=5).status_code == 200)
 
-    # 验证 JS 解析正确
-    js = requests.get("http://localhost:19527/app.js", timeout=5).text
-    check("app.js 包含 UnitsPage", "const UnitsPage" in js)
-    check("app.js 包含 PreviewPage", "const PreviewPage" in js)
-    check("app.js 包含 Vue mount", "app.mount('#app')" in js)
+    # 验证拆分后的 JS 解析正确（按 index.html 加载顺序 js-core → js-pages → js-app）
+    core = requests.get("http://localhost:19527/js-core.js", timeout=5).text
+    check("js-core 包含 api()", "function api(" in core)
+    check("js-core 包含令牌工具", "function getAuthToken" in core)
+
+    pages = requests.get("http://localhost:19527/js-pages.js", timeout=5).text
+    check("js-pages 包含 UnitsPage", "const UnitsPage" in pages)
+    check("js-pages 包含 PreviewPage", "const PreviewPage" in pages)
+    check("js-pages 包含 SettingsPage", "const SettingsPage" in pages)
+
+    app_js = requests.get("http://localhost:19527/js-app.js", timeout=5).text
+    check("js-app 包含 router", "createRouter" in app_js)
+    check("js-app 包含 Vue mount", "app.mount('#app')" in app_js)
 
 
 def test_api_units_response():

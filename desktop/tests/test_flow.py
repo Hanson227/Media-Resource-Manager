@@ -897,7 +897,6 @@ def test_thumbnails(root: Path):
     config = AppConfig()
     gen = ThumbnailGenerator(
         max_size=config.thumbnail_max_size,
-        cache_subdir=".thumbnails",
         quality=80,
     )
 
@@ -958,8 +957,22 @@ def test_api_app():
     check("FastAPI 应用创建成功", app is not None)
     check(f"注册了 {len(app.routes)} 条路由", len(app.routes) >= 8)
 
-    # 检查关键路由
-    paths = {r.path for r in app.routes}
+    # 检查关键路由（兼容新旧 Starlette：新版以 _IncludedRouter 惰性包裹 include_router 路由）
+    paths = set()
+
+    def _collect(node) -> None:
+        p = getattr(node, "path", None)
+        if p:
+            paths.add(p)
+        for n in getattr(node, "routes", []) or []:
+            _collect(n)
+
+    for r in app.routes:
+        _collect(r)
+        router = getattr(r, "original_router", None)  # _IncludedRouter 私有属性
+        if router is not None:
+            for n in getattr(router, "routes", []) or []:
+                _collect(n)
     check("包含 /api/units", "/api/units" in paths)
     check("包含 /api/files", "/api/files" in paths)
     check("包含 /api/dedup/results", "/api/dedup/results" in paths)
@@ -1113,18 +1126,42 @@ def test_dedup_run_api():
             return
         unit_ids = [u.id for u in units[:4]]
 
-    # 激发查重
+    # 激发查重（异步：202 + task_id，轮询至完成）
+    import time
     resp = client.post("/api/dedup/run", json={
         "unit_ids": unit_ids,
         "threshold": 0.50,
     })
-    if resp.status_code != 200:
-        check(f"查重返回 {resp.status_code}: {resp.text[:200]}", False)
+    if resp.status_code != 202:
+        check(f"查重提交返回 {resp.status_code}: {resp.text[:200]}", False)
     else:
-        check("查重返回 200", True)
+        check("查重提交返回 202", True)
     data = resp.json()
-    check("查重状态为 completed", data.get("status") == "completed")
-    check("duplicates_found 为 int", isinstance(data.get("duplicates_found"), int))
+    task_id = data.get("task_id") if resp.status_code == 202 else ""
+    check("返回 task_id", bool(task_id))
+
+    # 轮询任务状态直到结束
+    task_status = "unknown"
+    task_result = None
+    task_error = None
+    for _ in range(200):
+        tr = client.get(f"/api/dedup/run/{task_id}")
+        if tr.status_code != 200:
+            task_status = "http-error"
+            break
+        tj = tr.json()
+        task_status = tj.get("status", "unknown")
+        if task_status in ("completed", "failed"):
+            task_result = tj.get("result")
+            task_error = tj.get("error")
+            break
+        time.sleep(0.05)
+    check("查重任务最终完成", task_status == "completed")
+    if task_status == "completed":
+        check("result.duplicates_found 为 int", isinstance(task_result.get("duplicates_found"), int))
+        check("result.total_compared 存在", isinstance(task_result.get("total_compared"), int))
+    elif task_error:
+        check(f"查重任务失败信息: {task_error}", False)
 
     # 验证 DB 中已写入结果
     with DatabaseManager.session() as session:
@@ -1135,14 +1172,40 @@ def test_dedup_run_api():
             matches = q.get_file_matches_for_result(session, results[0].id)
             check(f"查重结果有匹配文件对", len(matches) > 0)
 
-    # 验证 _dedup_running 标志在查重完成后被正确重置
-    from app.api.routes.dedup import _dedup_running as dedup_flag
-    check("查重结束后 _dedup_running=False", not dedup_flag)
+    # 验证互斥门在查重完成后被正确释放
+    from app.services.dedup_gate import is_dedup_busy
+    check("查重结束后互斥门已释放", not is_dedup_busy())
 
 
 # ============================================================
 # TDD 测试 —— 右键菜单、排序、树搜索过滤
 # ============================================================
+
+def test_pin_auth_api():
+    """F09: Web PIN 后端强制 —— 未授权 401 / verify 换 token / 带 token 放行。"""
+    section("测试 15.5: Web PIN 后端鉴权")
+    from app.api.server import create_app, _revoke_all_auth_tokens
+    config = AppConfig().with_updates(web_pin="1234")
+    app = create_app(config)
+    client = TestClient(app)
+    try:
+        check("健康检查无需鉴权", client.get("/api/health").status_code == 200)
+        check("auth/status 无需鉴权",
+              client.get("/api/auth/status").json() == {"pin_required": True})
+        check("未带令牌访问 /api/units → 401",
+              client.get("/api/units").status_code == 401)
+        bad = client.post("/api/auth/verify", json={"pin": "0000"})
+        check("错误 PIN → 403", bad.status_code == 403)
+        ok = client.post("/api/auth/verify", json={"pin": "1234"})
+        token = ok.json().get("token") if ok.status_code == 200 else ""
+        check("正确 PIN → 200 且返回令牌", ok.status_code == 200 and bool(token))
+        check("带令牌访问 /api/units → 200",
+              client.get("/api/units", headers={"Authorization": f"Bearer {token}"}).status_code == 200)
+        check("伪造令牌 → 401",
+              client.get("/api/units", headers={"Authorization": "Bearer forged"}).status_code == 401)
+    finally:
+        _revoke_all_auth_tokens()
+
 
 def test_grid_context_menu_signals():
     """TDD-T3: 右键菜单对 image/video 文件正确发射信号。"""
@@ -2560,6 +2623,7 @@ def main():
         test_unread_events_endpoint()
         test_web_static_files()
         test_dedup_run_api()
+        test_pin_auth_api()
         test_grid_context_menu_signals()
         test_grid_sort()
         test_tree_filter()
@@ -2596,8 +2660,8 @@ def main():
         if db_path.exists():
             try:
                 db_path.unlink()
-            except PermissionError:
-                pass  # Windows 有时延迟释放文件句柄
+            except (PermissionError, OSError):
+                pass  # Windows 有时延迟释放文件句柄 / 沙箱回收站不可用
 
     # 总结
     total = _passed + _failed

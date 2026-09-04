@@ -141,6 +141,8 @@ class HashWorker(QThread):
                 dhash_size=self._config.dhash_size,
                 video_frame_interval=self._config.video_frame_interval_sec,
                 face_detection_enabled=self._config.face_detection_enabled,
+                model_dir=self._config.face_model_dir,
+                face_confidence=self._config.face_confidence_threshold,
             )
 
             # 获取未索引文件

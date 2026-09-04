@@ -993,26 +993,32 @@ class MainWindow(QMainWindow):
             first_dup = session.duplicates_found[0]
             dialog = DedupCompareDialog(first_dup, self._config, self)
             dialog.keep_a_requested.connect(
-                lambda rid: self._resolve_dedup(rid, "keep_a")
+                lambda a, b: self._resolve_dedup_pair(a, b, "keep_a")
             )
             dialog.keep_b_requested.connect(
-                lambda rid: self._resolve_dedup(rid, "keep_b")
+                lambda a, b: self._resolve_dedup_pair(a, b, "keep_b")
             )
             dialog.whitelist_requested.connect(
-                lambda rid: self._resolve_dedup(rid, "whitelist")
+                lambda a, b: self._resolve_dedup_pair(a, b, "whitelist")
             )
             dialog.ignore_requested.connect(
-                lambda rid: self._resolve_dedup(rid, "ignore")
+                lambda a, b: self._resolve_dedup_pair(a, b, "ignore")
             )
             dialog.exec()
         else:
             QMessageBox.information(self, "查重完成", "未发现重复的资源单元。")
 
-    def _resolve_dedup(self, result_id: int, resolution: str) -> None:
-        """处理查重结果。"""
+    def _resolve_dedup_pair(self, unit_a_id: int, unit_b_id: int, resolution: str) -> None:
+        """按单元对处置查重结果（keep_a/keep_b/whitelist/ignore）。"""
         try:
             with DatabaseManager.session() as session:
-                q.resolve_dedup(session, result_id, resolution)
+                dr_id = q.resolve_dedup_pair(session, unit_a_id, unit_b_id, resolution)
+            if dr_id is None:
+                logger.warning(
+                    f"未找到单元对 ({unit_a_id}, {unit_b_id}) 的查重记录，处置 {resolution} 已跳过"
+                )
+                self._status_bar.set_status("未找到对应的查重记录")
+                return
             self._status_bar.set_status(f"已处理: {resolution}")
         except Exception as e:
             logger.error(f"处理查重结果失败: {e}")

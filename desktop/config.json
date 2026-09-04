@@ -63,7 +63,7 @@
   "thumbnail_cache_subdir": ".thumbnails",
   "thumbnail_cache_dir": "data\\.thumbnails",
   "thumbnail_format": "jpg",
-  "thumbnail_quality": 90,
+  "thumbnail_quality": 80,
   "window_title": "影视资源管理器",
   "window_width": 1400,
   "window_height": 900,
@@ -73,9 +73,9 @@
   "watcher_enabled": true,
   "watcher_debounce_ms": 2000,
   "api_enabled": true,
-  "api_host": "0.0.0.0",
+  "api_host": "127.0.0.1",
   "api_port": 19527,
-  "smb_share_name_prefix": "Media_",
+  "web_pin": "5678",
   "preview_seek_percent": 5,
-  "web_pin": "2304"
+  "smb_share_name_prefix": "Media_"
 }

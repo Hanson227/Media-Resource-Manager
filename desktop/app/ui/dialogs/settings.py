@@ -172,9 +172,8 @@ class SettingsDialog(QDialog):
 
     @Slot()
     def _on_save(self) -> None:
-        """保存设置并发出信号。"""
-        # 构建新的配置（由于 AppConfig 是 frozen，需要创建新实例）
-        new_config = AppConfig(
+        """保存设置并发出信号（仅携带界面可改字段，其余沿用原配置）。"""
+        new_config = self._config.with_updates(
             db_path=Path(self._db_path_edit.text()),
             thumbnail_max_size=self._thumb_size_spin.value(),
             thumbnail_quality=self._thumb_quality_spin.value(),
@@ -184,29 +183,7 @@ class SettingsDialog(QDialog):
             watcher_enabled=self._watcher_enabled_check.isChecked(),
             watcher_debounce_ms=self._watcher_debounce_spin.value(),
             preview_seek_percent=self._seek_percent_spin.value(),
-            # 以下保持原值
-            media_extensions=self._config.media_extensions,
-            exclude_patterns=self._config.exclude_patterns,
-            hash_algorithms=self._config.hash_algorithms,
-            phash_size=self._config.phash_size,
-            dhash_size=self._config.dhash_size,
-            video_frame_interval_sec=self._config.video_frame_interval_sec,
-            jaccard_threshold=self._config.jaccard_threshold,
-            phash_hamming_threshold=self._config.phash_hamming_threshold,
-            dhash_hamming_threshold=self._config.dhash_hamming_threshold,
-            face_distance_threshold=self._config.face_distance_threshold,
-            face_detection_enabled=self._config.face_detection_enabled,
-            face_model_dir=self._config.face_model_dir,
-            face_confidence_threshold=self._config.face_confidence_threshold,
-            window_title=self._config.window_title,
-            window_width=self._config.window_width,
-            window_height=self._config.window_height,
-            grid_column_count=self._config.grid_column_count,
-            grid_spacing=self._config.grid_spacing,
             web_pin=self._web_pin_edit.text(),
-            splitter_ratio_left=self._config.splitter_ratio_left,
-            thumbnail_cache_dir=self._config.thumbnail_cache_dir,
-            smb_share_name_prefix=self._config.smb_share_name_prefix,
         )
         self.settings_saved.emit(new_config)
         self.accept()

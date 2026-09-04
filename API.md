@@ -12,8 +12,9 @@
 - [2. 数据结构](#2-数据结构)
 - [3. 端点参考](#3-端点参考)
 - [4. 缩略图与媒体文件](#4-缩略图与媒体文件)
-- [5. 集成建议](#5-集成建议)
-- [6. 限制与注意事项](#6-限制与注意事项)
+- [5. SMB 文件共享](#5-smb-文件共享手机访问原始文件)
+- [6. 移动端集成示例](#6-移动端集成示例)
+- [7. 限制与注意事项](#7-限制与注意事项)
 
 ---
 
@@ -49,7 +50,19 @@ http://<电脑IP>:19527
 
 ### 1.3 鉴权
 
-当前版本**无鉴权**，API 在局域网内完全开放。不建议将端口暴露到公网。
+当桌面端设置 Web 访问密码（4 位 PIN）后，除以下免鉴权端点外，所有 `/api/*`
+请求都必须在请求头携带会话令牌：
+
+```
+Authorization: Bearer <token>
+```
+
+令牌通过 `POST /api/auth/verify`（密码正确）获取，有效期 12 小时；
+修改/取消密码会使全部已签发令牌立即失效。令牌仅存于桌面端进程内存。
+
+未鉴权访问返回 `401 {"detail": "未授权或会话已过期"}`。
+
+桌面端未设置密码时，API 保持局域网完全开放；仍不建议将端口暴露到公网。
 
 ### 1.4 响应格式
 
@@ -296,8 +309,46 @@ POST /api/dedup/results/{result_id}/resolve
 | `keep_a` | 保留单元 A |
 | `keep_b` | 保留单元 B |
 | `merge` | 合并 |
-| `whitelist` | 加入白名单，不再提示 |
+| `whitelist` | 加入白名单，不再提示（同时写入白名单表，重跑自动跳过） |
 | `ignore` | 暂时忽略 |
+
+#### 触发查重（异步）
+
+```
+POST /api/dedup/run
+```
+
+请求体：
+
+```json
+{"unit_ids": [1, 2, 3], "threshold": 0.80}
+```
+
+立即返回 `202`：
+
+```json
+{"status": "accepted", "task_id": "dedup-1"}
+```
+
+随后轮询任务状态：
+
+```
+GET /api/dedup/run/{task_id}
+```
+
+```json
+{
+  "task_id": "dedup-1",
+  "status": "completed",           // queued | running | completed | failed
+  "progress": [12, 30],            // 比对对数进度（可选）
+  "result": { "total_compared": 4, "duplicates_found": 1,
+              "saved_count": 1, "skipped_pairs": 0, "elapsed_seconds": 2.1 },
+  "error": null
+}
+```
+
+说明：查重与桌面端“一键查重”共用进程内互斥门（同时仅一个任务）；
+已处置/白名单的单元对在重跑时自动跳过，不再重复告警。
 
 ### 3.4 消息
 
@@ -370,29 +421,46 @@ GET /
 }
 ```
 
+### 3.6 鉴权（设置访问密码后启用）
+
+| 端点 | 说明 |
+|------|------|
+| `GET  /api/auth/status` | 查询是否启用密码 → `{"pin_required": true/false}` |
+| `POST /api/auth/verify` | 请求体 `{"pin": "1234"}` → `{"verified": true, "token": "..."}`；错误返回 403 |
+| `POST /api/auth/change-pin` | 请求体 `{"old_pin": "...", "new_pin": "..."}`；成功后旧令牌全部失效 |
+
+免鉴权端点：`GET /api/health`、`GET /api/auth/status`、`POST /api/auth/verify`、
+`POST /api/auth/change-pin`、CORS 预检（OPTIONS）。
+
+### 3.7 未读事件简报（角标轮询）
+
+```
+GET /api/events/unread
+```
+
+返回：
+
+```json
+{
+  "unread_count": 1,
+  "has_dedup_alerts": true,
+  "latest": { "id": 1, "msg_type": "dedup_alert", "title": "..." }
+}
+```
+
 ---
 
 ## 4. 缩略图与媒体文件
 
-### 4.1 缩略图 HTTP 服务（推荐方案）
-
-当前版本**后端不支持直接 HTTP 返回缩略图**。以下代码可作为参考，在桌面部件的 [app/api/server.py](app/api/server.py) 中添加静态文件挂载：
-
-```python
-from pathlib import Path
-from fastapi.staticfiles import StaticFiles
-
-# 在 create_app() 中注册
-thumb_dir = config.thumbnail_cache_dir
-if thumb_dir and Path(thumb_dir).exists():
-    app.mount("/thumbnails", StaticFiles(directory=str(thumb_dir)), name="thumbnails")
-```
-
-挂载后，缩略图可通过以下 URL 访问：
+### 4.1 缩略图 HTTP 服务（已实现）
 
 ```
-http://<电脑IP>:19527/thumbnails/{file_id}_thumb.jpg
+GET /api/files/{file_id}/thumbnail
 ```
+
+返回缩略图图片二进制（`image/jpeg`），带 `Cache-Control: private, max-age=300`；
+集中缓存（`data/.thumbnails/`）未命中时按需生成。HEIC/HEIF 源文件在服务端
+转码为 JPEG 返回。不存在时返回 404。
 
 ### 4.2 客户端直接读取（同局域网文件共享）
 
@@ -473,14 +541,16 @@ for (file in dir.listFiles()) {
 4. 通过 SMB URL 直接加载图片或流式播放视频
 ```
 
-### 5.1 APP 首页加载
+## 6. 移动端集成示例（手机 APP）
+
+### 6.1 APP 首页加载
 
 ```
 1. GET  /api/units           → 单元列表（使用 file_count 排序）
 2. GET  /api/messages/unread-count  → 红点角标
 ```
 
-### 5.2 浏览单元内容
+### 6.2 浏览单元内容
 
 ```
 1. GET  /api/units/{id}/files  → 文件列表
@@ -488,7 +558,7 @@ for (file in dir.listFiles()) {
 3. 点击图片预览 → GET /api/files/{id}
 ```
 
-### 5.3 查重通知与处理
+### 6.3 查重通知与处理
 
 ```
 1. GET  /api/messages?unread_only=true  → 获取未读 dedup_alert
@@ -496,7 +566,7 @@ for (file in dir.listFiles()) {
 3. POST /api/dedup/results/{id}/resolve  → 用户决策后提交处理结果
 ```
 
-### 5.4 网络请求封装示例（Kotlin）
+### 6.4 网络请求封装示例（Kotlin）
 
 ```kotlin
 // Retrofit 接口定义
@@ -527,7 +597,7 @@ interface MediaApi {
 }
 ```
 
-### 5.5 网络请求封装示例（Swift）
+### 6.5 网络请求封装示例（Swift）
 
 ```swift
 // iOS URLSession 封装
@@ -545,16 +615,16 @@ struct MediaApi {
 
 ---
 
-## 6. 限制与注意事项
+## 7. 限制与注意事项
 
 | 限制 | 说明 | 缓解方案 |
 |-----------|-------|----------------|
-| **缩略图 HTTP 服务** | 当前缩略图端点仅返回本地路径 | 按第 4 节添加静态挂载，或通过 SMB 共享 |
-| **文件下载/流媒体** | 无文件流端点，无法直接播放视频 | 通过文件共享协议或自行添加流路由 |
+| **缩略图 HTTP 服务** | 已支持（见 4.1），`/api/files/{id}/thumbnail` 直接返回图片二进制 | 无需额外处理 |
+| **文件下载/流媒体** | `/api/files/{id}/stream` 支持 Range 请求与常见容器格式 | HEVC/AV1 等需浏览器原生解码支持，或走 SMB |
+| **鉴权** | 设置 4 位 Web 密码后 `/api/*` 强制 Bearer 令牌 | token 由 verify 签发，12h 有效；修改密码即失效 |
 | **搜索** | API 不支持模糊搜索文件名 | 可在 APP 端拉取数据后本地过滤 |
-| **鉴权** | 无用户认证 | 局域网环境默认信任，不推荐暴露公网 |
 | **分页** | 部分端点有 hard limit（如 per_page <= 200） | 如有更大需求可回调参 |
-| **变更通知** | 无 WebSocket 推送 | APP 侧定时轮询 `/api/messages/unread-count` |
+| **变更通知** | 无 WebSocket 推送 | APP 侧定时轮询 `/api/events/unread` |
 
 ### 推荐的 API 轮询策略
 

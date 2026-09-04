@@ -4,7 +4,7 @@
 
 图片缩略图：Pillow 等比缩放
 视频缩略图：OpenCV 提取首帧或中段帧
-缓存：存储在各资源单元的 .thumbnails/ 子目录中
+缓存：cache_dir 参数即缩略图最终存放目录（平铺，如 data/.thumbnails 或 <单元>/.thumbnails）
 """
 
 import hashlib
@@ -20,6 +20,7 @@ from PIL import Image, ImageFile, UnidentifiedImageError
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from app.core.exceptions import ThumbnailGenerationError, UnsupportedFormatError
+from app.utils.constants import THUMBNAIL_FILENAME_TEMPLATE
 from app.utils.image_helpers import VideoCapture_unicode
 
 logger = logging.getLogger(__name__)
@@ -51,16 +52,16 @@ class ThumbnailGenerator:
     图片：使用 Pillow 等比缩放，保持长宽比
     视频：使用 OpenCV 提取首帧或中点帧
 
-    缓存规则：
-    - 缩略图存储在各资源单元的 .thumbnails/ 子目录中
-    - 文件命名格式：<file_id>_thumb.<格式>
-    - 生成前检查缓存是否存在，避免重复生成
+    缓存规则（约定：cache_dir 即缩略图最终存放目录，不再追加子目录）：
+    - 集中缓存：cache_dir = config.thumbnail_cache_dir（如 data/.thumbnails）
+    - 单元级缓存：cache_dir = <资源单元路径>/.thumbnails
+    - 文件命名格式：{file_id}_thumb.{format}，元数据 sidecar 为同文件名 + ".meta"
+    - 生成前检查缓存 + 源文件 mtime/size，命中则跳过
     """
 
     def __init__(
         self,
         max_size: int = 256,
-        cache_subdir: str = ".thumbnails",
         format: str = "jpg",
         quality: int = 80,
     ) -> None:
@@ -68,12 +69,10 @@ class ThumbnailGenerator:
 
         参数:
             max_size: 缩略图最大边长（像素）。
-            cache_subdir: 缓存子目录名。
             format: 输出格式（jpg/png）。
             quality: JPEG 质量（1-100）。
         """
         self._max_size = max_size
-        self._cache_subdir = cache_subdir
         self._format = format
         self._quality = quality
         self._cv2 = None  # 延迟加载
@@ -91,9 +90,8 @@ class ThumbnailGenerator:
         return self._cv2
 
     def get_thumbnail_path(self, file_id: int, cache_dir: Path) -> Path:
-        """根据文件 ID 预测缩略图缓存路径（不生成）。"""
-        cache_path = cache_dir / self._cache_subdir
-        return cache_path / f"{file_id}_thumb.{self._format}"
+        """根据文件 ID 预测缩略图缓存路径（不生成）。cache_dir 为最终存放目录。"""
+        return cache_dir / THUMBNAIL_FILENAME_TEMPLATE.format(file_id=file_id, fmt=self._format)
 
     def exists(self, file_id: int, cache_dir: Path) -> bool:
         """检查缩略图缓存是否已存在。"""

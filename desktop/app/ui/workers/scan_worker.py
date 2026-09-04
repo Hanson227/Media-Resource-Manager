@@ -16,6 +16,7 @@ from config import AppConfig
 from app.core.scanner import MediaScanner, ScanResult
 from app.db.engine import DatabaseManager
 from app.db import queries as q
+from app.db.models import MediaFile
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,19 @@ class ScanWorker(QThread):
                 updated_files = 0
                 errors: list[str] = list(result.errors)
 
+                # ---- 批量预载：一次 IN 查询命中全部扫描路径的既有记录 ----
+                # 取代原先“每个文件一次 get_file_by_path”的 N+1 往返。
+                scanned_paths = [str(df.path) for unit in result.units for df in unit.files]
+                existing_map: dict[str, MediaFile] = {}
+                if scanned_paths:
+                    for row in session.query(MediaFile).filter(MediaFile.path.in_(scanned_paths)):
+                        existing_map[row.path] = row
+
+                # 变更队列（海量文件时批处理，显著减少 SQLite 往返）
+                rows_to_add: list[MediaFile] = []
+                move_updates: list[tuple[int, int]] = []   # (file_id, target_unit_id)
+                heal_ids: list[int] = []                   # 清空失败占位，待重索引
+
                 # 处理每个资源单元
                 for unit in result.units:
                     # 检查已存在的单元
@@ -127,28 +141,40 @@ class ScanWorker(QThread):
                         )
                         unit_id = new_unit.id
 
-                    # 处理每个文件
+                    # 处理每个文件（仅在内存中比对，最后统一落库）
                     for df in unit.files:
-                        existing_file = q.get_file_by_path(session, str(df.path))
-                        if existing_file:
+                        existing_file = existing_map.get(str(df.path))
+                        if existing_file is not None:
                             # 更新已有文件的归属
                             if existing_file.resource_unit_id != unit_id:
-                                q.update_file_unit(session, existing_file.id, unit_id)
+                                move_updates.append((existing_file.id, unit_id))
+                            # 自愈：md5 占位为空串说明历史索引失败/文件曾缺失；
+                            # 文件现已恢复，重置哈希为 NULL 让其重新进入待索引队列。
+                            if existing_file.md5_hash == "":
+                                heal_ids.append(existing_file.id)
                             updated_files += 1
                         else:
-                            q.insert_media_file(
-                                session,
+                            rows_to_add.append(MediaFile(
                                 path=str(df.path),
                                 filename=df.filename,
                                 extension=df.extension,
                                 media_type=df.media_type,
                                 size_bytes=df.size_bytes,
                                 resource_unit_id=unit_id,
-                            )
+                            ))
                             new_files += 1
                             self.file_found.emit(df.filename)
 
                     self.unit_found.emit(unit.name, unit.file_count)
+
+                # ---- 批量落库 ----
+                if rows_to_add:
+                    session.add_all(rows_to_add)
+                    session.flush()
+                for file_id, target_unit in move_updates:
+                    q.update_file_unit(session, file_id, target_unit)
+                for file_id in heal_ids:
+                    q.clear_stale_hash_placeholders(session, file_id)
 
                 # 清理：标记当前根下路径已不存在的单元为 excluded
                 for stale_unit in q.get_units_by_root(session, root.id):
@@ -158,6 +184,7 @@ class ScanWorker(QThread):
 
                 # 清理：删除所有活跃单元中已不存在的文件记录及对应缩略图缓存
                 stale_file_count = 0
+                stale_ids: list[int] = []
                 affected_units: set[int] = set()
                 for unit in q.get_units_by_root(session, root.id):
                     if unit.status != "active":
@@ -171,9 +198,14 @@ class ScanWorker(QThread):
                             for suffix in ("", ".meta"):
                                 thumb = thumb_dir / f"{mf.id}_thumb.jpg{suffix}"
                                 thumb.unlink(missing_ok=True)
-                            q.delete_media_file(session, mf.id)
+                            stale_ids.append(mf.id)
                             stale_file_count += 1
                             affected_units.add(unit.id)
+                if stale_ids:
+                    # 批量删除（SQLite 外键 ON DELETE CASCADE 清理人脸/帧/匹配记录）
+                    session.query(MediaFile).filter(
+                        MediaFile.id.in_(stale_ids)
+                    ).delete(synchronize_session=False)
                 if stale_file_count:
                     logger.info(f"清理了 {stale_file_count} 个已不存在的文件记录及缩略图")
                     # 更新受影响单元的 file_count / total_size
