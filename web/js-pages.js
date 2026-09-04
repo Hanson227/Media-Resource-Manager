@@ -62,12 +62,57 @@ const ConnectPage = {
   mounted() { this.autoDetect(); }
 };
 
+/* =============================================================
+ * 下拉刷新 Mixin（报告 §1 优化5 / §3 优化3）
+ *   竖直锁定 + 松手判定（Gesture.attachPullToRefresh），
+ *   指示器跟手：拖动中直写高度（绕过 Vue 响应式），三态文案。
+ *   页面模板需含 <div class="ptr-indicator" ref="ptr" ...>。
+ * ============================================================= */
+const PTRPageMixin = {
+  data() { return { ptrReady: false }; },
+  computed: {
+    ptrText() {
+      if (this.refreshing) return '刷新中...';
+      return this.ptrReady ? '松手刷新' : '下拉刷新';
+    },
+  },
+  methods: {
+    _ptrProgress(dy, state) {
+      this.ptrReady = state === 'ready';
+      const el = this.$refs.ptr;
+      if (!el) return;
+      if (dy > 0) {
+        // 拖动跟手：rAF 式直写，不进 Vue 响应式（报告 §6 规则6）
+        el.style.transition = 'none';
+        el.style.height = Math.min(44, dy * 0.5).toFixed(0) + 'px';
+      } else {
+        el.style.transition = '';
+        el.style.height = '';
+      }
+    },
+    _attachPTR() {
+      const main = document.querySelector('.app-main');
+      if (!main || this._ptrDestroy) return;
+      this._ptrDestroy = Gesture.attachPullToRefresh(main, {
+        isBusy: () => this.refreshing,
+        onProgress: (dy, state) => this._ptrProgress(dy, state),
+        onTrigger: () => this.refresh(),
+      });
+    },
+  },
+  beforeUnmount() {
+    if (this._ptrDestroy) { this._ptrDestroy(); this._ptrDestroy = null; }
+  },
+};
+
 /* ========== Units Page ========== */
 const UnitsPage = {
+  mixins: [PTRPageMixin],
   template: `
     <div class="page">
-      <div class="ptr-indicator" :class="{ active: refreshing }">
-        <span class="mdi mdi-loading mdi-spin"></span> 刷新中...
+      <div class="ptr-indicator" ref="ptr" :class="{ active: refreshing, ready: ptrReady }">
+        <span class="mdi" :class="refreshing ? 'mdi-loading mdi-spin' : (ptrReady ? 'mdi-arrow-up' : 'mdi-arrow-down')"></span>
+        {{ ptrText }}
       </div>
       <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
       <template v-else-if="roots.length === 0">
@@ -97,7 +142,7 @@ const UnitsPage = {
             </div>
             <div class="unit-grid">
               <div v-for="u in sortedUnits(group.units)" :key="u.id" class="unit-card"
-                @click="openUnit(u.id)">
+                :data-unit-id="u.id">
                 <div class="cover">
                   <img v-if="u.cover_file_id" :src="coverUrl(u.cover_file_id)" loading="lazy"
                     @load="onCoverLoad(u.id)" @error="onCoverError(u.id)">
@@ -266,43 +311,32 @@ const UnitsPage = {
         }
       }));
       this.$nextTick(() => {
-        // 下拉刷新：监听滚动到顶部继续下拉
-        let startY = 0;
-        const main = document.querySelector('.app-main');
-        if (main) {
-          this._ptrStart = (e) => {
-            if (main.scrollTop <= 0) startY = e.touches[0].clientY;
-            else startY = 0;
-          };
-          this._ptrMove = (e) => {
-            if (!startY || this.refreshing) return;
-            const dy = e.touches[0].clientY - startY;
-            if (dy > 60) {
-              startY = 0;
-              this.refresh();
-            }
-          };
-          main.addEventListener('touchstart', this._ptrStart, { passive: true });
-          main.addEventListener('touchmove', this._ptrMove, { passive: true });
-        }
+        // 下拉刷新：竖直锁定 + 松手判定 + 跟手指示器（报告 §1 优化5 / §3 优化3）
+        this._attachPTR();
+        // 单击打开：touchend 直判，规避 iOS 10+ 忽略 user-scalable=no 造成的
+        // 双击缩放歧义/点击延迟；位移、时长、多指三重过滤与滑动/长按不冲突
+        this._tapDestroy = Gesture.attachFastTap(this.$el, {
+          selector: '.unit-card',
+          exclude: 'button, a, input, select, textarea',
+          onTap: (el) => this.openUnit(parseInt(el.dataset.unitId, 10)),
+        });
       });
     }
   },
   beforeUnmount() {
-    const main = document.querySelector('.app-main');
-    if (main && this._ptrStart) {
-      main.removeEventListener('touchstart', this._ptrStart);
-      main.removeEventListener('touchmove', this._ptrMove);
-    }
+    if (this._ptrDestroy) { this._ptrDestroy(); this._ptrDestroy = null; }
+    if (this._tapDestroy) { this._tapDestroy(); this._tapDestroy = null; }
   }
 };
 
 /* ========== Unit Files Page ========== */
 const UnitFilesPage = {
+  mixins: [PTRPageMixin],
   template: `
     <div class="page" style="padding:0 0 calc(var(--tab-height) + var(--safe-bottom) + 12px) 0">
-      <div class="ptr-indicator" :class="{ active: refreshing }">
-        <span class="mdi mdi-loading mdi-spin"></span> 刷新中...
+      <div class="ptr-indicator" ref="ptr" :class="{ active: refreshing, ready: ptrReady }">
+        <span class="mdi" :class="refreshing ? 'mdi-loading mdi-spin' : (ptrReady ? 'mdi-arrow-up' : 'mdi-arrow-down')"></span>
+        {{ ptrText }}
       </div>
       <div v-if="loading" class="loading-dots" style="padding-top:40px"><span></span><span></span><span></span></div>
       <template v-else-if="files.length === 0">
@@ -339,7 +373,7 @@ const UnitFilesPage = {
         </div>
         <div class="feed-grid">
           <div v-for="f in sortedFiles" :key="f.id" class="feed-item"
-            @click="preview(f)">
+            :data-file-id="f.id">
             <div class="thumb-wrap">
               <img :src="thumbUrl(f.id)" loading="lazy"
                 @load="onImgLoad(f.id)" @error="onImgError($event, f.id)"
@@ -517,74 +551,66 @@ const UnitFilesPage = {
         _restoreFileScroll();
       }));
       this.$nextTick(() => {
-        // 下拉刷新：监听滚动到顶部继续下拉
-        let startY = 0;
-        const main = document.querySelector('.app-main');
-        if (main) {
-          this._ptrStart = (e) => {
-            if (main.scrollTop <= 0) startY = e.touches[0].clientY;
-            else startY = 0;
-          };
-          this._ptrMove = (e) => {
-            if (!startY || this.refreshing) return;
-            const dy = e.touches[0].clientY - startY;
-            if (dy > 60) {
-              startY = 0;
-              this.refresh();
-            }
-          };
-          main.addEventListener('touchstart', this._ptrStart, { passive: true });
-          main.addEventListener('touchmove', this._ptrMove, { passive: true });
-        }
+        // 下拉刷新：竖直锁定 + 松手判定 + 跟手指示器（报告 §1 优化5 / §3 优化3）
+        this._attachPTR();
+        // 单击打开预览：同 UnitsPage 的 fast-tap 范式（touchend 直判，
+        // 与滚动/长按/多指互斥；卡片内 card-more 按钮走原生 click）
+        this._tapDestroy = Gesture.attachFastTap(this.$el, {
+          selector: '.feed-item',
+          exclude: 'button, a, input, select, textarea',
+          onTap: (el) => {
+            const id = parseInt(el.dataset.fileId, 10);
+            const f = this.sortedFiles.find((x) => x.id === id);
+            if (f) this.preview(f);
+          },
+        });
       });
     }
   },
   beforeUnmount() {
-    const main = document.querySelector('.app-main');
-    if (main && this._ptrStart) {
-      main.removeEventListener('touchstart', this._ptrStart);
-      main.removeEventListener('touchmove', this._ptrMove);
-    }
+    if (this._ptrDestroy) { this._ptrDestroy(); this._ptrDestroy = null; }
+    if (this._tapDestroy) { this._tapDestroy(); this._tapDestroy = null; }
   }
 };
 
 /* ========== Preview Page ========== */
 const PreviewPage = {
   template: `
-    <div class="preview-overlay" @contextmenu.prevent>
+    <div class="preview-overlay" @contextmenu.prevent @gesturestart.prevent @gesturechange.prevent>
+      <!-- 背景层：下滑退出拖动中随进度渐变透明，透出列表页（报告 §6 G_CLOSE / demo 范式） -->
+      <div class="preview-backdrop" ref="backdrop"></div>
+      <div class="preview-sheet" ref="sheet">
       <div class="preview-top">
         <button class="preview-back" @click="goBack"><span class="mdi mdi-arrow-left"></span></button>
         <span style="font-size:14px;color:rgba(255,255,255,.7);margin-left:8px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ filename }}</span>
       </div>
-      <div class="preview-content" @click="onClick">
+      <div class="preview-content" ref="content">
         <template v-if="mediaType === 'image'">
-          <img :src="streamUrl" :alt="filename"
-            class="gesture-follow" :class="{ dragging: navSwiping, zoomed: zoomed }"
-            :style="{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', transform: 'translateX(' + gestureOffsetX + 'px) scale(' + (zoomed ? 1.8 : 1) + ')' }">
+          <img ref="mediaEl" :src="streamUrl" :alt="filename"
+            class="gesture-follow" :class="{ dragging: navSwiping, zoomed: zoomed }">
           <div class="image-nav-hint" v-if="fileList.length > 1">
             <span class="mdi mdi-chevron-left" @click.stop="navigateToFile(fileIndex - 1)"></span>
             <span class="pos">{{ fileIndex + 1 }} / {{ fileList.length }}</span>
             <span class="mdi mdi-chevron-right" @click.stop="navigateToFile(fileIndex + 1)"></span>
           </div>
-          <div class="gesture-zone" @touchstart.prevent="onNavSwipeStart($event)" @touchend="onNavSwipeEnd" @touchmove.prevent="onNavSwipeMove($event)" @touchcancel="onNavSwipeEnd"></div>
+          <div class="gesture-zone"></div>
         </template>
         <template v-else-if="mediaType === 'video'">
           <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop @contextmenu.prevent :src="streamUrl" :poster="posterUrl"
-  class="gesture-follow" :class="{ dragging: navSwiping }"
-  :style="{ transform: 'translateX(' + gestureOffsetX + 'px)' }"></video>
+  class="gesture-follow" :class="{ dragging: navSwiping }"></video>
 
-          <!-- Gesture Zone -->
-          <div class="gesture-zone"
-            :class="{ 'seek-active': gestureSwiping }"
-            @touchstart.prevent="onGestureStart($event)" @touchend="onGestureEnd" @touchmove.prevent="onGestureMove($event)" @touchcancel="onGestureEnd"></div>
+          <!-- Gesture Zone：触摸事件由 js-gesture 引擎在 mounted 统一接管（报告 §6） -->
+          <div class="gesture-zone" :class="{ 'seek-active': gestureSwiping }"></div>
 
-          <!-- Gesture Feedback -->
-          <div class="gesture-feedback" :class="{ show: gestureShowFeedback }">
-            <span v-if="gestureSwiping" class="icon mdi" :class="gestureSeekDir > 0 ? 'mdi-fast-forward' : 'mdi-rewind'"></span>
-            <span v-else-if="gestureSide === 'right'" class="icon mdi mdi-fast-forward"></span>
-            <span v-else-if="gestureSide === 'left'" class="icon mdi mdi-rewind"></span>
-            <span v-if="gestureSwiping" class="label">{{ gestureSeekLabel }}</span>
-            <span v-else-if="gestureSide" class="label">{{ gestureSide === 'right' ? '2x 快进' : '2x 快退' }}</span>
+          <!-- Gesture Feedback：外层跟随手指，内层 bubble 负责 scale 入场（报告 §3 优化1） -->
+          <div class="gesture-feedback" ref="feedback" :class="{ show: gestureShowFeedback, preview: gesturePreview }">
+            <div class="bubble">
+              <span v-if="gestureSwiping" class="icon mdi" :class="gestureSeekDir > 0 ? 'mdi-fast-forward' : 'mdi-rewind'"></span>
+              <span v-else-if="gestureSide === 'right'" class="icon mdi mdi-fast-forward"></span>
+              <span v-else-if="gestureSide === 'left'" class="icon mdi mdi-rewind"></span>
+              <span v-if="gestureSwiping" class="label">{{ gestureSeekLabel }}</span>
+              <span v-else-if="gestureSide" class="label">{{ gestureSide === 'right' ? '2x 快进' : '2x 快退' }}</span>
+            </div>
           </div>
 
           <!-- Speed Menu -->
@@ -607,7 +633,8 @@ const PreviewPage = {
                   <div class="progress-thumb"></div>
                 </div>
               </div>
-              <div class="progress-seek-hint" :style="{ left: seekHintPct + '%' }">{{ fmtTime(seekHintTime) }}</div>
+              <!-- 仅拖拽中显示的预览时间（修复常驻第三个时间数字问题） -->
+              <div class="progress-seek-hint" v-if="seeking" :style="{ left: seekHintPct + '%' }">{{ fmtTime(seekHintTime) }}</div>
             </div>
             <span class="time dur">{{ fmtTime(duration) }}</span>
             <button class="ctrl-btn" @click.stop="toggleSpeedMenu">
@@ -623,6 +650,7 @@ const PreviewPage = {
           <div class="nav-feedback" :class="{ show: !!navigateFeedback }">{{ navigateFeedback }}</div>
 
       </div>
+      </div>
     </div>
   `,
   props: ['serverUrl'],
@@ -635,20 +663,18 @@ const PreviewPage = {
       playing: false, currentTime: 0, duration: 0, progressPct: 0,
       playbackRate: 1, speedMenuOpen: false, controlsHidden: false,
       hideTimer: null, speedOptions: [0.5, 1, 1.25, 1.5, 2],
-      // Gesture state
-      gestureActive: false, gestureSide: '', gestureTimer: null, rewindTimer: null,
-      gestureStartX: 0, gestureStartY: 0, gestureStartTime: 0, gestureStartVideoTime: 0,
-      gestureSwiping: false, gestureSeekDir: 0, gestureSeekLabel: '', gestureShowFeedback: false,
-      // Double-tap state
-      lastTapTime: 0, tapTimer: null,
+      // 手势离散状态（连续变换由引擎回调直写 style，报告 §6 规则6）
+      gestureSide: '', gestureSwiping: false,
+      gestureSeekDir: 0, gestureSeekLabel: '',
+      gestureShowFeedback: false, gesturePreview: false,
+      // 双击（单击立即执行 + 双击回退控制条，报告 §1 优化2）
+      lastTapTime: 0, preTapControlsHidden: false,
       // Seek state
       seeking: false, seekHintPct: 0, seekHintTime: 0,
-      // Image swipe — removed, using unified _navStartX
       // Navigation swipe state
       navigateFeedback: '',
       navigateFeedbackTimer: null,
       posterUrl: '',
-      gestureOffsetX: 0,
       _navigating: false,
       navSwiping: false,
       zoomed: false,
@@ -665,26 +691,128 @@ const PreviewPage = {
       }
       this.$router.back();
     },
-    /* ---- Tap / Double-tap ---- */
-    onClick() { this.checkDoubleTap(); },
-    checkDoubleTap() {
+    /* ---- Tap / Double-tap ----
+     * 报告 §1 优化2：单击立即执行（消除 350ms 延迟与 startHideTimer 竞态，
+     * 修复"单击无法呼出控制条"）；双击窗口内第二击先还原控制条再执行双击动作，
+     * 净效果 = 播放切换 + 控制条复位。 */
+    _handleTap() {
       const now = Date.now();
-      if (now - this.lastTapTime < 350) {
-        if (this.tapTimer) { clearTimeout(this.tapTimer); this.tapTimer = null; }
+      if (now - this.lastTapTime < G_TOKENS.TAP_WINDOW) {
         this.lastTapTime = 0;
+        this.controlsHidden = this.preTapControlsHidden; // 回退第一次单击的效果
         this.onDoubleTap();
-        return true;
+        return;
       }
+      this.preTapControlsHidden = this.controlsHidden;
       this.lastTapTime = now;
-      this.tapTimer = setTimeout(() => { this.onSingleTap(); this.tapTimer = null; }, 350);
-      return false;
+      this.onSingleTap();
     },
     onSingleTap() {
-      if (this.mediaType === 'video') { this.controlsHidden = !this.controlsHidden; this.speedMenuOpen = false; }
+      if (this.mediaType === 'video') {
+        this.controlsHidden = !this.controlsHidden;
+        this.speedMenuOpen = false;
+        // 显示且正在播放才启动自动隐藏；隐藏即取消计时（报告 §1 优化2）
+        if (!this.controlsHidden && this.playing) this.startHideTimer();
+        else if (this.controlsHidden && this.hideTimer) { clearTimeout(this.hideTimer); this.hideTimer = null; }
+      }
     },
     onDoubleTap() {
-      if (this.mediaType === 'image') { this.zoomed = !this.zoomed; }
+      if (this.mediaType === 'image') { this._toggleImageZoom(); }
       else if (this.mediaType === 'video') { this.togglePlay(); }
+    },
+    /* ---- Image Zoom（双击 + 捏合，报告 §1 修复1）----
+     * 缩放状态统一存于 _zoom {scale,x,y}，双击与捏合共用一套状态与复位逻辑；
+     * 平移范围按 显示尺寸×(s−1)/2 夹紧；连续变换直写 style（报告 §6 规则6） */
+    _setZoom(scale, x, y, animate) {
+      const el = this._mediaEl(); if (!el) return;
+      const T = G_TOKENS;
+      const s = Math.max(1, Math.min(T.ZOOM_PINCH_MAX, scale));
+      const maxX = el.clientWidth * (s - 1) / 2;
+      const maxY = el.clientHeight * (s - 1) / 2;
+      this._zoom = {
+        scale: s,
+        x: Math.max(-maxX, Math.min(maxX, x)),
+        y: Math.max(-maxY, Math.min(maxY, y)),
+      };
+      this.zoomed = s > 1.05;
+      if (animate) {
+        el.style.transition = 'transform ' + T.SPRING_MS + 'ms ' + T.SPRING_EASE;
+        this._zoomAnim = (this._zoomAnim || 0) + 1;
+        const token = this._zoomAnim;
+        setTimeout(() => {
+          // 手势进行中不打断（避免恢复 class 过渡导致后续跟手卡顿）
+          if (token === this._zoomAnim && !this._pinch && this._mode !== 'pan') {
+            el.style.transition = '';
+          }
+        }, T.SPRING_MS + 40);
+      } else {
+        el.style.transition = 'none';
+      }
+      el.style.transform = 'translate(' + this._zoom.x.toFixed(1) + 'px,' +
+        this._zoom.y.toFixed(1) + 'px) scale(' + s.toFixed(4) + ')';
+    },
+    _resetZoom() {
+      this._zoom = { scale: 1, x: 0, y: 0 };
+      this.zoomed = false;
+      this._pinch = null;
+      this.$nextTick(() => {
+        const el = this._mediaEl();
+        if (el) { el.style.transition = ''; el.style.transform = ''; }
+      });
+    },
+    _toggleImageZoom() {
+      // 双击：未放大 → 放大到 ZOOM_MAX（2.5，原 1.8 偏小）；已放大 → 复位
+      if (this._zoom && this._zoom.scale > 1.05) this._setZoom(1, 0, 0, true);
+      else this._setZoom(G_TOKENS.ZOOM_MAX, 0, 0, true);
+    },
+    /* 放大态单指平移（替代切文件/下滑退出，任一轴锁定均路由至此） */
+    _panStart(c) { this._pan = { x: this._zoom.x, y: this._zoom.y }; },
+    _panMove(c) {
+      this._setZoom(this._zoom.scale, this._pan.x + c.dx, this._pan.y + c.dy, false);
+    },
+    _panEnd() { /* 保持当前位置 */ },
+    /* 双指捏合缩放：以初始中点为锚点，缩放与平移一步到位 */
+    _pinchStart(e) {
+      if (this.mediaType !== 'image' || !e.touches || e.touches.length !== 2) return;
+      const a = e.touches[0], b = e.touches[1];
+      this._pinch = {
+        d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1,
+        s0: this._zoom.scale,
+        pan0: { x: this._zoom.x, y: this._zoom.y },
+        mid0: { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 },
+      };
+      if (e.cancelable) e.preventDefault();
+    },
+    _pinchMove(e) {
+      const p = this._pinch;
+      if (!p || !e.touches || e.touches.length < 2) return;
+      const el = this._mediaEl(); if (!el) return;
+      const a = e.touches[0], b = e.touches[1];
+      const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1;
+      const s = p.s0 * d / p.d0;
+      const mid = { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
+      const k = s / p.s0;
+      // 缩放焦点修复（报告 §1 捏合兼容）：transform-origin 是元素布局中心 L，
+      // 点位映射 V(e) = L + t + s·(e − L)。要让捏合中心的内容点缩放前后不动，
+      // 需求解 t1 = m1 − k·(m0 − t0) − (1 − k)·L。
+      // 旧实现漏掉 (1−k)·L 项，缩放焦点整体偏移 → 视图总是跑向右下角。
+      // L = 当前视觉中心 − 当前平移（getBoundingClientRect 含缩放，中心需扣回）。
+      const rect = el.getBoundingClientRect();
+      const Lx = rect.left + rect.width / 2 - this._zoom.x;
+      const Ly = rect.top + rect.height / 2 - this._zoom.y;
+      const x = mid.x - k * (p.mid0.x - p.pan0.x) - (1 - k) * Lx;
+      const y = mid.y - k * (p.mid0.y - p.pan0.y) - (1 - k) * Ly;
+      this._setZoom(s, x, y, false);
+      if (e.cancelable) e.preventDefault();
+    },
+    _pinchEnd(e) {
+      if (!this._pinch) return;
+      if (!e.touches || e.touches.length < 2) {
+        this._pinch = null;
+        // 缩得太小直接回弹复位；否则夹紧平移后保持（双击/捏合状态互通）
+        if (this._zoom.scale < G_TOKENS.ZOOM_RESET_BELOW) this._setZoom(1, 0, 0, true);
+        else this._setZoom(this._zoom.scale, this._zoom.x, this._zoom.y, false);
+      }
     },
     /* ---- Playback ---- */
     togglePlay() { if (!this.videoEl) return; if (this.videoEl.paused) { this.videoEl.play(); } else { this.videoEl.pause(); } },
@@ -695,133 +823,397 @@ const PreviewPage = {
       this.progressPct = this.duration ? (this.currentTime / this.duration) * 100 : 0;
     },
     onMeta() { if (this.videoEl) this.duration = this.videoEl.duration || 0; },
-    /* ---- Gestures ---- */
-    onGestureStart(e) {
-      // If video is not playing, delegate to navigation swipe
-      if (this.mediaType === 'video' && !this.playing) {
-        this.onNavSwipeStart(e);
-        return;
-      }
-      // Reset nav state so playing video doesn't inherit stale flags
-      this.navSwiping = false;
-      const t = e.changedTouches && e.changedTouches[0];
-      if (!t) return;
-      this.gestureStartX = t.clientX;
-      this.gestureStartY = t.clientY;
-      this.gestureStartTime = Date.now();
-      this.gestureStartVideoTime = this.videoEl ? this.videoEl.currentTime : 0;
-      this.gestureSide = t.clientX > window.innerWidth / 2 ? 'right' : 'left';
-      this.gestureSwiping = false;
-      this.gestureSeekDir = 0;
-      this.gestureSeekLabel = '';
-      // Cancel pending tap timer (user already started next gesture)
-      if (this.tapTimer) { clearTimeout(this.tapTimer); this.tapTimer = null; }
-      // Start long-press timer
-      this.gestureTimer = setTimeout(() => {
-        this.gestureActive = true;
-        this.gestureShowFeedback = true;
-        if (this.videoEl) {
-          if (this.gestureSide === 'right') {
-            this.videoEl.playbackRate = 2;
-          } else {
-            this.rewindTimer = setInterval(() => {
-              if (this.videoEl) this.videoEl.currentTime = Math.max(0, this.videoEl.currentTime - 0.5);
-            }, 250);
-          }
-        }
-        this.controlsHidden = true;
-      }, 200);
+    /* ---- Gestures（统一手势管线，报告 §6 状态机）----
+     * 引擎（js-gesture.createZone）负责：identifier 跟踪、多指中止、
+     * 方向锁定（|主轴|≥|副轴|×1.15）、touchcancel=中止、速度采样。
+     * 本组件只按锁定后的轴路由到四条语义管线：
+     *   h      → 播放中=快进(seek) / 暂停或图片=切文件(nav)
+     *   v-down → 下滑退出预览(close，报告 §6 G_CLOSE，本次合并 demo 交互)
+     *   v-up   → 无语义（报告 §1：竖直向上不产生动作）
+     *   longpress → 左右半屏 2x 快进 / rAF 连续倒放
+     */
+    _gCanStart(target) {
+      // 报告 §6 规则4：控件区不参与手势，保证播放/暂停/进度条等基础操作
+      return !target.closest('.controls-bar, .speed-menu, .preview-top, .image-nav-hint');
     },
-    onGestureEnd(e) {
-      clearTimeout(this.gestureTimer);
-      this.gestureTimer = null;
-      if (this.rewindTimer) { clearInterval(this.rewindTimer); this.rewindTimer = null; }
-      // Paused video: nav handlers are used (navSwiping), not gesture handlers
-      if (this.mediaType === 'video' && !this.playing) {
-        if (!this.navSwiping) {
-          // Tap (no swipe) on paused video
-          if (this.checkDoubleTap()) { this.gestureShowFeedback = false; this.gestureActive = false; return; }
-          this.gestureShowFeedback = false; this.gestureActive = false;
-          this.gestureSwiping = false; this.gestureSide = ''; this.gestureSeekLabel = '';
-          this.startHideTimer();
-          return;
+    _gOnLock(axis, c) {
+      this._mode = null;
+      // 图片放大态：单指拖动 = 平移（替代切文件/下滑退出，报告 §1 捏合兼容）
+      if (this.mediaType === 'image' && this.zoomed && axis !== 'longpress') {
+        this._mode = 'pan'; this._panStart(c); return;
+      }
+      if (axis === 'h') {
+        if (this.mediaType === 'video' && this.playing) {
+          this._mode = 'seek'; this._seekStart(c);
+        } else if (this.fileList.length >= 2) {
+          this._mode = 'nav'; this._navStart(c);
         }
-        // Swipe on paused video: navigate
-        this.onNavSwipeEnd(e);
-        this.gestureShowFeedback = false; this.gestureActive = false;
-        this.gestureSwiping = false; this.gestureSide = ''; this.gestureSeekLabel = '';
-        return;
+      } else if (axis === 'v-down') {
+        this._mode = 'close'; this._closeStart(c);
       }
-      // Playing video: original gesture logic (gestureSwiping is used)
-      if (!this.gestureActive && !this.gestureSwiping) {
-        if (this.checkDoubleTap()) { this.gestureShowFeedback = false; this.gestureActive = false; return; }
-        this.gestureShowFeedback = false; this.gestureActive = false;
-        this.gestureSwiping = false; this.gestureSide = ''; this.gestureSeekLabel = '';
-        this.startHideTimer();
-        return;
+      // 'v-up'：无动作；'longpress' 由 onLongPress 处理
+    },
+    _gOnMove(c) {
+      if (this._mode === 'seek') this._seekMove(c);
+      else if (this._mode === 'nav') this._navMove(c);
+      else if (this._mode === 'close') this._closeMove(c);
+      else if (this._mode === 'pan') this._panMove(c);
+    },
+    _gOnEnd(c) {
+      if (this._lpActive) { this._endLongPress(); this._lpActive = false; return; }
+      if (this._mode === 'seek') { this._seekEnd(c); }
+      else if (this._mode === 'nav') { this._navEnd(c); }
+      else if (this._mode === 'close') { this._closeEnd(c); }
+      else if (this._mode === 'pan') { this._panEnd(); }
+      this._mode = null;
+    },
+    _gOnCancel() {
+      // touchcancel / 多指 / 二次按下 ≡ 中止 + 回弹（报告 §2 优化5、§6 规则2）
+      if (this._mode === 'seek') this._seekCancel();
+      else if (this._mode === 'nav') this._navSpringBack();
+      else if (this._mode === 'close') this._closeSpringBack();
+      this._mode = null;
+      if (this._lpActive) { this._endLongPress(); this._lpActive = false; }
+      this.gestureSwiping = false; this.gestureSeekDir = 0; this.gestureSeekLabel = '';
+      this.navSwiping = false;
+    },
+
+    /* -- 长按：预反馈(250ms) → 激活(450ms)；报告 §1 优化3 / §4 优化3 -- */
+    _setGestureSide(c) {
+      this.gestureSide = c.x > window.innerWidth / 2 ? 'right' : 'left';
+    },
+    _onLongPressPreview(c) {
+      if (!(this.mediaType === 'video' && this.playing)) return;
+      this._setGestureSide(c);
+      this.gesturePreview = true;      // 低透明度预告（报告 §1 优化3）
+      this.gestureShowFeedback = true;
+    },
+    _onLongPress(c) {
+      if (!(this.mediaType === 'video' && this.playing)) return;
+      this._lpActive = true;
+      this._setGestureSide(c);
+      this.gesturePreview = false;
+      this.gestureShowFeedback = true;
+      this.controlsHidden = true;
+      if (this.videoEl) {
+        if (this.gestureSide === 'right') {
+          this.videoEl.playbackRate = 2;         // 2x 快进
+        } else {
+          // 左侧：暂停 + rAF 连续倒放（替代 setInterval 0.5s 步进，报告 §4 优化3）
+          this._lpWasPlaying = !this.videoEl.paused;
+          this.videoEl.pause();
+          let last = performance.now();
+          const step = (t) => {
+            const dt = (t - last) / 1000; last = t;
+            if (this.videoEl) {
+              this.videoEl.currentTime = Math.max(0, this.videoEl.currentTime - dt * 2);
+              if (this.videoEl.currentTime > 0) this._scrubRAF = requestAnimationFrame(step);
+            }
+          };
+          this._scrubRAF = requestAnimationFrame(step);
+        }
       }
-      // Restore playback rate
-      if (this.gestureActive && this.videoEl) { this.videoEl.playbackRate = this.playbackRate; }
-      // 先隐藏反馈（避免残留内容在 fadeout 期间闪烁）
-      this.gestureShowFeedback = false;
-      this.gestureActive = false;
-      this.gestureSwiping = false;
+    },
+    _onLongPressCancel() { this._endLongPress(); this._lpActive = false; }, // 长按转滑动
+    _endLongPress() {
+      if (this._scrubRAF) { cancelAnimationFrame(this._scrubRAF); this._scrubRAF = 0; }
+      if (this.videoEl) this.videoEl.playbackRate = this.playbackRate;
+      if (this._lpWasPlaying && this.videoEl && this.videoEl.paused) this.videoEl.play().catch(() => {});
+      this._lpWasPlaying = false;
+      this.gestureShowFeedback = false; this.gesturePreview = false;
       this.gestureSide = '';
-      this.gestureSeekLabel = '';
       this.startHideTimer();
     },
-    onGestureMove(e) {
-      // If video is not playing, delegate to navigation swipe
-      if (this.mediaType === 'video' && !this.playing) {
-        this.onNavSwipeMove(e);
-        return;
-      }
-      const t = e.changedTouches && e.changedTouches[0];
-      if (!t) return;
-      const dx = t.clientX - this.gestureStartX;
-      const dy = t.clientY - this.gestureStartY;
-      const absDx = Math.abs(dx);
-      const absDy = Math.abs(dy);
-      if (absDx > 10 && absDx > absDy) {
-        // 若长按已激活，立即覆盖取消
-        if (this.gestureActive) {
-          this.gestureActive = false;
-          this.gestureShowFeedback = false;
-          if (this.videoEl) this.videoEl.playbackRate = this.playbackRate;
-          if (this.rewindTimer) { clearInterval(this.rewindTimer); this.rewindTimer = null; }
+
+    /* -- 横滑快进（播放态）：分段系数 + 节流提交 + fling（报告 §2 优化2/3）-- */
+    _seekStart(c) {
+      this.navSwiping = false;
+      this.gestureSwiping = true;
+      this.gestureSeekDir = 0; this.gestureSeekLabel = '';
+      this.gestureShowFeedback = true;
+      this._seek = {
+        videoTime: this.videoEl ? this.videoEl.currentTime : 0,
+        w: c.width,
+        lastCommit: 0, commitTimer: 0, pendingTarget: null,
+      };
+      this._feedbackAt(c);
+    },
+    _seekSeconds(dx, w) {
+      // 报告 §6 G_SEEK_COEF：0.1 / 0.25 / 0.5 s/px 分段累计（25%、50% 宽度分界）
+      const T = G_TOKENS;
+      const a = Math.abs(dx);
+      const L1 = w * T.SEEK_SEG1, L2 = w * T.SEEK_SEG2;
+      let s = Math.min(a, L1) * T.SEEK_COEF[0];
+      if (a > L1) s += (Math.min(a, L2) - L1) * T.SEEK_COEF[1];
+      if (a > L2) s += (a - L2) * T.SEEK_COEF[2];
+      return dx > 0 ? s : -s;
+    },
+    _seekMove(c) {
+      const dur = this.videoEl ? (this.videoEl.duration || 0) : 0;
+      if (!(dur > 0 && this.videoEl)) return;
+      this.gestureSeekDir = c.dx > 0 ? 1 : -1;
+      const rel = this._seekSeconds(c.dx, this._seek.w);
+      const target = Math.max(0, Math.min(dur, this._seek.videoTime + rel));
+      this.gestureSeekLabel = (c.dx > 0 ? '+' : '-') + Math.round(Math.abs(rel)) + 's';
+      this._feedbackAt(c);
+      // 报告 §2 优化3：move 只更新 label/预览，currentTime 节流 ≥150ms 提交（Range 流防卡顿）
+      const T = G_TOKENS;
+      const now = performance.now();
+      const due = now - this._seek.lastCommit >= T.SEEK_THROTTLE;
+      if (due) {
+        this._seek.lastCommit = now;
+        this.videoEl.currentTime = target;
+        this._seek.pendingTarget = null;
+      } else {
+        this._seek.pendingTarget = target;
+        if (!this._seek.commitTimer) {
+          this._seek.commitTimer = setTimeout(() => {
+            this._seek.commitTimer = 0;
+            if (this._seek.pendingTarget != null && this.videoEl) {
+              this.videoEl.currentTime = this._seek.pendingTarget;
+              this._seek.pendingTarget = null;
+            }
+          }, T.SEEK_THROTTLE - (now - this._seek.lastCommit));
         }
-        // Cancel waiting timer if still pending
-        if (this.gestureTimer) { clearTimeout(this.gestureTimer); this.gestureTimer = null; }
-        this.gestureSwiping = true;
-        this.gestureShowFeedback = true;
-        this.gestureSeekDir = dx > 0 ? 1 : -1;
-        const dur = this.videoEl ? (this.videoEl.duration || 0) : 0;
-        if (dur > 0 && this.videoEl) {
-          // 从起点计算目标位置，避免 touchmove 多次触发叠加
-          const targetTime = this.gestureStartVideoTime + (dx * 0.1);
-          this.videoEl.currentTime = Math.max(0, Math.min(dur, targetTime));
-        }
-        const secs = Math.round(Math.abs(dx * 0.1));
-        this.gestureSeekLabel = (dx > 0 ? '+' : '-') + secs + 's';
       }
+    },
+    _seekEnd(c) {
+      const dur = this.videoEl ? (this.videoEl.duration || 0) : 0;
+      if (dur > 0 && this.videoEl) {
+        // 松手提交 + fling 补偿（报告 §2 优化2；速度不足 0.5px/ms 不补偿）
+        const T = G_TOKENS;
+        const fling = Math.abs(c.vx) >= T.NAV_FLING_V
+          ? Math.max(-T.SEEK_FLING_CAP, Math.min(T.SEEK_FLING_CAP, c.vx * T.SEEK_FLING)) : 0;
+        const target = this._seek.videoTime + this._seekSeconds(c.dx, this._seek.w) + fling;
+        this.videoEl.currentTime = Math.max(0, Math.min(dur, target));
+      }
+      this._seekCancel();
+      this.startHideTimer();
+    },
+    _seekCancel() {
+      if (this._seek && this._seek.commitTimer) { clearTimeout(this._seek.commitTimer); this._seek.commitTimer = 0; }
+      // 先隐藏反馈再清内容，避免 fadeout 期间闪烁（原实现同款处理）
+      this.gestureShowFeedback = false; this.gesturePreview = false;
+      this._feedbackReset();
+      this.gestureSwiping = false; this.gestureSeekDir = 0; this.gestureSeekLabel = '';
+    },
+
+    /* -- 反馈气泡：跟随手指（报告 §3 优化1）-- */
+    _feedbackAt(c) {
+      const el = this.$refs.feedback;
+      if (el) {
+        el.style.transition = 'none';
+        el.style.transform = 'translate(-50%, -50%) translateX(' +
+          Math.max(-80, Math.min(80, c.dx)).toFixed(1) + 'px)';
+      }
+    },
+    _feedbackReset() {
+      const el = this.$refs.feedback;
+      if (el) { el.style.transition = ''; el.style.transform = 'translate(-50%, -50%)'; }
+    },
+
+    /* -- 横滑切文件（暂停视频/图片）：阻尼跟手 + 双阈值松手（报告 §2 优化1、§4 优化1）-- */
+    _mediaEl() { return this.$refs.videoEl || this.$refs.mediaEl || null; },
+    _navStart(c) {
+      this._snapFinishNav();   // 上一段切换动画未结束又开始：立即定格（连续快滑不丢手势）
+      this.navSwiping = true;
+      this._nav = {
+        w: c.width,
+        atFirst: this.fileIndex <= 0,
+        atLast: this.fileIndex >= this.fileList.length - 1,
+        showedHint: false,
+      };
+    },
+    _navOffset(dx) {
+      // 报告 §4 优化1：f(x)=L0+(|x|−L0)×0.35（替代 ±40px 硬 clamp"死墙"）；
+      // 边界再加 ×0.3 阻力（报告 §2 优化4）
+      const T = G_TOKENS;
+      const L0 = this._nav.w * T.NAV_DAMP_START_RATIO;
+      const atEdge = (dx > 0 && this._nav.atFirst) || (dx < 0 && this._nav.atLast);
+      const off = gDamp(Math.abs(dx), L0, T.NAV_DAMP_FACTOR,
+                        this._nav.w * T.NAV_DAMP_MAX_RATIO, atEdge);
+      return dx > 0 ? off : -off;
+    },
+    _navMove(c) {
+      const el = this._mediaEl(); if (!el) return;
+      el.style.transition = 'none';
+      const scale = this.zoomed ? ' scale(1.8)' : '';
+      el.style.transform = 'translateX(' + this._navOffset(c.dx).toFixed(1) + 'px)' + scale;
+      // 边界拖动中即时提示（替代"松手才 toast"，报告 §2 优化4）
+      const atEdge = (c.dx > 0 && this._nav.atFirst) || (c.dx < 0 && this._nav.atLast);
+      if (atEdge && !this._nav.showedHint && Math.abs(c.dx) > 30) {
+        this._nav.showedHint = true;
+        this.showNavFeedback(this._nav.atFirst ? '已是第一个文件' : '已是最后一个文件');
+      }
+    },
+    _navEnd(c) {
+      const T = G_TOKENS;
+      this.navSwiping = false;
+      const dist = Math.abs(c.dx);
+      // 距离阈值：22% 宽度，限制在 [72, 120]px（报告 §6 G_NAV_COMMIT）
+      const commitDist = Math.max(T.NAV_COMMIT_MIN,
+        Math.min(T.NAV_COMMIT_CAP, this._nav.w * T.NAV_COMMIT_RATIO));
+      const flingMin = Math.min(T.NAV_FLING_DIST_CAP,
+        Math.max(36, this._nav.w * T.NAV_FLING_DIST_RATIO));
+      const atEdge = (c.dx > 0 && this._nav.atFirst) || (c.dx < 0 && this._nav.atLast);
+      // 双阈值：距离达标，或快速甩动（报告 §2 优化1）
+      const shouldCommit = !atEdge && this.fileList.length >= 2 &&
+        (dist >= commitDist || (Math.abs(c.vx) >= T.NAV_FLING_V && dist >= flingMin));
+      if (shouldCommit) this._navSlideTo(c.dx < 0 ? 1 : -1);  // 左滑 → 下一张
+      else this._navSpringBack();
+    },
+    _mediaTransformX(px) {
+      // 横滑切文件仅在未放大时启用（放大态走 pan 管线），不再拼接缩放
+      const el = this._mediaEl(); if (!el) return;
+      el.style.transform = px ? 'translateX(' + px + 'px)' : '';
+    },
+    _navSpringBack() {
+      const el = this._mediaEl(); if (!el) return;
+      // G_SPRING：320ms spring 曲线回弹（报告 §4 优化2）
+      el.style.transition = 'transform ' + G_TOKENS.SPRING_MS + 'ms ' + G_TOKENS.SPRING_EASE;
+      this._mediaTransformX(0);
+      // 回弹结束后清掉内联样式，交还 class（避免 zoomed 态内联 transform 残留）
+      this._navAnim = (this._navAnim || 0) + 1;
+      const token = this._navAnim;
+      setTimeout(() => {
+        if (token !== this._navAnim) return;
+        if (this._zoom && this._zoom.scale === 1 && !this._pinch) {
+          el.style.transform = ''; // 未放大才清空，避免覆盖捏合缩放状态
+        }
+        el.style.transition = ''; el.style.opacity = '';
+      }, G_TOKENS.SPRING_MS + 40);
+    },
+    _navSlideTo(dir) {
+      // dir=1 下一张：旧内容左出 → 新内容右侧 30% 滑入（报告 §3 优化2）
+      const T = G_TOKENS;
+      const el = this._mediaEl(); if (!el) return;
+      this._navigating = true;
+      this._navAnim = (this._navAnim || 0) + 1;
+      const token = this._navAnim;
+      el.style.transition =
+        'transform ' + T.COMMIT_MS + 'ms ' + T.COMMIT_EASE + ', opacity ' + T.COMMIT_MS + 'ms';
+      el.style.transform = 'translateX(' + (dir * -60) + '%)';
+      el.style.opacity = '0.4';
+      setTimeout(() => {
+        if (token !== this._navAnim) return;
+        this._applyFile(this.fileIndex + dir);
+        this.$nextTick(() => {
+          const nel = this._mediaEl();
+          if (!nel || token !== this._navAnim) return;
+          nel.style.transition = 'none';
+          nel.style.transform = 'translateX(' + (dir * 30) + '%)';
+          nel.style.opacity = '1';
+          void nel.offsetWidth; // reflow 后再起飞，保证过渡生效
+          nel.style.transition =
+            'transform ' + G_TOKENS.SPRING_MS + 'ms ' + G_TOKENS.SPRING_EASE;
+          nel.style.transform = 'translateX(0)';
+          setTimeout(() => {
+            if (token !== this._navAnim) return;
+            nel.style.transition = ''; nel.style.transform = ''; nel.style.opacity = '';
+            this._navigating = false;
+          }, G_TOKENS.SPRING_MS + 40);
+        });
+      }, T.COMMIT_MS + 10);
+    },
+    _snapFinishNav() {
+      if (this._navigating) {
+        this._navAnim = (this._navAnim || 0) + 1; // 使未完成的动画定时器失效
+        const el = this._mediaEl();
+        if (el) { el.style.transition = ''; el.style.transform = ''; el.style.opacity = ''; }
+        this._navigating = false;
+      }
+    },
+
+    /* -- 下滑退出预览（报告 §6 G_CLOSE，demo 已验证范式并入正式端）-- */
+    _closeStart(c) {
+      this._close = { h: c.height, offset: 0 };
+    },
+    _closeMove(c) {
+      const T = G_TOKENS;
+      const d = Math.max(0, c.dy);   // 仅响应向下滑动
+      const L0 = this._close.h * T.CLOSE_DAMP_START_RATIO;
+      this._close.offset = gDamp(d, L0, T.CLOSE_DAMP_FACTOR,
+                                 this._close.h * T.CLOSE_MAX_RATIO, false);
+      const p = Math.min(1, this._close.offset / (this._close.h * 0.6));
+      const sheet = this.$refs.sheet, bd = this.$refs.backdrop;
+      if (sheet) {
+        sheet.style.transition = 'none';
+        sheet.style.transform = 'translate3d(0,' + this._close.offset.toFixed(1) + 'px,0) scale(' +
+          (1 - p * 0.06).toFixed(4) + ')';
+        sheet.style.borderRadius = (18 * p).toFixed(1) + 'px';
+      }
+      // 背景 1 → 0 渐变透明，透出列表页（报告 §3 优化1 / demo 范式）
+      if (bd) { bd.style.transition = 'none'; bd.style.opacity = Math.max(0, 1 - p * 1.2).toFixed(3); }
+    },
+    _closeEnd(c) {
+      const T = G_TOKENS;
+      // 双阈值：位移 ≥28% 屏高，或甩动 ≥0.55px/ms 且 ≥15% 屏高（报告 §6 G_CLOSE）
+      const shouldClose = this._close.offset >= this._close.h * T.CLOSE_DIST_RATIO ||
+        (c.vy >= T.CLOSE_VEL && this._close.offset >= this._close.h * T.CLOSE_VEL_MIN_RATIO);
+      if (shouldClose) this._closeCommit();
+      else this._closeSpringBack();
+    },
+    _closeSpringBack() {
+      const sheet = this.$refs.sheet, bd = this.$refs.backdrop;
+      if (sheet) {
+        sheet.style.transition = 'transform ' + G_TOKENS.SPRING_MS + 'ms ' + G_TOKENS.SPRING_EASE +
+          ', border-radius ' + G_TOKENS.SPRING_MS + 'ms';
+        sheet.style.transform = 'translate3d(0,0,0)';
+        sheet.style.borderRadius = '0px';
+      }
+      if (bd) {
+        bd.style.transition = 'opacity ' + G_TOKENS.SPRING_MS + 'ms ease';
+        bd.style.opacity = '1';
+      }
+    },
+    _closeCommit() {
+      const T = G_TOKENS;
+      if (this.videoEl) this.videoEl.pause();
+      const sheet = this.$refs.sheet, bd = this.$refs.backdrop;
+      if (sheet) {
+        sheet.style.transition = 'transform ' + T.COMMIT_MS + 'ms ' + T.COMMIT_EASE;
+        sheet.style.transform = 'translate3d(0,110%,0) scale(1)';
+      }
+      if (bd) {
+        bd.style.transition = 'opacity ' + T.COMMIT_MS + 'ms ease';
+        bd.style.opacity = '0';
+      }
+      setTimeout(() => this.goBack(), T.COMMIT_MS + 40);
     },
     /* ---- Speed ---- */
     toggleSpeedMenu() { this.speedMenuOpen = !this.speedMenuOpen; if (this.speedMenuOpen) this.controlsHidden = false; },
     setSpeed(r) { this.playbackRate = r; if (this.videoEl) this.videoEl.playbackRate = r; this.speedMenuOpen = false; this.startHideTimer(); },
-    /* ---- Fullscreen ---- */
+    /* ---- Fullscreen ----
+     * 报告 §5 P0：iPhone Safari 无元素级 requestFullscreen，
+     * 回退 video.webkitEnterFullscreen()（原生播放器内自定义手势不可用，需提示） */
     toggleFullscreen() {
       const el = this.$el;
-      if (!document.fullscreenElement) {
-        // 竖屏视频：锁定 portrait-primary 防止横屏
-        if (this.videoEl && this.videoEl.videoHeight > this.videoEl.videoWidth) {
-          if (screen.orientation && screen.orientation.lock) {
-            screen.orientation.lock('portrait-primary').catch(() => {});
-          }
-        }
-        if (el.requestFullscreen) el.requestFullscreen();
-      } else {
+      const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+      if (fsEl) {
         if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
         if (document.exitFullscreen) document.exitFullscreen();
+        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+        return;
+      }
+      const isPortraitVideo = this.videoEl && this.videoEl.videoHeight > this.videoEl.videoWidth;
+      if (el.requestFullscreen) {
+        // 竖屏视频：锁定 portrait-primary 防止横屏（仅 Android Chrome 有效，已 catch）
+        if (isPortraitVideo && screen.orientation && screen.orientation.lock) {
+          screen.orientation.lock('portrait-primary').catch(() => {});
+        }
+        const p = el.requestFullscreen();
+        if (p && p.catch) p.catch(() => this._iosNativeFullscreen());
+      } else {
+        this._iosNativeFullscreen();
+      }
+    },
+    _iosNativeFullscreen() {
+      const v = this.videoEl;
+      if (v && v.webkitEnterFullscreen) {
+        v.webkitEnterFullscreen();
+        this.showNavFeedback('系统原生全屏中，返回后可继续使用手势');
+      } else {
+        this.showNavFeedback('当前浏览器不支持全屏');
       }
     },
     /* ---- Seek ---- */
@@ -864,60 +1256,10 @@ const PreviewPage = {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    /* ---- Unified Navigation Swipe (image + video paused) ---- */
-    onNavSwipeStart(e) {
-      const t = e.changedTouches && e.changedTouches[0];
-      if (!t) return;
-      // Cancel pending single-tap timer from previous touch
-      if (this.tapTimer) { clearTimeout(this.tapTimer); this.tapTimer = null; }
-      this._navStartX = t.clientX;
-      this._navStartY = t.clientY;
-      this.gestureOffsetX = 0;
-      this.navSwiping = false;
-    },
-    onNavSwipeMove(e) {
-      if (this._navigating || this.fileList.length < 2) return;
-      const t = e.changedTouches && e.changedTouches[0];
-      if (!t) return;
-      const dx = t.clientX - this._navStartX;
-      const dy = t.clientY - this._navStartY;
-      // Only activate horizontal swipe if more horizontal than vertical
-      if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {
-        this.navSwiping = true;
-        // Clamp offset for resistance feel
-        this.gestureOffsetX = Math.max(-40, Math.min(40, dx));
-      }
-    },
-    onNavSwipeEnd(e) {
-      // Check double-tap only when not swiping (pure tap)
-      if (!this.navSwiping) {
-        if (this.checkDoubleTap()) { return; }
-        this.gestureOffsetX = 0;
-        return;
-      }
-      if (this.fileList.length < 2) { this.gestureOffsetX = 0; return; }
-      const t = e.changedTouches && e.changedTouches[0];
-      if (!t) { this.gestureOffsetX = 0; return; }
-      const dx = t.clientX - this._navStartX;
-      if (dx < -40) this.navigateToFile(this.fileIndex + 1);
-      else if (dx > 40) this.navigateToFile(this.fileIndex - 1);
-      else {
-        // Spring back: remove .dragging first, then animate offset to 0
-        this.navSwiping = false;
-        this.$nextTick(() => { this.gestureOffsetX = 0; });
-        return;
-      }
-      this.navSwiping = false;
-    },
-    navigateToFile(newIndex) {
-      if (this._navigating) return;
-      if (newIndex < 0 || newIndex >= this.fileList.length) {
-        this.showNavFeedback(newIndex < 0 ? '已是第一个文件' : '已是最后一个文件');
-        return;
-      }
-      this._navigating = true;
+    /* ---- Navigation（横滑切文件的状态更新；触摸部分已上移至 _nav* 管线）---- */
+    _applyFile(newIndex) {
       const file = this.fileList[newIndex];
-      if (!file) { this._navigating = false; return; }
+      if (!file) return false;
       this.fileIndex = newIndex;
       // Update back-button scroll anchor to this file
       _fileScrollAnchor = file.id;
@@ -926,27 +1268,39 @@ const PreviewPage = {
       this.streamUrl = mediaUrl(this.serverUrl, '/api/files/' + file.id + '/stream');
       this.posterUrl = mediaUrl(this.serverUrl, '/api/files/' + file.id + '/thumbnail');
       // Reset zoom and video state when switching
-      this.zoomed = false;
+      this._resetZoom();
       this.playing = false;
       this.currentTime = 0;
       this.duration = 0;
       this.progressPct = 0;
       // Update URL without reload — deep-clone to avoid Vue reactive proxy $el
       history.replaceState({ files: JSON.parse(JSON.stringify(this.fileList)), fileIndex: newIndex }, '', '#/preview/' + file.id);
-      // Spring back after transition
-      this.gestureOffsetX = 0;
-      setTimeout(() => { this._navigating = false; }, 300);
+      return true;
+    },
+    /* 供图片左右箭头按钮调用（对外接口保持不变） */
+    navigateToFile(newIndex) {
+      if (this._navigating) return;
+      if (newIndex < 0 || newIndex >= this.fileList.length) {
+        this.showNavFeedback(newIndex < 0 ? '已是第一个文件' : '已是最后一个文件');
+        return;
+      }
+      this._navigating = true;
+      if (this._applyFile(newIndex)) setTimeout(() => { this._navigating = false; }, 300);
+      else this._navigating = false;
     },
     showNavFeedback(msg) {
       this.navigateFeedback = msg;
       if (this.navigateFeedbackTimer) clearTimeout(this.navigateFeedbackTimer);
       this.navigateFeedbackTimer = setTimeout(() => { this.navigateFeedback = ''; }, 800);
     },
-    /* ---- Controls auto-hide ---- */
+    /* ---- Controls auto-hide ----
+     * G_HIDE_DELAY=4.5s（报告 §6 Token 表）；仅在播放中自动隐藏 */
     startHideTimer(delay) {
       if (this.hideTimer) clearTimeout(this.hideTimer);
       this.controlsHidden = false;
-      if (this.playing) { this.hideTimer = setTimeout(() => { this.controlsHidden = true; this.speedMenuOpen = false; }, delay || 5000); }
+      if (this.playing) {
+        this.hideTimer = setTimeout(() => { this.controlsHidden = true; this.speedMenuOpen = false; }, delay || 4500);
+      }
     },
     keepControlsVisible() {
       if (this.hideTimer) clearTimeout(this.hideTimer);
@@ -960,6 +1314,38 @@ const PreviewPage = {
   },
   async mounted() {
     this.$emit('loading', true);
+    // 统一手势引擎：绑定在常驻的 .preview-content 上（事件委托，
+    // 媒体类型切换无需重绑），触摸 + 鼠标同一管线（报告 §6 / §5）
+    this.$nextTick(() => {
+      const content = this.$refs.content;
+      if (!content) return;
+      // 图片捏合缩放（双指）：独立于引擎的单手势管线——引擎遇多指会中止
+      // 当前手势，两指距离/中点由这里跟踪（报告 §1 修复1）
+      this._zoom = { scale: 1, x: 0, y: 0 };
+      this._pinch = null;
+      this._pinchHandlers = {
+        start: (e) => this._pinchStart(e),
+        move: (e) => this._pinchMove(e),
+        end: (e) => this._pinchEnd(e),
+      };
+      content.addEventListener('touchstart', this._pinchHandlers.start, { passive: false });
+      content.addEventListener('touchmove', this._pinchHandlers.move, { passive: false });
+      content.addEventListener('touchend', this._pinchHandlers.end, { passive: false });
+      content.addEventListener('touchcancel', this._pinchHandlers.end, { passive: false });
+      if (!this._destroyGesture) {
+        this._destroyGesture = Gesture.createZone(content, {
+          canStart: (t) => this._gCanStart(t),
+          onLock: (axis, c) => this._gOnLock(axis, c),
+          onMove: (c) => this._gOnMove(c),
+          onEnd: (c) => this._gOnEnd(c),
+          onCancel: () => this._gOnCancel(),
+          onTap: () => this._handleTap(),
+          onLongPressPreview: (c) => this._onLongPressPreview(c),
+          onLongPress: (c) => this._onLongPress(c),
+          onLongPressCancel: () => this._onLongPressCancel(),
+        });
+      }
+    });
     try {
       // 从 router state 恢复文件列表（用于图片切换）
       if (history.state && history.state.files) {
@@ -981,10 +1367,18 @@ const PreviewPage = {
     } finally { this.$emit('loading', false); }
   },
   beforeUnmount() {
+    if (this._destroyGesture) { this._destroyGesture(); this._destroyGesture = null; }
+    if (this._pinchHandlers && this.$refs.content) {
+      const c = this.$refs.content;
+      c.removeEventListener('touchstart', this._pinchHandlers.start);
+      c.removeEventListener('touchmove', this._pinchHandlers.move);
+      c.removeEventListener('touchend', this._pinchHandlers.end);
+      c.removeEventListener('touchcancel', this._pinchHandlers.end);
+      this._pinchHandlers = null;
+    }
     if (this.hideTimer) clearTimeout(this.hideTimer);
-    if (this.rewindTimer) clearInterval(this.rewindTimer);
-    if (this.gestureTimer) clearTimeout(this.gestureTimer);
-    if (this.tapTimer) clearTimeout(this.tapTimer);
+    if (this._scrubRAF) cancelAnimationFrame(this._scrubRAF);
+    if (this._seek && this._seek.commitTimer) clearTimeout(this._seek.commitTimer);
     if (this.navigateFeedbackTimer) clearTimeout(this.navigateFeedbackTimer);
     if (this._seekHandlers) {
       document.removeEventListener('mousemove', this._seekHandlers.onMove);
