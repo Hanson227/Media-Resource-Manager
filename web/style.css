@@ -79,6 +79,7 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain; /* 报告 §1：下拉刷新不与浏览器回弹叠加 */
 }
 
 .page {
@@ -314,6 +315,9 @@ body {
   transform: scale(0.97);
   box-shadow: 0 2px 8px rgba(0,0,0,.3);
 }
+/* 报告 §1：卡片声明 manipulation，消除双击缩放歧义带来的点击延迟；
+   单击打开由 Gesture.attachFastTap 在 touchend 直判（见 js-pages.js） */
+.unit-card, .feed-item { touch-action: manipulation; }
 .feed-item .thumb-wrap {
   position: relative; width: 100%; aspect-ratio: 4/3;
   overflow: hidden; background: var(--bg-card);
@@ -367,7 +371,21 @@ body {
 /* ========== Preview Page ========== */
 .preview-overlay {
   position: fixed; inset: 0; z-index: 200;
-  background: #000; display: flex; flex-direction: column;
+  /* 背景移至 .preview-backdrop：下滑退出时背景可渐变透明（报告 §3 优化1） */
+  background: transparent; display: flex; flex-direction: column;
+  overscroll-behavior: contain; /* 报告 §1：杜绝浏览器回弹/下拉刷新干扰手势 */
+}
+/* 背景层（下拉退出拖动中 1→0 渐变透明） */
+.preview-backdrop {
+  position: absolute; inset: 0; background: #000;
+  opacity: 1; pointer-events: none;
+}
+/* 内容层：下滑退出时整体跟手下移 + 缩放 + 圆角（报告 §6 G_CLOSE / demo 范式） */
+.preview-sheet {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  will-change: transform;
 }
 .preview-top {
   position: absolute; top: 0; left: 0; right: 0; z-index: 10;
@@ -386,6 +404,10 @@ body {
 .preview-content {
   flex: 1; display: flex; align-items: center; justify-content: center;
   overflow: hidden; position: relative;
+  /* 报告 §5 P0：触摸封口——浏览器不再抢占滚动/双击缩放/捏合（iOS 忽略
+     user-scalable=no 的兜底），手势全部交由 js-gesture 引擎处理 */
+  touch-action: none;
+  -webkit-user-select: none; user-select: none;
 }
 .preview-content img {
   max-width: 100%; max-height: 100%; object-fit: contain;
@@ -399,20 +421,29 @@ body {
 .gesture-zone {
   position: absolute; top: 0; left: 0; right: 0; bottom: 0;
   z-index: 5; cursor: pointer;
+  touch-action: none; /* 报告 §5：触摸封口 */
 }
 .gesture-zone.seek-active { background: rgba(255,255,255,.05); }
 
-/* ========== Gesture Feedback ========== */
+/* ========== Gesture Feedback ==========
+ * 报告 §3 优化1：外层跟随手指位移（JS 直写 transform），
+ * 内层 .bubble 负责显隐 + scale 入场（G_FEEDBACK ≤120ms/150ms） */
 .gesture-feedback {
-  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  z-index: 6; display: flex; flex-direction: column;
-  align-items: center; gap: var(--space-1); pointer-events: none;
-  opacity: 0; transition: opacity .15s;
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 6; pointer-events: none;
+}
+.gesture-feedback .bubble {
+  display: flex; flex-direction: column; align-items: center;
+  gap: var(--space-1);
   background: rgba(0,0,0,.55); backdrop-filter: blur(8px);
   padding: var(--space-4) var(--space-6); border-radius: 16px;
   border: 1px solid rgba(255,255,255,.08);
+  opacity: 0; transform: scale(.92);
+  transition: opacity .12s ease, transform .12s ease;
 }
-.gesture-feedback.show { opacity: 1; }
+.gesture-feedback.show .bubble { opacity: 1; transform: scale(1); }
+.gesture-feedback.preview .bubble { opacity: .5; transform: scale(.96); }
 .gesture-feedback .icon {
   font-size: 36px; color: rgba(255,255,255,.9);
 }
@@ -460,6 +491,9 @@ body {
   border-radius: 2px; position: relative; overflow: visible;
 }
 .progress-fill {
+  /* 修复：滑块 .progress-thumb 为 absolute 定位，必须以填充条为定位基准，
+     否则会锚到 .progress-track 导致滑块永远停在最右端 */
+  position: relative;
   height: 100%; background: var(--accent); border-radius: 2px;
   transition: width .1s linear;
 }
@@ -474,6 +508,15 @@ body {
 .progress-wrap:hover .progress-track,
 .progress-wrap.dragging .progress-track { height: 4px; }
 .progress-wrap.dragging .progress-fill { transition: none; }
+/* 进度条拖拽预览时间气泡：仅拖拽中显示（v-if="seeking"），修复
+   "底部出现第三个常驻时间"问题——此前该元素无任何样式且不受显隐控制 */
+.progress-seek-hint {
+  position: absolute; bottom: 16px; transform: translateX(-50%);
+  background: rgba(0,0,0,.75); color: #fff; font-size: 11px;
+  padding: 2px 7px; border-radius: 4px; pointer-events: none;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  z-index: 2;
+}
 
 /* ========== Speed Menu ========== */
 .speed-menu {
@@ -513,12 +556,16 @@ body {
 }
 .nav-feedback.show { opacity: 1; }
 
-/* ========== Gesture Follow ========== */
+/* ========== Gesture Follow ==========
+ * 默认带 G_SPRING 回弹曲线（同时服务双击缩放动画）；
+ * 拖动中由 JS 直写 transition:'none' 实现 1:1 跟手（报告 §6 规则6） */
 .gesture-follow {
   will-change: transform;
-  transition: transform .25s cubic-bezier(.25, .46, .45, .94);
+  transition: transform .32s cubic-bezier(.22, 1, .36, 1);
 }
 .gesture-follow.dragging { transition: none; }
+/* 缩放（双击/捏合）由 JS 内联 transform 驱动（_setZoom），
+   class 仅负责光标与状态标记，不再写 transform 以免与内联样式冲突 */
 .gesture-follow.zoomed { cursor: zoom-out; }
 
 /* ========== PIN Lock Screen ========== */
@@ -768,6 +815,7 @@ body {
   gap: var(--space-2); overflow: hidden; transition: height .2s;
 }
 .ptr-indicator.active { height: 44px; }
+.ptr-indicator.ready { color: var(--accent); } /* 报告 §3 优化3：就绪态变色 */
 
 /* ============================================================
    Responsive — iPad / Tablet
