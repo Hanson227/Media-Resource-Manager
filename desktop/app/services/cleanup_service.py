@@ -19,6 +19,26 @@ from app.db.queries import delete_media_file
 
 logger = logging.getLogger(__name__)
 
+# 缩略图缓存目录：由 main.py 在加载配置后注入（否则回退到旧默认值）
+_configured_cache_dir: Optional[Path] = None
+_DEFAULT_CACHE_DIR = Path("data/.thumbnails")
+
+
+def configure_thumbnail_cache_dir(cache_dir) -> None:
+    """注入配置中的缩略图缓存目录（config.thumbnail_cache_dir）。
+
+    未注入时回退到 data/.thumbnails，保证独立调用（测试/脚本）仍可用。
+    """
+    global _configured_cache_dir
+    _configured_cache_dir = Path(cache_dir) if cache_dir else None
+
+
+def _resolve_cache_dir(cache_dir=None) -> Path:
+    """解析实际使用的缩略图缓存目录。"""
+    if cache_dir is not None:
+        return Path(cache_dir)
+    return _configured_cache_dir or _DEFAULT_CACHE_DIR
+
 
 class CleanupService:
     """文件清理服务。
@@ -166,11 +186,10 @@ class CleanupService:
 
     @staticmethod
     def _remove_thumbnail(file_id: int, cache_dir=None) -> None:
-        """删除文件对应的缩略图缓存文件。"""
-        if cache_dir is None:
-            cache_dir = Path("data/.thumbnails")
+        """删除文件对应的缩略图缓存文件（目录来自配置，见 configure_thumbnail_cache_dir）。"""
         if file_id is None:
             return
+        cache_dir = _resolve_cache_dir(cache_dir)
         thumb = cache_dir / f"{file_id}_thumb.jpg"
         if thumb.exists():
             try:
@@ -226,7 +245,7 @@ class CleanupService:
             删除的孤儿文件数。
         """
         if cache_dir is None:
-            cache_dir = Path("data/.thumbnails")
+            cache_dir = _resolve_cache_dir()
         if not cache_dir.is_dir():
             return 0
 

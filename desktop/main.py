@@ -126,7 +126,11 @@ def main() -> None:
 
     # 启动后自动清理孤儿缩略图（DB 中已删除文件的残留缓存）
     try:
-        from app.services.cleanup_service import CleanupService
+        from app.services.cleanup_service import (
+            CleanupService, configure_thumbnail_cache_dir,
+        )
+        # 注入配置的缓存目录，否则清理/失效会打到错误的目录
+        configure_thumbnail_cache_dir(config.thumbnail_cache_dir)
         purged = CleanupService.purge_orphaned_thumbnails()
         if purged > 0:
             logger.info(f"已清理 {purged} 个孤儿缩略图")

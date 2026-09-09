@@ -71,13 +71,14 @@ def resize_keep_aspect(image: Image.Image, max_size: int) -> Image.Image:
 
 
 def convert_to_rgb(image: Image.Image) -> Image.Image:
-    """将图片转为 RGB 模式（处理 RGBA、P 等模式）。"""
-    if image.mode == "RGBA":
-        # 用白色背景填充透明区域
-        background = Image.new("RGB", image.size, (255, 255, 255))
-        background.paste(image, mask=image.split()[3])
+    """将图片转为 RGB 模式（透明区域用白底合成，避免变黑）。"""
+    if image.mode in ("RGBA", "LA"):
+        # 统一走 RGBA 后用 alpha 通道做白底合成（LA 直接 convert 会丢 alpha 变黑）
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.split()[3])
         return background
-    elif image.mode in ("P", "LA", "L"):
+    elif image.mode in ("P", "L"):
         return image.convert("RGB")
     return image
 

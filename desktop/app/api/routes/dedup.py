@@ -113,13 +113,13 @@ def list_dedup_results(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
 ):
-    """列出查重比对结果（单元名一次性批量查询，避免 N+1）。"""
+    """列出查重比对结果（SQL 分页 + 精确总数；单元名批量查询，避免 N+1）。"""
     try:
         with DatabaseManager.session() as session:
-            all_results = q.get_unresolved_duplicates(session, limit=100) if unresolved_only else q.get_all_dedup_results(session, limit=200)
-            total = len(all_results)
-            start = (page - 1) * per_page
-            page_results = all_results[start:start + per_page]
+            page_results, total = q.get_dedup_results_page(
+                session, unresolved_only=unresolved_only,
+                page=page, per_page=per_page,
+            )
 
             # 批量取涉及单元名
             unit_ids = {dr.unit_a_id for dr in page_results} | {dr.unit_b_id for dr in page_results}

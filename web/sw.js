@@ -1,5 +1,5 @@
 /* 影视资源管理器 — Service Worker */
-const CACHE = 'media-manager-v4';
+const CACHE = 'media-manager-v5';
 
 self.addEventListener('install', (e) => {
   self.skipWaiting();
@@ -11,7 +11,15 @@ self.addEventListener('install', (e) => {
 });
 
 self.addEventListener('activate', (e) => {
-  e.waitUntil(clients.claim());
+  // 必须删除旧版本缓存：caches.match 按缓存创建顺序查找，
+  // 残留的旧缓存会让 bump 版本号后客户端仍拿到旧 index.html（应用壳永不更新）。
+  e.waitUntil(
+    caches.keys()
+      .then((keys) => Promise.all(
+        keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))
+      ))
+      .then(() => clients.claim())
+  );
 });
 
 self.addEventListener('fetch', (e) => {
@@ -28,8 +36,17 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // 其他静态资源缓存优先
+  // 其他静态资源缓存优先；未命中时回填缓存（否则除 / 与 manifest 外永不入缓存）
   e.respondWith(
-    caches.match(e.request).then((hit) => hit || fetch(e.request))
+    caches.match(e.request).then((hit) => {
+      if (hit) return hit;
+      return fetch(e.request).then((resp) => {
+        if (resp && resp.ok) {
+          const copy = resp.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+        }
+        return resp;
+      });
+    })
   );
 });

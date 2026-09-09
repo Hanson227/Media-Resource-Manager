@@ -352,6 +352,7 @@ class HashEngine:
     _face_recognizer: Optional[object] = None  # cv2.dnn.Net
     _models_loaded: bool = False
     _models_path: Optional[str] = None
+    _models_unavailable: bool = False          # 已确认不可用（缺模型/API 不兼容）→ 不再重试
 
     @classmethod
     def _load_models(cls, model_dir: Path) -> bool:
@@ -365,11 +366,15 @@ class HashEngine:
         """
         if cls._models_loaded and cls._models_path == str(model_dir):
             return True
+        if cls._models_unavailable and cls._models_path == str(model_dir):
+            return False  # 已确认不可用，避免逐文件重复告警
 
         try:
             import cv2
         except ImportError:
             logger.warning("OpenCV 不可用，无法加载人脸模型")
+            cls._models_unavailable = True
+            cls._models_path = str(model_dir)
             return False
 
         # 人脸检测模型（Caffe SSD）
@@ -377,21 +382,45 @@ class HashEngine:
         weights_path = model_dir / "res10_300x300_ssd_iter_140000_fp16.caffemodel"
         if not proto_path.exists() or not weights_path.exists():
             logger.warning(f"人脸检测模型缺失: {model_dir}")
+            cls._models_unavailable = True
+            cls._models_path = str(model_dir)
             return False
 
-        cls._face_detector = cv2.dnn.readNetFromCaffe(
-            str(proto_path), str(weights_path),
-        )
-        logger.info(f"已加载人脸检测模型: {weights_path}")
+        # OpenCV 5.x 移除了 Caffe/Torch 模型加载 API：必须显式检测，
+        # 否则 AttributeError 会逃出 detect_faces 的异常契约，
+        # 被 hash_worker 吞成“检测不到人脸”（功能静默失效）。
+        if not hasattr(cv2.dnn, "readNetFromCaffe"):
+            logger.warning(
+                f"OpenCV {getattr(cv2, '__version__', '?')} 缺少 cv2.dnn.readNetFromCaffe"
+                "（Caffe 模型加载 API 已在 OpenCV 5 移除），人脸检测不可用；"
+                "请安装 opencv-python-headless<5"
+            )
+            cls._models_unavailable = True
+            cls._models_path = str(model_dir)
+            return False
 
-        # 人脸特征提取模型（OpenFace nn4.small2）
-        openface_path = model_dir / "nn4.small2.v1.t7"
-        if openface_path.exists():
-            cls._face_recognizer = cv2.dnn.readNetFromTorch(str(openface_path))
-            logger.info(f"已加载人脸特征模型: {openface_path}")
-        else:
-            logger.warning("OpenFace 模型缺失，人脸特征提取不可用")
-            cls._face_recognizer = None
+        try:
+            cls._face_detector = cv2.dnn.readNetFromCaffe(
+                str(proto_path), str(weights_path),
+            )
+            logger.info(f"已加载人脸检测模型: {weights_path}")
+
+            # 人脸特征提取模型（OpenFace nn4.small2）
+            openface_path = model_dir / "nn4.small2.v1.t7"
+            if openface_path.exists() and hasattr(cv2.dnn, "readNetFromTorch"):
+                cls._face_recognizer = cv2.dnn.readNetFromTorch(str(openface_path))
+                logger.info(f"已加载人脸特征模型: {openface_path}")
+            else:
+                if openface_path.exists():
+                    logger.warning("OpenCV 缺少 readNetFromTorch，人脸特征提取不可用")
+                else:
+                    logger.warning("OpenFace 模型缺失，人脸特征提取不可用")
+                cls._face_recognizer = None
+        except Exception as e:
+            logger.warning(f"人脸模型加载失败: {type(e).__name__}: {e}")
+            cls._models_unavailable = True
+            cls._models_path = str(model_dir)
+            return False
 
         cls._models_loaded = True
         cls._models_path = str(model_dir)

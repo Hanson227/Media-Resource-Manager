@@ -37,6 +37,7 @@ _passed = 0
 _failed = 0
 _server = None
 _server_thread = None
+_app = None
 _PORT = 19528  # 不同于主应用的端口，避免冲突
 
 
@@ -128,12 +129,13 @@ def ensure_db():
 
 def start_server():
     """启动 API 服务器。"""
-    global _server, _server_thread
+    global _server, _server_thread, _app
     import requests
     ensure_db()
     config = AppConfig()
     from app.api.server import create_app
     app = create_app(config)
+    _app = app
 
     import uvicorn
     _server = uvicorn.Server(
@@ -640,6 +642,164 @@ def test_pin_lock_screen(page):
         check("无 PIN 界面（已解锁或未设置）", True)
 
 
+def test_gesture_engine_ptr_and_damp(page):
+    """测试 10: 手势引擎 —— 下拉刷新无异常 + 触发后指示器收起 + 边界阻尼过原点。
+
+    回归：attachPullToRefresh 曾引用 createZone 内部局部变量 now() → 每次
+    touchstart 抛 ReferenceError；gDamp 在 atEdge 时把系数作用到含 0..L0 的
+    整段位移 → 起手瞬间跳变 ~33px。
+    """
+    section("Web 测试 10: 手势引擎（PTR/阻尼）")
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    page.locator(".app-main").wait_for(state="attached", timeout=5000)
+    page.wait_for_timeout(300)
+
+    # 合成触摸序列：下拉 130px 后松手（> PTR_READY=80 → 触发刷新）
+    page.evaluate("""
+        () => {
+            const main = document.querySelector('.app-main');
+            function fire(name, y) {
+                const evt = new TouchEvent(name, { bubbles: true, cancelable: true });
+                const touches = [{ clientX: 195, clientY: y, identifier: 0 }];
+                const empty = [];
+                Object.defineProperty(evt, 'touches', {
+                    get: () => (name === 'touchend' ? empty : touches), configurable: true
+                });
+                Object.defineProperty(evt, 'changedTouches', {
+                    get: () => touches, configurable: true
+                });
+                main.dispatchEvent(evt);
+            }
+            fire('touchstart', 200);
+            fire('touchmove', 260);
+            fire('touchmove', 330);
+            fire('touchend', 330);
+        }
+    """)
+    page.wait_for_timeout(800)
+    check("PTR 触摸序列无 pageerror", len(errors) == 0)
+    for e in errors[:3]:
+        print(f"     pageerror: {e}")
+
+    # 触发后内联高度必须清空（交给 .active 类控制），否则指示器卡在 44px
+    inline = page.evaluate(
+        "() => { const el = document.querySelector('.ptr-indicator');"
+        " return el ? el.style.height : 'missing'; }"
+    )
+    check("触发后指示器内联高度已清空", inline == "")
+
+    # 边界阻尼必须过原点（历史 bug: damp(0, L0, f, max, true) = 0.7*L0）
+    d0 = page.evaluate("() => Gesture.damp(0, 46.8, 0.35, 400, true)")
+    d1 = page.evaluate("() => Gesture.damp(0.5, 46.8, 0.35, 400, true)")
+    d2 = page.evaluate("() => Gesture.damp(0.5, 46.8, 0.35, 400, false)")
+    check("边界阻尼过原点 damp(0)=0", abs(d0) < 1e-9)
+    check("边界阻尼按比例缩放 damp(0.5)=0.15", abs(d1 - 0.15) < 1e-6)
+    check("非边界阻尼不受影响 damp(0.5)=0.5", abs(d2 - 0.5) < 1e-6)
+    page.set_viewport_size({"width": 1280, "height": 800})
+
+
+def test_server_url_normalization(page):
+    """测试 12: 服务器地址带尾斜杠时不得拼出 //api/...（否则连接页报失败）。"""
+    section("Web 测试 12: 服务器地址规范化")
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    page.locator(".app-main").wait_for(state="attached", timeout=5000)
+    page.wait_for_timeout(300)
+
+    status = page.evaluate(f"""
+        async () => {{
+            try {{
+                const r = await api('http://127.0.0.1:{_PORT}/', '/api/health');
+                return r.status;
+            }} catch (e) {{ return 'error: ' + e.message; }}
+        }}
+    """)
+    check("带尾斜杠地址 api() 请求成功", status == "ok")
+
+    mu = page.evaluate(
+        f"() => mediaUrl('http://127.0.0.1:{_PORT}/', '/api/files/1/thumbnail')"
+    )
+    check("mediaUrl 不产生双斜杠", mu.startswith(f"http://127.0.0.1:{_PORT}/api/files/1/thumbnail"))
+
+
+def test_cancel_pin_does_not_lock_out(page):
+    """测试 11: 取消访问密码后不得把用户永久锁在锁屏界面。
+
+    回归：change-pin 返回 pin_required=false 时前端仍清令牌并派发
+    media-auth-expired → 锁屏；而 verify 此时恒 400「未配置访问密码」，
+    用户只能刷新页面自救。
+    """
+    section("Web 测试 11: 取消访问密码不锁死")
+    if _app is None:
+        check("测试服务器 app 可用", False)
+        return
+    from app.api.server import _revoke_all_auth_tokens
+
+    # change-pin 端点按 CWD 写 config.json 与 data/.web_pin（生产环境 CWD=desktop
+    # 是正确行为），测试必须备份/还原，否则会把用户 PIN 清空、api_host 改回默认值。
+    cfg_path = Path(__file__).parent.parent / "config.json"
+    pin_path = Path(__file__).parent.parent / "data" / ".web_pin"
+    cfg_backup = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else None
+    pin_backup = pin_path.read_text(encoding="utf-8") if pin_path.exists() else None
+
+    try:
+        # 1) 服务端启用 PIN
+        _app.state.config = _app.state.config.with_updates(web_pin="5678")
+        _revoke_all_auth_tokens()
+        page.evaluate("() => localStorage.setItem('media_pin', '')")
+
+        # 2) 重新加载 → 出现锁屏，输入 5678 解锁
+        page.goto(f"http://127.0.0.1:{_PORT}/")
+        overlay = page.locator(".pin-overlay")
+        overlay.wait_for(state="visible", timeout=5000)
+        check("启用 PIN 后显示锁屏", overlay.is_visible())
+        for digit in "5678":
+            page.locator(".pin-key").filter(has_text=digit).first.click()
+        overlay.wait_for(state="hidden", timeout=5000)
+        check("输入正确 PIN 后解锁", not overlay.is_visible())
+
+        # 3) 设置页 → 修改密码 → 新密码留空（取消密码）
+        page.goto(f"http://127.0.0.1:{_PORT}/#/settings")
+        item = page.locator(".setting-item").filter(has_text="访问密码已启用")
+        item.wait_for(state="visible", timeout=5000)
+        item.click()
+        dialog = page.locator(".pin-dialog")
+        dialog.wait_for(state="visible", timeout=3000)
+        inputs = dialog.locator("input")
+        inputs.nth(0).fill("5678")   # 当前密码
+        # 新密码/确认新密码保持为空 → 取消密码
+        dialog.locator("button.btn-primary").click()
+        dialog.wait_for(state="hidden", timeout=5000)
+
+        # 4) 关键断言：不应被锁屏，且 API 仍可用
+        page.wait_for_timeout(500)
+        check("取消密码后未被锁屏", not overlay.is_visible())
+        page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+        page.locator(".app-main").wait_for(state="attached", timeout=5000)
+        page.wait_for_timeout(500)
+        check("取消密码后仍能正常浏览单元",
+              page.locator(".unit-card").count() > 0)
+    finally:
+        # 恢复无 PIN 状态，避免影响其它测试
+        if _app is not None:
+            _app.state.config = _app.state.config.with_updates(web_pin="")
+            _revoke_all_auth_tokens()
+        # 还原真实配置文件（见上方备份说明）
+        if cfg_backup is not None:
+            try:
+                cfg_path.write_text(cfg_backup, encoding="utf-8")
+            except OSError as e:
+                print(f"  [INFO] 还原 config.json 失败: {e}")
+        if pin_backup is not None:
+            try:
+                pin_path.parent.mkdir(parents=True, exist_ok=True)
+                pin_path.write_text(pin_backup, encoding="utf-8")
+            except OSError as e:
+                print(f"  [INFO] 还原 data/.web_pin 失败: {e}")
+
+
 def test_responsive_layout(page):
     """验证响应式布局。"""
     section("Web 测试 9: 响应式布局")
@@ -747,6 +907,15 @@ def main():
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
             page.wait_for_load_state("networkidle")
             test_navigation_sidebar(page)
+
+            # 手势引擎（PTR 异常 / 边界阻尼）
+            test_gesture_engine_ptr_and_damp(page)
+
+            # 服务器地址尾斜杠规范化
+            test_server_url_normalization(page)
+
+            # 取消访问密码不锁死（会临时改动服务端 web_pin，放在最后）
+            test_cancel_pin_does_not_lock_out(page)
 
             browser.close()
 

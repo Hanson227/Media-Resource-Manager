@@ -368,7 +368,14 @@ class MediaScanner:
 
         # ---- 跳过仅有零散文件的容器单元 ----
         # 如果候选文件夹里只有少量文件（≤2），而所有子目录都是独立场景单元，
-        # 跳过容器（它的零散文件由上级单元收集）
+        # 跳过容器（它的零散文件由上级单元收集）。
+        # 两个前提必须同时成立，否则会静默丢文件：
+        #   1. 子目录必须仍是“独立单元” —— 已被本单元吞并的子候选不算
+        #      （历史 bug：这里查的是 candidates，被 merge 掉的子候选仍被当成
+        #       独立单元，导致 Parent/{1 直连}+Parent/Child/{5} 整组单元消失）；
+        #   2. 必须存在仍然保留的上级单元来收集本单元直连的零散文件
+        #      （历史 bug：没有上级单元时丢弃容器 → Show/movie.mp4 无人收集）。
+        tl_set = set(top_level)
         for c in list(top_level):
             if c == root:
                 continue
@@ -380,15 +387,22 @@ class MediaScanner:
                 ]
                 if len(direct_media) > MIN_DIRECT_MEDIA_FOR_CONTAINER:
                     continue  # 文件足够多，保留
-                # 检查子目录中是否有独立单元
+                # 检查子目录中是否有独立单元（只认最终保留的单元）
                 child_candidates = [
                     e for e in entries
-                    if e.is_dir() and e in candidates
+                    if e.is_dir() and e in tl_set
                 ]
                 if not child_candidates:
                     continue  # 没有子单元 → 不用跳过
+                # 是否存在仍保留的上级单元（没有则本单元的直连文件会丢失）
+                anc = nearest_parent.get(c)
+                while anc is not None and anc not in tl_set:
+                    anc = nearest_parent.get(anc)
+                if anc is None:
+                    continue
                 # 所有含媒体的子目录都是独立单元 → 本文件夹只是容器
                 top_level.remove(c)
+                tl_set.discard(c)
             except OSError:
                 continue
 

@@ -12,6 +12,31 @@ from typing import FrozenSet, Optional, get_type_hints, get_origin
 import json
 import warnings
 
+# 敏感字段不写入 config.json（后者在版本库中被跟踪，明文 PIN 会被提交）。
+# 改为存放在 config.json 同级的 data/.web_pin —— data/ 已被 .gitignore 忽略。
+_SENSITIVE_FIELDS = frozenset({"web_pin"})
+_PIN_FILENAME = ".web_pin"
+
+
+def _pin_file(config_path: Path) -> Path:
+    """返回敏感字段（Web 访问密码）的存放路径。"""
+    return Path(config_path).parent / "data" / _PIN_FILENAME
+
+
+def _read_pin_file(config_path: Path) -> "Optional[str]":
+    """读取 Web 访问密码；文件不存在返回 None（区别于“已设置为空”）。"""
+    try:
+        return _pin_file(config_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def _write_pin_file(config_path: Path, pin: str) -> None:
+    """写入 Web 访问密码（空字符串表示不启用密码）。"""
+    target = _pin_file(config_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(pin or "", encoding="utf-8")
+
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -183,13 +208,32 @@ class AppConfig:
             )
             data = {k: v for k, v in data.items() if k in hints}
 
+        # web_pin 为敏感字段：优先读 data/.web_pin（gitignored），
+        # 兼容旧配置中 config.json 的明文并自动迁移一次，避免 PIN 进版本库。
+        legacy_pin = data.pop("web_pin", None)
+        secret_pin = _read_pin_file(path)
+        if secret_pin is None and legacy_pin:
+            try:
+                _write_pin_file(path, legacy_pin)
+            except OSError as e:
+                warnings.warn(f"Web 访问密码迁移到 {_pin_file(path)} 失败: {e}")
+            secret_pin = legacy_pin
+        if secret_pin is not None:
+            data["web_pin"] = secret_pin
+
         # 将 JSON 值按字段类型注解转换（Path、frozenset 等）
-        for key, value in data.items():
+        # 注意：不能在遍历中 del data[key]（RuntimeError: dictionary changed
+        # size during iteration 会让 main.py 整体回退默认配置 —— 表现为
+        # web_pin 被清空、db_path 指向默认库）。先收集非法键，循环后统一剔除。
+        bad_keys: list[str] = []
+        for key, value in list(data.items()):
             try:
                 data[key] = cls._coerce(key, value, hints[key])
             except (TypeError, ValueError) as e:
                 warnings.warn(f"配置字段 {key} 解析失败，使用默认值: {e}")
-                del data[key]
+                bad_keys.append(key)
+        for key in bad_keys:
+            data.pop(key, None)
 
         # 使用默认配置为底，JSON 配置覆盖
         default = cls()
@@ -198,6 +242,9 @@ class AppConfig:
 
     def to_file(self, path: Path) -> None:
         """将当前配置保存为 JSON 文件（按 dataclass 字段驱动，避免手抄遗漏）。
+
+        敏感字段（web_pin）不写入该文件，单独落到同级的 data/.web_pin，
+        防止明文密码被提交进版本库。
 
         参数:
             path: 目标 JSON 文件路径。
@@ -209,9 +256,17 @@ class AppConfig:
                 return sorted(value)
             return value
 
-        data = {f.name: _to_json(getattr(self, f.name)) for f in fields(self)}
+        data = {
+            f.name: _to_json(getattr(self, f.name))
+            for f in fields(self) if f.name not in _SENSITIVE_FIELDS
+        }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+        try:
+            _write_pin_file(path, self.web_pin)
+        except OSError as e:
+            warnings.warn(f"保存 Web 访问密码失败 ({_pin_file(path)}): {e}")
 
     def with_updates(self, **updates) -> "AppConfig":
         """返回应用部分字段更新后的新实例（frozen dataclass 不可变语义）。"""

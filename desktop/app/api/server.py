@@ -6,6 +6,7 @@ API 服务器 —— FastAPI 应用创建和 uvicorn 线程管理。
 路由接入真实数据库查询；内嵌 Web 前端静态文件服务。
 """
 
+import hmac
 import logging
 import secrets
 import threading
@@ -38,6 +39,43 @@ _AUTH_ALLOWED_UNAUTH_PREFIXES = (
 _auth_tokens: dict[str, float] = {}          # token -> 过期时间戳
 _auth_tokens_lock = threading.Lock()
 
+# PIN 尝试节流：4 位 PIN 全空间仅 1 万种，无限流时可秒级穷举
+_AUTH_FAIL_WINDOW = 300.0                    # 统计窗口（秒）
+_AUTH_FAIL_LIMIT = 5                         # 窗口内允许的失败次数
+_auth_failures: dict[str, list[float]] = {}  # client_ip -> 失败时间戳列表
+_auth_failures_lock = threading.Lock()
+
+
+def _auth_retry_after(client_ip: str) -> float:
+    """返回该 IP 还需等待的秒数（0 表示未被节流）。"""
+    now = time.time()
+    with _auth_failures_lock:
+        stamps = [t for t in _auth_failures.get(client_ip, [])
+                  if now - t < _AUTH_FAIL_WINDOW]
+        if stamps:
+            _auth_failures[client_ip] = stamps
+        else:
+            _auth_failures.pop(client_ip, None)
+        if len(stamps) >= _AUTH_FAIL_LIMIT:
+            return max(1.0, _AUTH_FAIL_WINDOW - (now - stamps[0]))
+        return 0.0
+
+
+def _record_auth_failure(client_ip: str) -> None:
+    """记录一次鉴权失败（供节流统计）。"""
+    now = time.time()
+    with _auth_failures_lock:
+        stamps = [t for t in _auth_failures.get(client_ip, [])
+                  if now - t < _AUTH_FAIL_WINDOW]
+        stamps.append(now)
+        _auth_failures[client_ip] = stamps
+
+
+def _clear_auth_failures(client_ip: str) -> None:
+    """鉴权成功后清除该 IP 的失败记录。"""
+    with _auth_failures_lock:
+        _auth_failures.pop(client_ip, None)
+
 
 def _issue_auth_token() -> str:
     """签发新令牌并记录过期时间。"""
@@ -69,10 +107,12 @@ def _extract_bearer_token(request: Request) -> str:
 
     <img>/<video> 等标签发起的请求（缩略图/视频流）无法携带自定义
     Authorization 头，因此允许以 ?token= 查询参数传递令牌。
+    HTTP 认证方案大小写不敏感（RFC 7235），bearer/BEARER 同样接受。
     """
     header = request.headers.get("authorization", "")
-    if header.startswith("Bearer "):
-        return header[7:].strip()
+    scheme, _, credentials = header.partition(" ")
+    if scheme.lower() == "bearer" and credentials:
+        return credentials.strip()
     return (request.query_params.get("token") or "").strip()
 
 
@@ -96,6 +136,9 @@ def create_app(config: AppConfig) -> FastAPI:
     返回:
         配置好的 FastAPI 应用实例。
     """
+    # 令牌表是模块级全局：重建应用时清空，避免上一实例签发的令牌继续有效
+    _revoke_all_auth_tokens()
+
     app = FastAPI(
         title="影视资源管理器 API",
         description="本地影视资源管理查重工具的 HTTP API，供 Web 前端与局域网移动端访问。",
@@ -105,10 +148,13 @@ def create_app(config: AppConfig) -> FastAPI:
     )
 
     # CORS 中间件：允许局域网内 Android 设备访问
+    # 注意：allow_origins=["*"] 与 allow_credentials=True 并存时，Starlette 会
+    # 回显任意 Origin，等于允许任意网页跨域读写本机 API；前端用 Bearer 令牌
+    # 而非 Cookie，因此关闭凭据模式即可（不影响手机端/SPA）。
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -143,21 +189,41 @@ def create_app(config: AppConfig) -> FastAPI:
         cfg = getattr(request.app.state, "config", None)
         if not cfg or not cfg.web_pin:
             return JSONResponse(status_code=400, content={"verified": False, "error": "未配置访问密码"})
-        if body.pin == cfg.web_pin:
+        client_ip = request.client.host if request.client else "unknown"
+        retry_after = _auth_retry_after(client_ip)
+        if retry_after > 0:
+            return JSONResponse(
+                status_code=429,
+                content={"verified": False,
+                         "error": f"尝试过于频繁，请 {int(retry_after)} 秒后再试"},
+            )
+        # 常量时间比较，避免通过响应耗时逐位推断 PIN
+        if hmac.compare_digest(body.pin, cfg.web_pin):
+            _clear_auth_failures(client_ip)
             return {"verified": True, "token": _issue_auth_token()}
+        _record_auth_failure(client_ip)
         return JSONResponse(status_code=403, content={"verified": False, "error": "密码错误"})
 
     @app.post("/api/auth/change-pin")
     def auth_change_pin(body: ChangePinBody, request: Request):
         """修改 Web 访问密码。需要提供当前密码验证身份。"""
-        import hmac
         cfg = getattr(request.app.state, "config", None)
         if not cfg:
             return JSONResponse(status_code=500, content={"success": False, "error": "配置不可用"})
+        client_ip = request.client.host if request.client else "unknown"
         # 如果已设置密码，必须验证旧密码
         if cfg.web_pin:
+            retry_after = _auth_retry_after(client_ip)
+            if retry_after > 0:
+                return JSONResponse(
+                    status_code=429,
+                    content={"success": False,
+                             "error": f"尝试过于频繁，请 {int(retry_after)} 秒后再试"},
+                )
             if not hmac.compare_digest(body.old_pin, cfg.web_pin):
+                _record_auth_failure(client_ip)
                 return JSONResponse(status_code=403, content={"success": False, "error": "当前密码错误"})
+            _clear_auth_failures(client_ip)
         new_pin = body.new_pin
         if len(new_pin) > 4:
             return JSONResponse(status_code=400, content={"success": False, "error": "密码最长4位"})

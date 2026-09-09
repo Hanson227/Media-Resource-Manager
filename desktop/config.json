@@ -75,7 +75,6 @@
   "api_enabled": true,
   "api_host": "0.0.0.0",
   "api_port": 19527,
-  "web_pin": "5678",
   "preview_seek_percent": 5,
   "smb_share_name_prefix": "Media_"
 }
