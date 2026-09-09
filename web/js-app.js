@@ -217,8 +217,9 @@ const App = {
     this._interval = setInterval(() => this.fetchUnread(), 30000);
     // 会话过期（401）→ 回到锁屏
     this._onAuthExpired = (e) => {
-      const srv = (e.detail && e.detail.server) || '';
-      if (srv && srv !== this.serverUrl) return;
+      // 事件 detail 与 serverUrl 都按规范化地址比较（尾部斜杠不应导致漏判）
+      const srv = normalizeServer((e.detail && e.detail.server) || '');
+      if (srv && srv !== normalizeServer(this.serverUrl)) return;
       this.pinValue = '';
       this.pinError = '会话已过期，请重新输入密码';
       this.pinUnlocked = false;

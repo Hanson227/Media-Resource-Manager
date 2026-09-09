@@ -11,7 +11,9 @@ PySide6>=6.5.0
 
 # 图像处理
 Pillow>=10.0.0
-opencv-python-headless>=4.8.0
+# 必须 <5：OpenCV 5 移除了 cv2.dnn.readNetFromCaffe/readNetFromTorch，
+# 人脸检测/特征提取会整体失效（hash_engine._load_models 已加 hasattr 兜底）
+opencv-python-headless>=4.8.0,<5
 
 # 数值计算
 numpy>=1.24.0

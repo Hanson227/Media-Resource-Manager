@@ -53,7 +53,8 @@ def _load_face_vectors(session, file_id: int, enabled: bool) -> list[tuple[float
     return vectors
 
 
-def _file_record(f, session, load_face: bool, face_enabled: bool) -> dict:
+def _file_record(f, session, load_face: bool, face_enabled: bool,
+                 frame_map: Optional[dict] = None) -> dict:
     """将 ORM 文件行转为引擎比对所需的记录 dict。"""
     return {
         "id": f.id,
@@ -64,6 +65,8 @@ def _file_record(f, session, load_face: bool, face_enabled: bool) -> dict:
         "face_vectors": (
             _load_face_vectors(session, f.id, face_enabled) if load_face else []
         ),
+        # 视频关键帧 pHash 列表（图片为空）：供引擎做帧级近似匹配
+        "video_frames": (frame_map or {}).get(f.id, []),
     }
 
 
@@ -112,8 +115,13 @@ def run_dedup_pipeline(
             if unit:
                 unit_names[uid] = unit.name
                 files = q.get_files_by_unit(session, uid)
+                # 一次性装载本单元视频帧哈希（图片无帧，返回空），避免 N+1
+                frame_map = q.get_video_frame_hashes_by_files(
+                    session, [f.id for f in files]
+                )
                 unit_files_map[uid] = [
-                    _file_record(f, session, load_face, face_enabled) for f in files
+                    _file_record(f, session, load_face, face_enabled, frame_map)
+                    for f in files
                 ]
         # 跳过已处置/白名单的单元对（避免重复告警）
         skip_pairs = q.build_dedup_skip_pairs(session, unit_ids)

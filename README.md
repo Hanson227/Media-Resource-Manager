@@ -28,7 +28,7 @@ Media/
 ## 功能
 
 - **文件夹级资源管理** — 自动扫描本地文件夹，将包含媒体文件的目录识别为"资源单元"，支持嵌套场景
-- **一键智能查重** — 自动计算哈希+人脸特征，多策略匹配：人脸识别 → MD5（精确）→ pHash（感知）→ dHash（差异），基于杰卡德指数判定单元级重复
+- **一键智能查重** — 自动计算哈希+人脸特征+视频抽帧，多策略匹配：人脸识别 → MD5（精确）→ 视频帧 → pHash（感知）→ dHash（差异），基于杰卡德指数判定单元级重复
 - **人脸识别** — Caffe SSD 检测 + OpenFace 128 维特征提取，同一人物在不同照片中也能识别
 - **缩略图预览** — 图像/视频自动生成缩略图，支持网格浏览、空格键快速预览
 - **实时文件监控** — watchdog 监测文件变更，支持去抖合并
@@ -46,7 +46,7 @@ desktop/app/
   core/                  # 纯业务逻辑（无 UI/DB 依赖）
     scanner.py           #   递归扫描，自动识别资源单元
     hash_engine.py       #   协调 MD5/pHash/dHash 计算
-    dedup_engine.py      #   多策略匹配（人脸→MD5→pHash→dHash）+ 前缀桶优化
+    dedup_engine.py      #   多策略匹配（人脸→MD5→视频帧→pHash→dHash）+ 切片索引
     thumbnail_generator.py  # Pillow(图片) + OpenCV(视频)，磁盘缓存
     watcher.py           #   watchdog 实时监控 + 去抖
   db/
@@ -70,8 +70,8 @@ desktop/app/
   services/              # 消息中心、清理服务
   utils/                 # 枚举常量、文件辅助函数
 desktop/tests/
-  test_flow.py           # 后端 + API 端到端测试（376 项断言，含 PIN 鉴权）
-  test_web_playwright.py # Web 前端浏览器测试（32 项）
+  test_flow.py           # 后端 + API 端到端测试（465 项断言，含 PIN 鉴权）
+  test_web_playwright.py # Web 前端浏览器测试（47 项）
 ```
 
 ### Web 前端
@@ -111,9 +111,10 @@ SQLite + WAL 模式，12 张表：
 ### 查重流程
 
 ```
-点击 [查重] → 自动检测未索引文件 → 有则先计算 MD5/pHash/dHash/人脸
-  → 逐对单元进行多策略贪婪匹配：人脸 → MD5 → pHash → dHash
-  → pHash/dHash 使用 8-bit 前缀桶索引加速
+点击 [查重] → 自动检测未索引文件 → 有则先计算 MD5/pHash/dHash/人脸/视频抽帧
+  → 逐对单元进行多策略贪婪匹配：人脸 → MD5 → 视频帧 → pHash → dHash
+  → pHash/dHash 使用鸽巢切片索引加速（零漏配）
+  → 视频按抽帧 pHash 集合比对，匹配帧数 ≥ 较短视频帧数 50% 判为同一视频
   → 杰卡德相似度 = |匹配| / (|A| + |B| - |匹配|)
   → ≥ 阈值（默认 0.80）→ 创建 dedup_alert 消息
 ```

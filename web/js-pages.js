@@ -81,6 +81,13 @@ const PTRPageMixin = {
       this.ptrReady = state === 'ready';
       const el = this.$refs.ptr;
       if (!el) return;
+      if (state === 'trigger') {
+        // 触发刷新：高度交给 .active 类（refreshing=true）控制，
+        // 必须清掉跟手阶段写入的内联 height/transition，否则指示器卡在 44px
+        el.style.transition = '';
+        el.style.height = '';
+        return;
+      }
       if (dy > 0) {
         // 拖动跟手：rAF 式直写，不进 Vue 响应式（报告 §6 规则6）
         el.style.transition = 'none';
@@ -815,7 +822,7 @@ const PreviewPage = {
       }
     },
     /* ---- Playback ---- */
-    togglePlay() { if (!this.videoEl) return; if (this.videoEl.paused) { this.videoEl.play(); } else { this.videoEl.pause(); } },
+    togglePlay() { if (!this.videoEl) return; if (this.videoEl.paused) { const p = this.videoEl.play(); if (p && p.catch) p.catch(() => {}); } else { this.videoEl.pause(); } },
     onTimeUpdate() {
       if (!this.videoEl || this.seeking) return;
       this.currentTime = this.videoEl.currentTime;
@@ -1676,9 +1683,13 @@ const SettingsPage = {
         });
         this.pinEnabled = res.pin_required || false;
         this.showPinDialog = false;
-        // 服务端已使全部令牌失效：清除本地令牌并回到锁屏（用新密码进入）
-        setAuthToken(this.serverUrl, '');
-        window.dispatchEvent(new CustomEvent('media-auth-expired', { detail: { server: this.serverUrl } }));
+        if (this.pinEnabled) {
+          // 服务端已使全部令牌失效：清除本地令牌并回到锁屏（用新密码进入）
+          setAuthToken(this.serverUrl, '');
+          window.dispatchEvent(new CustomEvent('media-auth-expired', { detail: { server: this.serverUrl } }));
+        }
+        // 取消密码（pin_required=false）时服务端不再要求鉴权：
+        // 若也清令牌+锁屏，会永久卡在锁屏（verify 恒 400「未配置访问密码」）
       } catch (e) {
         this.pinChangeError = e.message || '修改失败';
       } finally {

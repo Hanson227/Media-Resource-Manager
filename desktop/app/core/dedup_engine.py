@@ -3,8 +3,8 @@
 查重引擎 —— 资源单元级别的两两比对与文件级匹配。
 
 核心算法：
-1. 对每对资源单元，执行多策略匹配（MD5/pHash/dHash/人脸）
-2. 使用贪婪最佳匹配分配（每个文件 A 最多匹配一个文件 B
+1. 对每对资源单元，执行多策略匹配（人脸 → MD5 → 视频帧 → pHash → dHash）
+2. 一对一贪婪匹配（每个文件 A/B 最多各匹配一次，保证杰卡德指数 ≤ 1.0）
 3. 杰卡德指数 = |匹配对| / (|A| + |B| - |匹配对|)
 4. 杰卡德指数 ≥ 阈值 → 视为单元级重复
 """
@@ -22,6 +22,15 @@ from app.utils.constants import MatchType
 from app.utils.hash_helpers import hamming_distance
 
 logger = logging.getLogger(__name__)
+
+# ---- 视频帧级匹配参数 ----
+# 每条视频参与比对的帧数上限（按索引均匀采样）。同内容不同码率/分辨率的
+# 视频抽帧时间戳一致，采样后仍然对齐；极端时长差异属已知限制。
+VIDEO_FRAME_MAX_SAMPLES = 32
+# 匹配帧数占“较短视频帧数”的比例下限
+VIDEO_FRAME_MATCH_RATIO = 0.5
+# 最少匹配帧数（短视频自动放宽到 min(该值, 两视频帧数)）
+VIDEO_FRAME_MIN_MATCHES = 2
 
 
 # ============================================================
@@ -179,31 +188,29 @@ class DedupEngine:
             return None
 
         matches: list[FileMatch] = []
-        matched_b_indices: set[int] = set()  # 已被匹配的 B 文件索引
+        # 一对一贪婪匹配：每个 A 文件、每个 B 文件最多各被匹配一次。
+        # 若只约束 B 侧，同一 A 文件可被 md5 与 phash 各匹配一次，
+        # 杰卡德指数会超过 1.0（假阳性）；反之同一内容的多个副本
+        # 若只保留一条匹配，则会漏报（假阴性）。
+        matched_a_indices: set[int] = set()
+        matched_b_indices: set[int] = set()
 
         # 人脸匹配优先（最可靠），然后 MD5 精确，最后 pHash/dHash 备用
         if self._face_enabled:
-            face_matches = self._match_by_face(files_a, files_b, matched_b_indices)
-            for m in face_matches:
-                b_idx = self._find_file_index(files_b, m.file_b_id)
-                if b_idx not in matched_b_indices:
-                    matches.append(m)
-                    matched_b_indices.add(b_idx)
+            matches.extend(self._match_by_face(
+                files_a, files_b, matched_a_indices, matched_b_indices))
 
         for match_type, match_func in [
             ("md5", self._match_by_md5),
+            ("video", self._match_by_video_frames),
             ("phash", self._match_by_perceptual_hash),
             ("dhash", self._match_by_dhash),
         ]:
             if self._cancelled:
                 return None
 
-            new_matches = match_func(files_a, files_b, matched_b_indices)
-            for m in new_matches:
-                b_idx = self._find_file_index(files_b, m.file_b_id)
-                if b_idx not in matched_b_indices:
-                    matches.append(m)
-                    matched_b_indices.add(b_idx)
+            matches.extend(match_func(
+                files_a, files_b, matched_a_indices, matched_b_indices))
 
         # 计算杰卡德指数
         n_matches = len(matches)
@@ -323,211 +330,275 @@ class DedupEngine:
     # ============================================================
 
     def _match_by_md5(self, files_a: list[dict], files_b: list[dict],
-                      exclude_b: set[int]) -> list[FileMatch]:
-        """MD5 精确匹配。"""
+                      matched_a: set[int], matched_b: set[int]) -> list[FileMatch]:
+        """MD5 精确匹配（一对一贪婪配对，支持同一内容存在多个副本）。"""
         matches: list[FileMatch] = []
-        # 建立 B 的 MD5 索引
-        b_md5_map: dict[str, int] = {}
+        # md5 → 尚未匹配的 B 文件索引列表（同一内容可在 B 中重复出现）
+        b_md5_map: dict[str, list[int]] = {}
         for idx_b, fb in enumerate(files_b):
-            if idx_b not in exclude_b and fb.get("md5_hash"):
-                b_md5_map[fb["md5_hash"]] = idx_b
+            if idx_b in matched_b:
+                continue
+            md5_b = fb.get("md5_hash")
+            if md5_b:
+                b_md5_map.setdefault(md5_b, []).append(idx_b)
 
-        for fa in files_a:
+        for idx_a, fa in enumerate(files_a):
+            if idx_a in matched_a:
+                continue
             md5_a = fa.get("md5_hash")
-            if md5_a and md5_a in b_md5_map:
-                idx_b = b_md5_map[md5_a]
-                fb = files_b[idx_b]
-                matches.append(FileMatch(
-                    file_a_id=fa["id"],
-                    file_b_id=fb["id"],
-                    file_a_path=fa.get("path", ""),
-                    file_b_path=fb.get("path", ""),
-                    match_type=MatchType.MD5.value,
-                    score=1.0,
-                ))
+            if not md5_a:
+                continue
+            candidates = b_md5_map.get(md5_a)
+            if not candidates:
+                continue
+            idx_b = candidates.pop(0)
+            fb = files_b[idx_b]
+            matches.append(FileMatch(
+                file_a_id=fa["id"],
+                file_b_id=fb["id"],
+                file_a_path=fa.get("path", ""),
+                file_b_path=fb.get("path", ""),
+                match_type=MatchType.MD5.value,
+                score=1.0,
+            ))
+            matched_a.add(idx_a)
+            matched_b.add(idx_b)
         return matches
 
     @staticmethod
-    def _hash_prefix(hash_hex: str, bits: int = 8) -> str:
-        """取哈希十六进制字符串的前缀（bits 位对应 hex_chars = bits/4）。"""
-        if not hash_hex:
-            return ""
-        hex_chars = max(1, bits // 4)
-        return hash_hex[:hex_chars]
+    def _slice_keys(hash_hex: str, slices: int) -> list[str]:
+        """把哈希位串切成 slices 个连续片段，返回每段的位串键。
 
-    def _build_phash_buckets(self, files: list[dict], exclude: set[int],
-                              prefix_bits: int = 8) -> dict[str, list[tuple[int, dict, str]]]:
-        """按 pHash 前缀建桶。
-
-        返回: {prefix: [(idx, file_dict, phash_hex), ...]}
+        鸽巢原理：两个哈希最多有 t 位不同时，切成 t+1 段后至少有一段完全相同。
+        因此“每段精确匹配”建索引可在零漏配前提下剪枝，替代原先只查 ±1 邻桶的
+        做法（汉明距离 ≤5 不蕴含 8bit 前缀整数差 ≤1：0x00 vs 0x1f 距离 5、
+        整数差 31，会被漏掉；实测近重复漏配率 23%）。
         """
-        buckets: dict[str, list[tuple[int, dict, str]]] = {}
+        if not hash_hex:
+            return []
+        bits = len(hash_hex) * 4
+        value = int(hash_hex, 16)
+        bit_str = bin(value)[2:].zfill(bits)
+        width = (bits + slices - 1) // slices
+        return [bit_str[k * width:(k + 1) * width] for k in range(slices)]
+
+    def _build_slice_index(self, files: list[dict], exclude: set[int],
+                           slices: int, field: str) -> list[dict[str, list[tuple[int, dict, str]]]]:
+        """按切片键建立 slices 张倒排表：index[k][key] = [(idx, file, hash)]。"""
+        index: list[dict[str, list[tuple[int, dict, str]]]] = [dict() for _ in range(slices)]
         for idx, f in enumerate(files):
             if idx in exclude:
                 continue
-            ph = f.get("phash")
-            if not ph:
+            h = f.get(field)
+            if not h:
                 continue
-            prefix = self._hash_prefix(ph, prefix_bits)
-            buckets.setdefault(prefix, []).append((idx, f, ph))
-        return buckets
+            for k, key in enumerate(self._slice_keys(h, slices)):
+                index[k].setdefault(key, []).append((idx, f, h))
+        return index
 
-    @staticmethod
-    def _neighbor_prefixes(prefix: str) -> list[str]:
-        """获取给定十六进制前缀及其相邻前缀（用于桶查询）。
+    def _slice_candidates(self, hash_hex: str, index, slices: int) -> list[tuple[int, dict, str]]:
+        """取与 hash_hex 在任一切片段完全相同的候选（按索引去重保序）。"""
+        seen: set[int] = set()
+        out: list[tuple[int, dict, str]] = []
+        for k, key in enumerate(self._slice_keys(hash_hex, slices)):
+            for cand in index[k].get(key, ()):
+                if cand[0] not in seen:
+                    seen.add(cand[0])
+                    out.append(cand)
+        return out
 
-        对于 2-char hex 前缀，检查 3 个连续桶确保不漏掉汉明距离接近的匹配。
+    def _match_by_hamming(self, files_a: list[dict], files_b: list[dict],
+                          matched_a: set[int], matched_b: set[int],
+                          field: str, threshold: int, match_type: str) -> list[FileMatch]:
+        """感知哈希匹配（汉明距离，鸽巢切片索引，一对一配对）。
+
+        将 files_b 按 (threshold+1) 段切片键建倒排表，每个 files_a 只在
+        “至少有一段完全相同”的候选中搜索 —— 距离 ≤ threshold 的匹配必然
+        出现在候选中（鸽巢原理），零漏配且远小于 O(|A|*|B|)。
         """
-        if not prefix:
+        algo = self._registry.get(field)
+        if not algo:
             return []
-        try:
-            val = int(prefix, 16)
-        except ValueError:
-            return [prefix]
-        max_val = (1 << (len(prefix) * 4)) - 1
-        neighbors = [
-            f"{(val - 1) & max_val:0{len(prefix)}x}",
-            prefix,
-            f"{(val + 1) & max_val:0{len(prefix)}x}",
-        ]
-        return list(dict.fromkeys(neighbors))  # 去重保序
+
+        bits = len(files_a[0].get(field) or "") * 4 or 64
+        slices = max(1, min(threshold + 1, bits))
+        index = self._build_slice_index(files_b, matched_b, slices, field)
+
+        matches: list[FileMatch] = []
+        for idx_a, fa in enumerate(files_a):
+            if idx_a in matched_a:
+                continue
+            hash_a = fa.get(field)
+            if not hash_a:
+                continue
+            bits_a = len(hash_a) * 4
+
+            best_match = None
+            best_dist = threshold + 1
+            for idx_b, fb, hash_b in self._slice_candidates(hash_a, index, slices):
+                if idx_b in matched_b:
+                    continue
+                try:
+                    dist = algo.distance(hash_a, hash_b)
+                except Exception:
+                    continue
+                if dist < best_dist:
+                    best_dist = dist
+                    best_match = (idx_b, fb)
+
+            if best_match and best_dist <= threshold:
+                idx_b, fb = best_match
+                score = 1.0 - (best_dist / max(1, bits_a))
+                matches.append(FileMatch(
+                    file_a_id=fa["id"],
+                    file_b_id=fb["id"],
+                    file_a_path=fa.get("path", ""),
+                    file_b_path=fb.get("path", ""),
+                    match_type=match_type,
+                    score=round(max(0.0, score), 4),
+                ))
+                matched_a.add(idx_a)
+                matched_b.add(idx_b)
+        return matches
 
     def _match_by_perceptual_hash(self, files_a: list[dict], files_b: list[dict],
-                                   exclude_b: set[int]) -> list[FileMatch]:
-        """pHash 感知哈希匹配（汉明距离，前缀桶优化）。
-
-        将 files_b 按 pHash 前 8 比特（2 个十六进制字符）分桶，
-        每个 files_a 只在同桶及相邻桶中搜索，将 O(|A|*|B|) 降为 ~O(|A|*|B|/64)。
-        """
-        phash_algo = self._registry.get("phash")
-        if not phash_algo:
-            return []
-
-        # 建桶：按 hex 前缀（8 bits = 2 chars）
-        buckets = self._build_phash_buckets(files_b, exclude_b, prefix_bits=8)
-
-        matches: list[FileMatch] = []
-        for fa in files_a:
-            ph_a = fa.get("phash")
-            if not ph_a:
-                continue
-
-            prefix_a = self._hash_prefix(ph_a, 8)
-            candidates: list[tuple[int, dict, str]] = []
-            for pfx in self._neighbor_prefixes(prefix_a):
-                candidates.extend(buckets.get(pfx, []))
-
-            if not candidates:
-                continue
-
-            best_match = None
-            best_dist = self._phash_threshold + 1
-
-            for idx_b, fb, ph_b in candidates:
-                try:
-                    dist = phash_algo.distance(ph_a, ph_b)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_match = (idx_b, fb, dist)
-                except Exception:
-                    continue
-
-            if best_match and best_dist <= self._phash_threshold:
-                idx_b, fb, dist = best_match
-                score = 1.0 - (dist / 64.0)
-                matches.append(FileMatch(
-                    file_a_id=fa["id"],
-                    file_b_id=fb["id"],
-                    file_a_path=fa.get("path", ""),
-                    file_b_path=fb.get("path", ""),
-                    match_type=MatchType.PHASH.value,
-                    score=round(max(0.0, score), 4),
-                ))
-        return matches
+                                   matched_a: set[int], matched_b: set[int]) -> list[FileMatch]:
+        """pHash 感知哈希匹配（汉明距离 + 鸽巢切片索引）。"""
+        return self._match_by_hamming(
+            files_a, files_b, matched_a, matched_b,
+            field="phash", threshold=self._phash_threshold,
+            match_type=MatchType.PHASH.value,
+        )
 
     def _match_by_dhash(self, files_a: list[dict], files_b: list[dict],
-                        exclude_b: set[int]) -> list[FileMatch]:
-        """dHash 差异哈希匹配（汉明距离，前缀桶优化）。"""
-        dhash_algo = self._registry.get("dhash")
-        if not dhash_algo:
+                        matched_a: set[int], matched_b: set[int]) -> list[FileMatch]:
+        """dHash 差异哈希匹配（汉明距离 + 鸽巢切片索引）。"""
+        return self._match_by_hamming(
+            files_a, files_b, matched_a, matched_b,
+            field="dhash", threshold=self._dhash_threshold,
+            match_type=MatchType.DHASH.value,
+        )
+
+    def _match_by_video_frames(self, files_a: list[dict], files_b: list[dict],
+                                matched_a: set[int], matched_b: set[int]) -> list[FileMatch]:
+        """视频帧级匹配 —— 关键帧 pHash 集合相似即视为同一视频。
+
+        视频没有整片 phash/dhash（恒为空串），只有 video_frames 里的抽帧哈希。
+        此前这些帧哈希算完即弃，导致重编码/换分辨率的近似视频永远查不出来。
+        这里对帧哈希做一对一贪心配对：匹配帧数 ≥ 较短视频帧数的一半即判定为
+        同一视频。帧距离沿用 pHash 汉明阈值。
+        """
+        algo = self._registry.get("phash")
+        if not algo:
             return []
 
-        # 建桶：按 hex 前缀（8 bits = 2 chars）
-        buckets: dict[str, list[tuple[int, dict, str]]] = {}
-        for idx, fb in enumerate(files_b):
-            if idx in exclude_b:
-                continue
-            dh = fb.get("dhash")
-            if not dh:
-                continue
-            prefix = self._hash_prefix(dh, 8)
-            buckets.setdefault(prefix, []).append((idx, fb, dh))
-
         matches: list[FileMatch] = []
-        for fa in files_a:
-            dh_a = fa.get("dhash")
-            if not dh_a:
+        for idx_a, fa in enumerate(files_a):
+            if idx_a in matched_a:
+                continue
+            frames_a = self._sample_frames(fa.get("video_frames"))
+            if not frames_a:
                 continue
 
-            prefix_a = self._hash_prefix(dh_a, 8)
-            candidates: list[tuple[int, dict, str]] = []
-            for pfx in self._neighbor_prefixes(prefix_a):
-                candidates.extend(buckets.get(pfx, []))
-
-            if not candidates:
-                continue
-
-            best_match = None
-            best_dist = self._dhash_threshold + 1
-
-            for idx_b, fb, dh_b in candidates:
-                try:
-                    dist = dhash_algo.distance(dh_a, dh_b)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_match = (idx_b, fb, dist)
-                except Exception:
+            best = None          # (idx_b, fb, matched_count, frames_b_len, ratio)
+            best_ratio = 0.0
+            for idx_b, fb in enumerate(files_b):
+                if idx_b in matched_b:
                     continue
+                frames_b = self._sample_frames(fb.get("video_frames"))
+                if not frames_b:
+                    continue
+                ratio, count = self._frame_set_similarity(frames_a, frames_b, algo)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best = (idx_b, fb, count, len(frames_b))
 
-            if best_match and best_dist <= self._dhash_threshold:
-                idx_b, fb, dist = best_match
-                score = 1.0 - (dist / 64.0)
+            if best is None:
+                continue
+            idx_b, fb, count, frames_b_len = best
+            required = min(VIDEO_FRAME_MIN_MATCHES, len(frames_a), frames_b_len)
+            if count >= required and best_ratio >= VIDEO_FRAME_MATCH_RATIO:
                 matches.append(FileMatch(
                     file_a_id=fa["id"],
                     file_b_id=fb["id"],
                     file_a_path=fa.get("path", ""),
                     file_b_path=fb.get("path", ""),
-                    match_type=MatchType.DHASH.value,
-                    score=round(max(0.0, score), 4),
+                    # 帧比对本质是 pHash 比对，沿用已有 match_type（避免改库约束）
+                    match_type=MatchType.PHASH.value,
+                    score=round(min(1.0, best_ratio), 4),
                 ))
+                matched_a.add(idx_a)
+                matched_b.add(idx_b)
         return matches
 
+    @staticmethod
+    def _sample_frames(frames) -> list[str]:
+        """把帧哈希列表均匀采样到 ≤ VIDEO_FRAME_MAX_SAMPLES 个。
+
+        同内容不同码率/分辨率的视频抽帧时间戳一致（间隔由配置决定），
+        按索引等距采样后仍然对齐。
+        """
+        if not frames:
+            return []
+        frames = list(frames)
+        if len(frames) <= VIDEO_FRAME_MAX_SAMPLES:
+            return frames
+        step = len(frames) / VIDEO_FRAME_MAX_SAMPLES
+        return [frames[int(i * step)] for i in range(VIDEO_FRAME_MAX_SAMPLES)]
+
+    def _frame_set_similarity(self, frames_a: list[str], frames_b: list[str],
+                              algo) -> tuple[float, int]:
+        """两两帧哈希贪心配对，返回 (匹配比例, 匹配帧数)。"""
+        used: set[int] = set()
+        matched = 0
+        for hash_a in frames_a:
+            best_j = None
+            best_dist = self._phash_threshold + 1
+            for j, hash_b in enumerate(frames_b):
+                if j in used:
+                    continue
+                try:
+                    dist = algo.distance(hash_a, hash_b)
+                except Exception:
+                    continue
+                if dist < best_dist:
+                    best_dist = dist
+                    best_j = j
+            if best_j is not None:
+                used.add(best_j)
+                matched += 1
+        denom = max(1, min(len(frames_a), len(frames_b)))
+        return matched / denom, matched
+
     def _match_by_face(self, files_a: list[dict], files_b: list[dict],
-                       exclude_b: set[int]) -> list[FileMatch]:
+                       matched_a: set[int], matched_b: set[int]) -> list[FileMatch]:
         """人脸特征向量匹配 —— 128 维欧氏距离比对。
 
         对文件 A 中的每张人脸，在文件 B 中查找最近的人脸。
-        距离 ≤ 阈值视为同一人。每个 B 文件只被匹配一次（贪婪策略）。
+        距离 ≤ 阈值视为同一人。文件级一对一（贪婪策略）。
         """
         if not self._face_enabled:
             return []
 
         matches: list[FileMatch] = []
-        # 记录已被匹配的 B 文件以及其中的人脸索引
+        # 记录已被匹配的 B 人脸 (file_id, face_index)，避免同一张脸被重复消费
         matched_faces_b: set[tuple[int, int]] = set()
 
-        for fa in files_a:
+        for idx_a, fa in enumerate(files_a):
+            if idx_a in matched_a:
+                continue
             vectors_a = fa.get("face_vectors")
             if not vectors_a:
                 continue
 
             best_overall: Optional[FileMatch] = None
+            best_b_idx: Optional[int] = None
             best_overall_dist = self._face_threshold + 1.0
             # 追踪最佳匹配对应的 B 人脸 key，最终匹配确认后才标记为已消费
             best_face_keys: set[tuple[int, int]] = set()
 
             for idx_b, fb in enumerate(files_b):
-                if idx_b in exclude_b:
+                if idx_b in matched_b:
                     continue
                 vectors_b = fb.get("face_vectors")
                 if not vectors_b:
@@ -552,11 +623,15 @@ class DedupEngine:
                                 match_type=MatchType.FACE.value,
                                 score=round(score, 4),
                             )
+                            best_b_idx = idx_b
                             best_face_keys = {face_key}
 
-            if best_overall is not None and best_overall_dist <= self._face_threshold:
+            if (best_overall is not None and best_b_idx is not None
+                    and best_overall_dist <= self._face_threshold):
                 matches.append(best_overall)
                 matched_faces_b.update(best_face_keys)
+                matched_a.add(idx_a)
+                matched_b.add(best_b_idx)
 
         return matches
 
@@ -571,14 +646,6 @@ class DedupEngine:
     # ============================================================
     # 辅助方法
     # ============================================================
-
-    @staticmethod
-    def _find_file_index(files: list[dict], file_id: int) -> int:
-        """根据文件 ID 在列表中查找索引。"""
-        for i, f in enumerate(files):
-            if f.get("id") == file_id:
-                return i
-        return -1
 
     @staticmethod
     def compute_hamming_distance_from_hex(hex_a: str, hex_b: str) -> int:

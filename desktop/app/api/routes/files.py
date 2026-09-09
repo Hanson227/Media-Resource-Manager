@@ -28,8 +28,18 @@ from app.core.thumbnail_generator import ThumbnailGenerator
 from app.db.engine import DatabaseManager
 from app.db import queries as q
 
-# 全局缩略图生成器（按需生成）
-_thumb_gen = ThumbnailGenerator(max_size=256)
+# 全局缩略图生成器（按 max_size 缓存，尺寸来自 config.thumbnail_max_size）
+_thumb_gens: dict[int, ThumbnailGenerator] = {}
+_DEFAULT_THUMB_SIZE = 256
+
+
+def _get_thumb_gen(max_size: int) -> ThumbnailGenerator:
+    """按配置尺寸取缩略图生成器（避免硬编码 256 忽略用户设置）。"""
+    gen = _thumb_gens.get(max_size)
+    if gen is None:
+        gen = ThumbnailGenerator(max_size=max_size)
+        _thumb_gens[max_size] = gen
+    return gen
 
 # 缩略图 HTTP 缓存头：封面变更后手机端能较快更新
 _THUMB_HEADERS = {"Cache-Control": "private, max-age=300"}
@@ -149,8 +159,10 @@ def get_file_thumbnail(file_id: int, request: Request):
                 src = Path(f.path)
                 if src.is_file():
                     cache_dir = cfg.thumbnail_cache_dir if cfg and cfg.thumbnail_cache_dir else Path(unit.path) / ".thumbnails"
+                    max_size = (cfg.thumbnail_max_size if cfg and cfg.thumbnail_max_size
+                                else _DEFAULT_THUMB_SIZE)
                     try:
-                        info = _thumb_gen.generate(src, cache_dir, file_id=file_id)
+                        info = _get_thumb_gen(max_size).generate(src, cache_dir, file_id=file_id)
                         if info.thumbnail_path.exists():
                             return FileResponse(str(info.thumbnail_path), media_type="image/jpeg", headers=_THUMB_HEADERS)
                     except Exception as gen_e:

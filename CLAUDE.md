@@ -76,7 +76,7 @@ desktop/app/
   core/                  # Business logic (no UI/db dependencies)
     scanner.py           #   Recursive folder scanner, auto-detects "resource units"
     hash_engine.py       #   Coordinates MD5/pHash/dHash computation, video frame extraction
-    dedup_engine.py      #   Multi-strategy dedup (MD5→pHash→dHash→face), Jaccard scoring
+    dedup_engine.py      #   Multi-strategy dedup (face→MD5→video frames→pHash→dHash), Jaccard scoring
     thumbnail_generator.py # Pillow (images) + OpenCV (videos), disk-cached
     watcher.py           #   watchdog-based real-time filesystem monitoring with debounce
   db/
@@ -132,9 +132,12 @@ The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "reso
 ## Dedup Pipeline (一键查重)
 
 1. 点击「查重」→ 自动检测未索引文件 → 有则先计算哈希+人脸
-2. Hash → compute MD5 (exact), pHash (perceptual), dHash (difference), face vectors (128-d)
-3. Compare → for each unit pair, run multi-strategy greedy matching: face → MD5 → pHash → dHash
-   - pHash/dHash 使用 8-bit 前缀桶索引优化，复杂度 O(|A|*|B|/64)
+2. Hash → compute MD5 (exact), pHash (perceptual), dHash (difference), face vectors (128-d),
+   video key-frame pHashes (every `video_frame_interval_sec`)
+3. Compare → for each unit pair, run multi-strategy greedy matching: face → MD5 → video frames → pHash → dHash
+   - pHash/dHash 使用鸽巢切片索引（切 threshold+1 段，任一段完全相同才进候选），零漏配
+   - 视频帧级匹配：抽帧 pHash 一对一贪心配对，匹配帧数 ≥ 较短视频帧数的 50% 判为同一视频
+   - 匹配严格一对一（A/B 两侧各最多出现一次），保证杰卡德指数 ≤ 1.0
    - 文件数比例 ≥ 20x 的单元对自动跳过
 4. Score → Jaccard similarity = matches / (|A| + |B| - matches); threshold default 0.80
 5. Alert → create `dedup_alert` messages and DedupCompareDialog for user resolution
@@ -145,7 +148,7 @@ SQLite with WAL mode + foreign keys enabled. Single-file at `desktop/data/media_
 
 Dedup semantics: a pair marked keep_a/keep_b/whitelist/ignore stays resolved across re-runs (`upsert_dedup_result` does not reset `is_resolved`); re-running dedup skips resolved/whitelisted unit pairs (`queries.build_dedup_skip_pairs`), so user decisions are one-shot. "加入白名单" additionally writes unit-level rows into the `whitelist` table (same transaction).
 
-Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desktop/config.json`, loaded into a frozen `AppConfig` dataclass at startup.
+Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desktop/config.json`, loaded into a frozen `AppConfig` dataclass at startup. `web_pin` is the exception: it is persisted to the gitignored `desktop/data/.web_pin` (never to config.json), with one-shot migration from the legacy plaintext key.
 
 ## Current State
 

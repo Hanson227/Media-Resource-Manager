@@ -21,6 +21,26 @@ from app.db.models import MediaFile
 
 logger = logging.getLogger(__name__)
 
+# 批量预载路径映射时的分块大小：SQLite 单条语句的绑定变量上限默认 32766，
+# 大媒体库一次性 IN 全部路径会抛 "too many SQL variables"。
+PATH_LOOKUP_CHUNK_SIZE = 500
+
+
+def load_existing_files(session, paths: list[str],
+                        chunk_size: int = PATH_LOOKUP_CHUNK_SIZE) -> dict:
+    """分块查询既有 MediaFile 记录，返回 {path: MediaFile}。
+
+    分块是为了避开 SQLite 的绑定变量上限；语义等价于单条 IN 查询。
+    """
+    existing: dict = {}
+    if not paths:
+        return existing
+    for start in range(0, len(paths), max(1, chunk_size)):
+        chunk = paths[start:start + chunk_size]
+        for row in session.query(MediaFile).filter(MediaFile.path.in_(chunk)):
+            existing[row.path] = row
+    return existing
+
 
 class ScanWorker(QThread):
     """后台扫描线程。
@@ -106,13 +126,11 @@ class ScanWorker(QThread):
                 updated_files = 0
                 errors: list[str] = list(result.errors)
 
-                # ---- 批量预载：一次 IN 查询命中全部扫描路径的既有记录 ----
-                # 取代原先“每个文件一次 get_file_by_path”的 N+1 往返。
+                # ---- 批量预载：IN 查询命中全部扫描路径的既有记录 ----
+                # 取代原先“每个文件一次 get_file_by_path”的 N+1 往返；
+                # 内部分块执行，避免超出 SQLite 绑定变量上限。
                 scanned_paths = [str(df.path) for unit in result.units for df in unit.files]
-                existing_map: dict[str, MediaFile] = {}
-                if scanned_paths:
-                    for row in session.query(MediaFile).filter(MediaFile.path.in_(scanned_paths)):
-                        existing_map[row.path] = row
+                existing_map = load_existing_files(session, scanned_paths)
 
                 # 变更队列（海量文件时批处理，显著减少 SQLite 往返）
                 rows_to_add: list[MediaFile] = []

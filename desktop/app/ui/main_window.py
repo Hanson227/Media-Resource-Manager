@@ -928,7 +928,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self, "确认查重",
             f"哈希索引完成。将对 {len(unit_ids)} 个资源单元执行全量比对。\n"
-            f"策略：人脸识别 → MD5 → pHash → dHash\n\n"
+            f"策略：人脸识别 → MD5 → 视频帧 → pHash → dHash\n\n"
             f"确定继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
@@ -972,7 +972,7 @@ class MainWindow(QMainWindow):
                 self, "需要先计算哈希索引",
                 f"还有 {unindexed_total} 个文件未计算哈希值（含人脸识别）。\n\n"
                 f"将先自动计算哈希索引，完成后自动进入查重。\n"
-                f"策略：人脸识别 → MD5 → pHash → dHash\n\n"
+                f"策略：人脸识别 → MD5 → 视频帧 → pHash → dHash\n\n"
                 f"确定继续？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
@@ -1270,6 +1270,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _on_settings_saved(self, new_config: AppConfig) -> None:
+        pin_changed = new_config.web_pin != self._config.web_pin
         self._config = new_config
         # 持久化配置到磁盘（否则退出后密码等设置丢失）
         try:
@@ -1277,9 +1278,13 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"配置保存到文件失败: {e}")
         # 同步更新 API 服务器的配置（否则 PIN 等设置不生效）
-        from app.api.server import _app
+        from app.api.server import _app, _revoke_all_auth_tokens
         if _app is not None:
             _app.state.config = new_config
+        # 改密后旧令牌必须立即失效（API.md 承诺；否则旧会话在 PIN 变更后仍可访问）
+        if pin_changed:
+            _revoke_all_auth_tokens()
+            logger.info("Web 访问密码已变更，全部 API 令牌已吊销")
         # 刷新状态栏 IP 显示（端口可能已变更）
         from app.ui.widgets.status_bar import _get_local_ip
         ip = _get_local_ip()

@@ -70,10 +70,12 @@ const G_TOKENS = {
   PTR_FLING_MIN: 40,        //   甩动最小位移 px
 };
 
-/* 阻尼跟手：f(x) = L0·sign + (|x|−L0)×factor，封顶 max（报告 §4 优化1） */
+/* 阻尼跟手：f(x) = L0·sign + (|x|−L0)×factor，封顶 max（报告 §4 优化1）
+ * 边界额外阻力必须乘在整段位移上（而非只压 L0 以外的部分），否则
+ * atEdge 时 gDamp(0) = L0×(1−0.3) ≠ 0，起手瞬间画面跳变 ~33px。 */
 function gDamp(absX, L0, factor, max, atEdge) {
   let off = absX <= L0 ? absX : L0 + (absX - L0) * factor;
-  if (atEdge) off = L0 + (off - L0) * G_TOKENS.BOUNDARY_DAMP_FACTOR;
+  if (atEdge) off *= G_TOKENS.BOUNDARY_DAMP_FACTOR;
   return Math.min(off, max);
 }
 
@@ -298,11 +300,16 @@ function attachPullToRefresh(scroller, opts) {
 
   function onStart(e) {
     if (opts.isBusy && opts.isBusy()) return;
+    // 多指：已就绪的下拉会被第二指重置 startY 而静默取消，直接放弃本次手势
+    if (e.touches && e.touches.length > 1) {
+      if (active) { active = false; opts.onProgress(0, 'idle'); }
+      return;
+    }
     if (scroller.scrollTop > 4) { active = false; return; }
     const t = e.touches && e.touches[0];
     if (!t) return;
     active = true; startX = t.clientX; startY = t.clientY; dy = 0;
-    samples = [{ x: t.clientX, y: t.clientY, t: now() }];
+    samples = [{ x: t.clientX, y: t.clientY, t: performance.now() }];
   }
   function onMove(e) {
     if (!active) return;

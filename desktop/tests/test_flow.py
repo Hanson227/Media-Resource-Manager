@@ -164,6 +164,232 @@ def test_preflight():
     for err in failed:
         print(f"    失败: {err}")
 
+    # 静态未定义名称扫描：导入成功不代表函数体内没有引用不存在的模块级名称。
+    # hash_worker.py 曾两次踩坑（Path、os 未导入），运行时被 except Exception
+    # 吞掉后表现为功能静默失效，因此这里用 symtable 做一次全库检查。
+    missing = _scan_undefined_globals(py_files, project_root)
+    check("无未定义的模块级名称引用", len(missing) == 0)
+    for rel, where, name in missing:
+        print(f"    未定义名称: {rel} -> {name} (used in {where})")
+
+
+def _scan_undefined_globals(py_files: list[Path], project_root: Path) -> list[tuple]:
+    """扫描函数体中对模块级名称的读取，返回模块里不存在的名称列表。
+
+    判定方式：symtable 中 is_global() 且未被赋值/导入的名称，若在模块命名
+    空间与 builtins 中都不存在，则该行执行时必然 NameError。
+    """
+    import builtins
+    import symtable
+
+    builtin_names = set(dir(builtins)) | {
+        "__file__", "__name__", "__doc__", "__package__", "__spec__",
+        "__loader__", "__builtins__", "__class__",
+    }
+    missing: list[tuple] = []
+
+    def _walk(table, where: str, collected: set) -> None:
+        for sym in table.get_symbols():
+            if sym.is_global() and not sym.is_assigned() and not sym.is_parameter():
+                collected.add(sym.get_name())
+        for child in table.get_children():
+            _walk(child, f"{where}/{child.get_name()}", collected)
+
+    for fpath in sorted(py_files):
+        rel = fpath.relative_to(project_root)
+        mod_path = str(rel).replace(os.sep, ".")[:-3]
+        try:
+            module = importlib.import_module(mod_path)
+            table = symtable.symtable(fpath.read_text(encoding="utf-8"), str(fpath), "exec")
+        except Exception:
+            continue  # 导入/语法失败已在上面的导入检查中报告
+        names: set = set()
+        _walk(table, str(rel).replace(os.sep, "/"), names)
+        for name in sorted(names):
+            if name in builtin_names or hasattr(module, name):
+                continue
+            missing.append((str(rel), mod_path, name))
+    return missing
+
+
+def test_hash_worker_video_face_detection():
+    """测试 0.5: 视频人脸检测链路（回归 os 未导入导致的静默失效）。
+
+    _detect_faces_for_file 的视频分支曾调用未导入的 os.close()，
+    NameError 被外层 except Exception 吞掉 → detect_faces 永不执行，
+    视频人脸查重维度静默失效。此处用 stub engine 断言该分支真的被走到。
+    """
+    section("测试 0.5: 视频人脸检测链路")
+    from app.ui.workers.hash_worker import _detect_faces_for_file
+
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        check("cv2/numpy 可用（视频人脸检测前置依赖）", False)
+        return
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vface_test_"))
+    try:
+        video = tmp_dir / "clip.avi"
+        writer = cv2.VideoWriter(
+            str(video), cv2.VideoWriter_fourcc(*"MJPG"), 5.0, (64, 48)
+        )
+        for i in range(10):
+            writer.write(np.full((48, 64, 3), (i * 20) % 255, dtype=np.uint8))
+        writer.release()
+        check("测试视频已生成", video.is_file() and video.stat().st_size > 0)
+
+        class _StubEngine:
+            def __init__(self):
+                self.calls = []
+
+            def detect_faces(self, path):
+                self.calls.append(Path(path))
+                return ["FACE"]
+
+        engine = _StubEngine()
+        before = set(Path(tempfile.gettempdir()).glob("vface_*.jpg"))
+        result = _detect_faces_for_file(engine, video, "video")
+        check("视频分支调用 detect_faces（未被 NameError 吞掉）", len(engine.calls) == 1)
+        check("视频分支返回人脸检测结果", result == ["FACE"])
+
+        # 临时抽帧文件应被清理（只比对本次新增，避免受历史残留影响）
+        after = set(Path(tempfile.gettempdir()).glob("vface_*.jpg"))
+        check("抽帧临时文件已清理", after <= before)
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_face_detection_degrades_gracefully():
+    """测试 0.7: 人脸链路在 OpenCV 5.x（缺 Caffe/Torch API）下必须优雅降级。
+
+    回归：_load_models 直接调用 cv2.dnn.readNetFromCaffe，OpenCV 5 已移除该 API，
+    AttributeError 逃出 detect_faces 的异常契约，被 hash_worker 吞成
+    “检测不到人脸”（功能静默失效且无有效日志）。
+    """
+    section("测试 0.7: 人脸检测降级不抛异常")
+    import cv2
+    from app.core.hash_engine import HashEngine
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="face_test_"))
+    try:
+        img = tmp_dir / "face.jpg"
+        Image.new("RGB", (64, 64), (128, 128, 128)).save(img)
+        engine = HashEngine(
+            face_detection_enabled=True,
+            model_dir=Path(__file__).parent.parent / "models",
+        )
+        try:
+            result = engine.detect_faces(img)
+            raised = None
+        except Exception as e:  # noqa: BLE001 — 这里就是要断言不抛
+            result, raised = None, e
+        check("detect_faces 不抛异常（错误契约）", raised is None)
+        if raised is not None:
+            print(f"     raised: {type(raised).__name__}: {raised}")
+        check("detect_faces 返回列表", isinstance(result, list))
+        if not hasattr(cv2.dnn, "readNetFromCaffe"):
+            check("cv2 缺 Caffe API 时降级为空列表", result == [])
+            check("模型加载被标记为不可用（不再逐文件重试）",
+                  HashEngine._models_unavailable)
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_config_from_file_tolerates_bad_field():
+    """测试 0.6: 单个非法配置字段不得导致整体回退默认值。
+
+    回归：from_file 曾边遍历边 del 非法键 → RuntimeError → main.py 捕获后
+    整体回退 AppConfig()，web_pin 被清空（Web 鉴权静默关闭）、db_path 指向
+    默认库。正确行为：仅忽略非法字段，其余字段照常生效。
+    """
+    section("测试 0.6: 配置非法字段容错")
+    import json
+    import warnings
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="cfg_test_"))
+    try:
+        cfg_file = tmp_dir / "config.json"
+        cfg_file.write_text(json.dumps({
+            "web_pin": "1234",
+            "db_path": "data/custom_test.db",
+            "api_port": 19001,
+            "thumbnail_cache_dir": None,     # 非法：Path(None)
+            "no_such_field": "ignored",      # 未知键
+        }, ensure_ascii=False), encoding="utf-8")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            cfg = AppConfig.from_file(cfg_file)
+
+        check("非法字段不影响 web_pin", cfg.web_pin == "1234")
+        check("非法字段不影响 db_path", str(cfg.db_path).endswith("custom_test.db"))
+        check("非法字段不影响 api_port", cfg.api_port == 19001)
+        check("非法字段回退该项默认值",
+              cfg.thumbnail_cache_dir == AppConfig().thumbnail_cache_dir)
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_web_pin_not_persisted_in_config():
+    """测试 0.8: Web 访问密码不得明文写入 config.json（该文件被 git 跟踪）。
+
+    PIN 改存 config.json 同级的 data/.web_pin（data/ 已被 .gitignore 忽略）；
+    旧配置里的明文要能自动迁移，且清空密码后不得被旧值复活。
+    """
+    section("测试 0.8: Web 密码不落 config.json")
+    import json
+    import warnings
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pin_cfg_"))
+    try:
+        cfg_file = tmp_dir / "config.json"
+        pin_file = tmp_dir / "data" / ".web_pin"
+
+        # ① 保存：config.json 不含 PIN，secrets 文件含 PIN
+        AppConfig().with_updates(web_pin="1234").to_file(cfg_file)
+        raw = cfg_file.read_text(encoding="utf-8")
+        check("config.json 不含 web_pin 键", "web_pin" not in raw)
+        check("config.json 不含 PIN 明文", "1234" not in raw)
+        check("PIN 写入 data/.web_pin", pin_file.is_file()
+              and pin_file.read_text(encoding="utf-8").strip() == "1234")
+
+        # ② 读取：往返一致
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            cfg = AppConfig.from_file(cfg_file)
+        check("from_file 读回 PIN", cfg.web_pin == "1234")
+
+        # ③ 旧配置迁移：config.json 里仍有明文 → 自动搬到 secrets 文件
+        pin_file.unlink()
+        legacy = json.loads(raw)
+        legacy["web_pin"] = "5678"
+        cfg_file.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            migrated = AppConfig.from_file(cfg_file)
+        check("旧配置明文 PIN 可读", migrated.web_pin == "5678")
+        check("旧配置明文 PIN 已迁移到 secrets 文件",
+              pin_file.is_file() and pin_file.read_text(encoding="utf-8").strip() == "5678")
+        migrated.to_file(cfg_file)
+        check("再次保存后 config.json 不再含 PIN",
+              "web_pin" not in cfg_file.read_text(encoding="utf-8"))
+
+        # ④ 清空密码：不得被旧值复活
+        AppConfig().with_updates(web_pin="").to_file(cfg_file)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            cleared = AppConfig.from_file(cfg_file)
+        check("清空密码后读回为空", cleared.web_pin == "")
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def test_db():
     section("测试 1: 数据库初始化 + 完整性检查")
     _BASE = Path(__file__).parent.parent
@@ -285,6 +511,35 @@ def test_save_to_db(scan_result: ScanResult, root: Path):
         check(f"数据库中有 8 个文件 (实际: {total_files})", total_files == 8)
 
 
+def test_scan_worker_path_chunking():
+    """测试 3.4: 扫描入库的路径预载必须分块执行。
+
+    回归：F11 批量化后用单条 IN 查询预载全部扫描路径，SQLite 绑定变量
+    上限（默认 32766）之上的大媒体库会抛 "too many SQL variables"，
+    整个扫描入库失败。这里用极小分块验证跨块边界仍能全部命中。
+    """
+    section("测试 3.4: 路径预载分块")
+    from app.db.models import MediaFile
+    from app.ui.workers.scan_worker import (
+        load_existing_files, PATH_LOOKUP_CHUNK_SIZE,
+    )
+
+    check("默认分块大小 > 0 且远小于 SQLite 上限",
+          0 < PATH_LOOKUP_CHUNK_SIZE <= 10000)
+    with DatabaseManager.session() as session:
+        rows = session.query(MediaFile).limit(6).all()
+        paths = [r.path for r in rows]
+        if not paths:
+            check("路径预载测试: 无文件，跳过", True)
+            return
+        full = load_existing_files(session, paths, chunk_size=1000)
+        chunked = load_existing_files(session, paths, chunk_size=2)
+        empty = load_existing_files(session, [])
+    check(f"整块查询命中全部 {len(paths)} 条", len(full) == len(paths))
+    check("跨分块边界仍全部命中", set(chunked) == set(paths))
+    check("空输入返回空映射", empty == {})
+
+
 def test_path_revalidation():
     """测试 3.2: 扫描时路径重新校验 — 文件夹移动后旧路径标记排除。"""
     section("测试 3.2: 扫描路径重新校验")
@@ -382,6 +637,52 @@ def test_scanner_nested_promotion():
               "4.10" not in unit_names)
         check("容器内的场景文件夹独立存在",
               "江苏嫩妹" in unit_names and "粉红骚货" in unit_names)
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_scanner_no_file_loss():
+    """测试 3.55: 扫描器不得因“容器过滤”静默丢单元/丢文件。
+
+    回归两个缺陷：
+    ① 容器判定查的是 candidates（含已被吞并的子候选）→
+       Parent/{1 直连}+Parent/Child/{5} 整组单元消失，6 个文件全丢；
+    ② 没有上级单元时仍丢弃容器 → Show/movie.mp4 无人收集。
+    """
+    section("测试 3.55: 容器过滤不丢文件")
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp(prefix="scan_loss_"))
+    try:
+        # ① 父 1 个直连 + 子 5 个（子应被父吞并，父必须保留）
+        parent = tmp / "case1" / "Parent"
+        (parent / "Child").mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (16, 16), (255, 0, 0)).save(parent / "a.jpg")
+        for i in range(5):
+            Image.new("RGB", (16, 16), (0, 200, 0)).save(parent / "Child" / f"p{i}.jpg")
+
+        # ② 容器只有 1 个直连文件 + 两个独立子单元，且没有上级单元
+        show = tmp / "case2" / "Show"
+        (show / "CD1").mkdir(parents=True, exist_ok=True)
+        (show / "CD2").mkdir(parents=True, exist_ok=True)
+        (show / "movie.mp4").write_bytes(b"fake video")
+        for i in range(2):
+            Image.new("RGB", (16, 16), (0, 0, 255)).save(show / "CD1" / f"a{i}.jpg")
+            Image.new("RGB", (16, 16), (255, 255, 0)).save(show / "CD2" / f"b{i}.jpg")
+
+        scanner = MediaScanner(
+            extensions=frozenset({".jpg", ".mp4"}),
+            exclude_patterns=frozenset(),
+        )
+        r1 = scanner.scan_root(tmp / "case1")
+        check("① 父单元保留（未被误判为容器）", len(r1.units) == 1)
+        check("① 父单元收集到全部 6 个文件", r1.total_files == 6)
+
+        r2 = scanner.scan_root(tmp / "case2")
+        check("② 容器直连文件未被丢弃", r2.total_files == 5)
+        check("② 两个子单元仍独立",
+              {u.path.name for u in r2.units} >= {"CD1", "CD2"})
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
@@ -540,6 +841,198 @@ def test_dedup_engine():
                   f"(杰卡德={dup.jaccard_similarity:.1%}, 匹配={len(dup.file_matches)}对)")
 
 
+def test_dedup_one_to_one_matching():
+    """测试 6.5: 查重文件级匹配必须一对一（回归杰卡德指数 > 1.0 / 漏配对）。
+
+    历史缺陷：匹配只约束 B 侧，同一 A 文件可被 md5 与 phash 各匹配一次，
+    杰卡德指数被算成 2.0（假阳性）；反之 B 中同一内容有多份副本时
+    md5 索引只保留最后一条，1:1 配对丢失（假阴性）。
+    """
+    section("测试 6.8: 查重文件级一对一匹配")
+    engine = DedupEngine(jaccard_threshold=0.0, face_enabled=False)
+    ph = "0f1e2d3c4b5a6978"
+
+    # ① 一个 A 文件 vs B{完全相同, 感知相同}：只能匹配 1 对，杰卡德 ≤ 1.0
+    files_a = [{"id": 1, "path": "A/a.jpg", "md5_hash": "aaa", "phash": ph, "dhash": ph}]
+    files_b = [
+        {"id": 2, "path": "B/a.jpg", "md5_hash": "aaa",
+         "phash": "ffffffffffffffff", "dhash": "ffffffffffffffff"},
+        {"id": 3, "path": "B/a_small.jpg", "md5_hash": "bbb", "phash": ph, "dhash": ph},
+    ]
+    r1 = engine.compare_units(files_a, files_b, 1, 2)
+    check("同一 A 文件只匹配一次", r1 is not None and len(r1.file_matches) == 1)
+    check("杰卡德指数不超过 1.0", r1 is not None and r1.jaccard_similarity <= 1.0)
+    check("杰卡德指数 = 1/(1+2-1) = 0.5",
+          r1 is not None and abs(r1.jaccard_similarity - 0.5) < 1e-6)
+
+    # ② 两侧各有两份相同内容：应配对 2 对，杰卡德 = 1.0
+    dup_a = [{"id": 11, "path": "A/1", "md5_hash": "X", "phash": None, "dhash": None},
+             {"id": 12, "path": "A/2", "md5_hash": "X", "phash": None, "dhash": None}]
+    dup_b = [{"id": 21, "path": "B/1", "md5_hash": "X", "phash": None, "dhash": None},
+             {"id": 22, "path": "B/2", "md5_hash": "X", "phash": None, "dhash": None}]
+    r2 = engine.compare_units(dup_a, dup_b, 3, 4)
+    check("重复副本全部配对（2 对）", r2 is not None and len(r2.file_matches) == 2)
+    check("全等集合杰卡德 = 1.0",
+          r2 is not None and abs(r2.jaccard_similarity - 1.0) < 1e-6)
+    a_ids = [m.file_a_id for m in (r2.file_matches if r2 else ())]
+    b_ids = [m.file_b_id for m in (r2.file_matches if r2 else ())]
+    check("A 侧无重复配对", len(a_ids) == len(set(a_ids)))
+    check("B 侧无重复配对", len(b_ids) == len(set(b_ids)))
+
+    # ③ 感知哈希同理：B 中两份相同 phash，只能匹配一份
+    ph_a = [{"id": 31, "path": "A/p", "md5_hash": None, "phash": ph, "dhash": None}]
+    ph_b = [{"id": 41, "path": "B/p1", "md5_hash": None, "phash": ph, "dhash": None},
+            {"id": 42, "path": "B/p2", "md5_hash": None, "phash": ph, "dhash": None}]
+    r3 = engine.compare_units(ph_a, ph_b, 5, 6)
+    check("pHash 一对一只匹配一次", r3 is not None and len(r3.file_matches) == 1)
+    check("pHash 杰卡德 = 0.5",
+          r3 is not None and abs(r3.jaccard_similarity - 0.5) < 1e-6)
+
+
+def test_dedup_hash_index_recall():
+    """测试 6.6: 感知哈希索引零漏配（鸽巢切片索引）。
+
+    回归：旧实现只查 8bit 前缀的 ±1 邻桶，而汉明距离 ≤5 并不蕴含前缀整数差
+    ≤1（0x0f vs 0x2b 距离 2、整数差 28）→ 近重复对整片漏报。
+    """
+    section("测试 6.9: 感知哈希索引零漏配")
+    engine = DedupEngine(
+        jaccard_threshold=0.0,
+        phash_hamming_threshold=5,
+        dhash_hamming_threshold=5,
+        face_enabled=False,
+    )
+    base = "0f1e2d3c4b5a6978"
+    # 翻转前 8bit 的第 2、5 位 → 前缀 0x0f→0x2b（整数差 28），整体距离 2
+    near = "2b1e2d3c4b5a6978"
+    # 翻转前 8bit 的低 6 位 → 整体距离 6（超过阈值）
+    far = "301e2d3c4b5a6978"
+
+    def _pair(hash_a, hash_b, field):
+        fa = [{"id": 1, "path": "A", "md5_hash": None,
+               "phash": hash_a if field == "phash" else None,
+               "dhash": hash_a if field == "dhash" else None}]
+        fb = [{"id": 2, "path": "B", "md5_hash": None,
+               "phash": hash_b if field == "phash" else None,
+               "dhash": hash_b if field == "dhash" else None}]
+        r = engine.compare_units(fa, fb, 1, 2)
+        return len(r.file_matches) if r else 0
+
+    check("pHash: 前缀相差 28 但距离 2 → 命中",
+          _pair(base, near, "phash") == 1)
+    check("dHash: 前缀相差 28 但距离 2 → 命中",
+          _pair(base, near, "dhash") == 1)
+    check("pHash: 距离 6 超过阈值 → 不命中",
+          _pair(base, far, "phash") == 0)
+    check("dHash: 距离 6 超过阈值 → 不命中",
+          _pair(base, far, "dhash") == 0)
+    check("切片键数量 = 阈值+1（鸽巢前提）",
+          len(engine._slice_keys(base, engine._phash_threshold + 1)) == 6)
+
+
+def test_dedup_video_frame_matching():
+    """测试 6.10: 视频帧级查重（回归「帧哈希算完即弃」的死链）。
+
+    视频整片 phash/dhash 恒为空串，只有 video_frames 里的抽帧哈希；
+    此前没有任何消费方 → 重编码/换分辨率的近似视频永远查不出来。
+    """
+    section("测试 6.10: 视频帧级查重")
+    from app.db.models import MediaFile, VideoFrame
+    from app.core.dedup_engine import (
+        VIDEO_FRAME_MAX_SAMPLES, VIDEO_FRAME_MATCH_RATIO,
+    )
+
+    engine = DedupEngine(jaccard_threshold=0.0, face_enabled=False)
+    frames_a = ["0f1e2d3c4b5a6978", "ff00ff00ff00ff00", "1234567890abcdef", "abcdefabcdefabcd"]
+    frames_b = list(frames_a)  # 同内容：抽帧哈希一致（重编码后 pHash 近似不变）
+
+    def _video(fid, path, md5, frames):
+        return {"id": fid, "path": path, "md5_hash": md5,
+                "phash": "", "dhash": "", "face_vectors": [], "video_frames": frames}
+
+    # ① 同内容不同 MD5（重编码）→ 必须命中
+    fa = [_video(1, "A/movie.mp4", "aaa", frames_a)]
+    fb = [_video(2, "B/movie.mp4", "bbb", frames_b)]
+    r = engine.compare_units(fa, fb, 1, 2)
+    check("重编码视频（帧哈希一致、MD5 不同）命中",
+          r is not None and len(r.file_matches) == 1)
+    if r is not None and r.file_matches:
+        check("视频匹配类型记为 phash", r.file_matches[0].match_type == "phash")
+        check("相似度为帧匹配比例 1.0",
+              abs(r.file_matches[0].score - 1.0) < 1e-6)
+    check("同内容视频单元 Jaccard = 1.0",
+          r is not None and abs(r.jaccard_similarity - 1.0) < 1e-6)
+
+    # ② 内容不同（帧哈希完全无关）→ 不命中
+    fc = [_video(3, "C/other.mp4", "ccc", ["0000000000000000"] * 4)]
+    r2 = engine.compare_units(fa, fc, 1, 3)
+    check("无关视频不命中", r2 is not None and len(r2.file_matches) == 0)
+
+    # ③ 部分帧匹配：达到比例阈值才算命中
+    half = frames_a[:2] + ["1111111111111111", "2222222222222222"]
+    r3 = engine.compare_units(fa, [_video(4, "D/half.mp4", "ddd", half)], 1, 4)
+    check(f"匹配 {int(len(frames_a) * VIDEO_FRAME_MATCH_RATIO)}/{len(frames_a)} 帧达到阈值 → 命中",
+          r3 is not None and len(r3.file_matches) == 1)
+
+    # ④ 采样上限：超长视频不会全量两两比对
+    many = ["0f1e2d3c4b5a6978"] * (VIDEO_FRAME_MAX_SAMPLES * 4)
+    check(f"帧采样上限为 {VIDEO_FRAME_MAX_SAMPLES}",
+          len(DedupEngine._sample_frames(many)) == VIDEO_FRAME_MAX_SAMPLES)
+    check("短视频不采样（原样返回）",
+          len(DedupEngine._sample_frames(frames_a)) == len(frames_a))
+
+    # ⑤ 真实视频：抽帧哈希确实产出（否则整条链又会变成静默死链）
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        cv2 = None
+    if cv2 is not None:
+        import tempfile
+        from app.core.hash_engine import HashEngine
+        tmp_dir = Path(tempfile.mkdtemp(prefix="vframe_"))
+        try:
+            video = tmp_dir / "clip.avi"
+            writer = cv2.VideoWriter(
+                str(video), cv2.VideoWriter_fourcc(*"MJPG"), 5.0, (64, 48)
+            )
+            for i in range(60):  # 12 秒 → 按 5s 间隔应产出 3 帧
+                writer.write(np.full((48, 64, 3), 40 + (i * 3) % 200, dtype=np.uint8))
+            writer.release()
+            hashes = HashEngine().hash_file(video)
+            frames = hashes.video_frame_hashes or ()
+            check("真实视频产出帧哈希", len(frames) >= 2)
+            check("帧哈希为 (时间戳, hex) 结构",
+                  all(isinstance(ts, int) and isinstance(ph, str) and len(ph) == 16
+                      for ts, ph in frames))
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # ⑥ 批量装载查询：按文件分组、按时间戳升序
+    with DatabaseManager.session() as session:
+        row = session.query(MediaFile.id).first()
+        fid = row[0] if row else None
+        if fid is None:
+            check("视频帧批量查询: 无文件可测，跳过", True)
+            return
+        try:
+            with DatabaseManager.session() as session:
+                for i, ph in enumerate(frames_a):
+                    q.insert_video_frame(session, fid, (i + 1) * 5000, ph)
+            # 必须等上面的会话提交后再开新会话查询（SQLite 未提交写不可见）
+            with DatabaseManager.session() as session2:
+                loaded = q.get_video_frame_hashes_by_files(session2, [fid, 999999])
+            check("批量查询按文件分组", set(loaded.keys()) == {fid})
+            check("批量查询保持时间戳升序", loaded.get(fid) == frames_a)
+            check("不存在的文件不返回", 999999 not in loaded)
+        finally:
+            with DatabaseManager.session() as session3:
+                session3.query(VideoFrame).filter(
+                    VideoFrame.file_id == fid
+                ).delete(synchronize_session=False)
+
+
 def test_save_dedup_results():
     section("测试 7: 查重结果入库 + 消息创建")
     with DatabaseManager.session() as session:
@@ -592,6 +1085,54 @@ def test_save_dedup_results():
     # 查询消息
     count = MessageCenter.get_unread_count()
     check(f"有 {count} 条未读消息", count > 0)
+
+
+def test_dedup_results_pagination():
+    """测试 7.5: 查重结果分页的 total 必须是真实总数。
+
+    回归：接口先按 limit=100/200 取全量再内存切片 → total 被截断，
+    超出部分任何页都取不到（DB 261 行时 total=200、第 13 页恒空）。
+    这里刻意造 >100 条未处置结果，使旧实现的 limit=100 截断必然暴露。
+    """
+    section("测试 7.5: 查重结果分页 total 精确")
+    from fastapi.testclient import TestClient
+    from app.api.server import create_app
+
+    with DatabaseManager.session() as session:
+        from app.db.models import DedupResult as _DR
+        before = session.query(_DR).filter(_DR.is_resolved == False).count()  # noqa: E712
+        root = q.add_library_root(session, "C:/__paginate_test__")
+        # 15 个单元 → 105 个单元对，超过旧实现的 limit=100 截断阈值
+        unit_ids = [
+            q.create_unit(session, f"C:/__paginate_test__/u{i}", f"u{i}", root.id).id
+            for i in range(15)
+        ]
+        added = 0
+        for i in range(len(unit_ids)):
+            for j in range(i + 1, len(unit_ids)):
+                q.upsert_dedup_result(
+                    session, unit_ids[i], unit_ids[j], 0.9, 1, 1, 1, "md5",
+                )
+                added += 1
+        root_id = root.id
+        expected = before + added
+
+    try:
+        client = TestClient(create_app(AppConfig()))
+        r1 = client.get("/api/dedup/results?unresolved_only=true&per_page=20&page=1").json()
+        r2 = client.get("/api/dedup/results?unresolved_only=true&per_page=20&page=2").json()
+        check(f"total 为真实总数 {expected}（实际 {r1.get('total')}）",
+              r1.get("total") == expected)
+        check("第一页返回 20 条", len(r1.get("results", [])) == 20)
+        check("第二页返回 20 条",
+              len(r2.get("results", [])) == min(20, max(0, expected - 20)))
+        # 直接针对旧缺陷症状：第 101 条起（旧实现 limit=100 之后）必须仍有数据
+        r6 = client.get("/api/dedup/results?unresolved_only=true&per_page=20&page=6").json()
+        check("第 6 页（第 101 条起）仍有数据（旧实现恒空）",
+              len(r6.get("results", [])) > 0)
+    finally:
+        with DatabaseManager.session() as session:
+            q.remove_library_root(session, root_id)
 
 
 def test_tree_model():
@@ -856,6 +1397,43 @@ def test_tags():
         check("删除标签成功", ok)
 
 
+def test_thumbnail_generator_formats():
+    """测试 6.7: 缩略图扩展名判定与透明通道处理。
+
+    回归：① 内联视频扩展名集合缺 m2ts/mts/rmvb/vob/ogv/asf（与 media_types 分叉）；
+          ② RGBA 透明区域直接 convert("RGB") → 黑底。
+    """
+    section("测试 6.7: 缩略图格式与透明通道")
+    import tempfile
+    from app.core.exceptions import UnsupportedFormatError
+
+    gen = ThumbnailGenerator(max_size=64)
+    tmp = Path(tempfile.mkdtemp(prefix="thumb_fmt_"))
+    try:
+        # ① .m2ts 必须进入视频分支（而非 UnsupportedFormatError）
+        fake_video = tmp / "clip.m2ts"
+        fake_video.write_bytes(b"not a real video")
+        unsupported = False
+        try:
+            gen.generate(fake_video, tmp / "cache")
+        except UnsupportedFormatError:
+            unsupported = True
+        except Exception:
+            pass  # 假文件解码失败属预期
+        check(".m2ts 不再被判定为不支持格式", not unsupported)
+
+        # ② 全透明 PNG → 白底而非黑底
+        src = tmp / "transparent.png"
+        Image.new("RGBA", (32, 32), (0, 0, 0, 0)).save(src)
+        info = gen.generate(src, tmp / "cache2")
+        with Image.open(info.thumbnail_path) as thumb:
+            corner = thumb.convert("RGB").getpixel((0, 0))
+        check(f"透明区域合成为白底（实际 {corner}）", corner == (255, 255, 255))
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_heic_converter():
     """测试 6.6: HEIC 转换 — 文件头检测。"""
     section("测试 6.6: HEIC 转换器")
@@ -1013,6 +1591,58 @@ def test_thumbnail_binary():
     resp2 = client.get("/api/files/99999/thumbnail")
     check("不存在的缩略图返回 404", resp2.status_code == 404)
 
+
+
+def test_thumbnail_config_respected():
+    """测试 16.5: 缩略图尺寸与缓存目录必须来自配置。
+
+    回归：files.py 用模块级 `ThumbnailGenerator(max_size=256)` 忽略
+    config.thumbnail_max_size；CleanupService 硬编码 data/.thumbnails
+    忽略 config.thumbnail_cache_dir（改过目录后 invalidate/purge 打错位置）。
+    """
+    section("测试 16.5: 缩略图配置生效")
+    import io as _io
+    import tempfile
+    from fastapi.testclient import TestClient
+    from app.api.server import create_app
+    from app.services.cleanup_service import (
+        CleanupService, configure_thumbnail_cache_dir,
+    )
+
+    tmp = Path(tempfile.mkdtemp(prefix="thumb_cfg_"))
+    try:
+        cache_dir = tmp / "custom_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        config = AppConfig().with_updates(
+            thumbnail_cache_dir=cache_dir, thumbnail_max_size=64,
+        )
+        client = TestClient(create_app(config))
+
+        with DatabaseManager.session() as session:
+            files = q.get_files_by_unit(session, 1)
+        if not files:
+            check("缩略图配置测试: 无文件，跳过", True)
+            return
+        fid = files[0].id
+
+        resp = client.get(f"/api/files/{fid}/thumbnail")
+        check("按需生成缩略图 → 200", resp.status_code == 200)
+        if resp.status_code == 200:
+            img = Image.open(_io.BytesIO(resp.content))
+            check(f"缩略图边长 ≤ 配置的 64px（实际 {img.size}）",
+                  max(img.size) <= 64)
+            check("缩略图写入配置的缓存目录",
+                  (cache_dir / f"{fid}_thumb.jpg").is_file())
+
+        # 失效接口必须打到配置目录（而非硬编码 data/.thumbnails）
+        configure_thumbnail_cache_dir(cache_dir)
+        CleanupService.invalidate_thumbnail(fid)
+        check("invalidate_thumbnail 清理配置目录中的缓存",
+              not (cache_dir / f"{fid}_thumb.jpg").exists())
+    finally:
+        configure_thumbnail_cache_dir(None)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_unit_response_fields():
@@ -1224,6 +1854,39 @@ def test_pin_auth_api():
             r_s = client.get(f"/api/files/{fid}/stream?token={token}", headers={"Range": "bytes=0-9"})
             check("视频流 ?token= 有效令牌 → 206/200",
                   r_s.status_code in (200, 206))
+
+        # ---- 认证方案大小写不敏感（RFC 7235）----
+        r_lower = client.get("/api/units", headers={"Authorization": f"bearer {token}"})
+        check("小写 bearer 方案 → 200", r_lower.status_code == 200)
+
+        # ---- CORS 不得回显任意 Origin 且带凭据 ----
+        r_cors = client.get("/api/units", headers={
+            "Authorization": f"Bearer {token}",
+            "Origin": "http://evil.example",
+        })
+        check("跨域请求不返回 allow-credentials=true",
+              r_cors.headers.get("access-control-allow-credentials") != "true")
+
+        # ---- PIN 暴力破解节流：窗口内连续失败后返回 429 ----
+        from app.api import server as _server_mod
+        _server_mod._auth_failures.clear()
+        last = None
+        for _ in range(6):
+            last = client.post("/api/auth/verify", json={"pin": "0000"})
+        check("连续失败后触发限流 → 429", last.status_code == 429)
+        check("限流期间即使密码正确也被拦截",
+              client.post("/api/auth/verify", json={"pin": "1234"}).status_code == 429)
+        _server_mod._auth_failures.clear()
+        check("解除限流后正确密码可用",
+              client.post("/api/auth/verify", json={"pin": "1234"}).status_code == 200)
+        _server_mod._auth_failures.clear()
+
+        # ---- 改 PIN / 重建 app 后旧令牌必须立即失效 ----
+        token2 = client.post("/api/auth/verify", json={"pin": "1234"}).json().get("token", "")
+        _server_mod.create_app(AppConfig().with_updates(web_pin="4321"))
+        check("重建 app（改 PIN）后旧令牌失效 → 401",
+              client.get("/api/units",
+                         headers={"Authorization": f"Bearer {token2}"}).status_code == 401)
     finally:
         _revoke_all_auth_tokens()
 
@@ -2744,22 +3407,33 @@ def main():
     try:
         # 0. 预检——全模块导入
         test_preflight()
+        test_hash_worker_video_face_detection()
+        test_face_detection_degrades_gracefully()
+        test_config_from_file_tolerates_bad_field()
+        test_web_pin_not_persisted_in_config()
 
         # 核心测试
         test_db()
         test_db_integrity()
         result = test_scanner(temp_root)
         test_save_to_db(result, temp_root)
+        test_scan_worker_path_chunking()
         test_path_revalidation()
         test_scanner_nested_promotion()
+        test_scanner_no_file_loss()
         test_zero_byte_file()
         test_refresh_workflow()
         test_hash_engine(temp_root)
         test_hash_batch(temp_root)
         test_thumbnails(temp_root)
+        test_thumbnail_generator_formats()
         test_heic_converter()
         test_dedup_engine()
+        test_dedup_one_to_one_matching()
+        test_dedup_hash_index_recall()
+        test_dedup_video_frame_matching()
         test_save_dedup_results()
+        test_dedup_results_pagination()
         test_tree_model()
         test_context_menu_lambda_safety()
         test_ui_signal_integration()
@@ -2768,6 +3442,7 @@ def main():
         test_api_app()
         test_unit_response_fields()
         test_thumbnail_binary()
+        test_thumbnail_config_respected()
         test_file_stream()
         test_unread_events_endpoint()
         test_web_static_files()

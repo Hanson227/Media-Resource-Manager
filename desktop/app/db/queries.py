@@ -475,6 +475,29 @@ def get_video_frame_hashes_by_file(session: Session, file_id: int) -> list[str]:
     return [f[0] for f in frames]
 
 
+def get_video_frame_hashes_by_files(session: Session, file_ids: list[int],
+                                    chunk_size: int = 500) -> dict[int, list[str]]:
+    """批量获取多个视频文件的帧 pHash 列表（按时间戳升序）。
+
+    分块执行以避开 SQLite 绑定变量上限；供查重管线一次性装载帧哈希，
+    避免逐文件查询的 N+1。
+
+    返回:
+        {file_id: [phash, ...]}；无帧的文件不出现在结果中。
+    """
+    result: dict[int, list[str]] = {}
+    if not file_ids:
+        return result
+    for start in range(0, len(file_ids), max(1, chunk_size)):
+        chunk = file_ids[start:start + chunk_size]
+        rows = session.query(VideoFrame.file_id, VideoFrame.phash).filter(
+            VideoFrame.file_id.in_(chunk)
+        ).order_by(VideoFrame.file_id, VideoFrame.timestamp_ms).all()
+        for fid, ph in rows:
+            result.setdefault(fid, []).append(ph)
+    return result
+
+
 # ============================================================
 # 查重结果
 # ============================================================
@@ -636,6 +659,30 @@ def get_all_dedup_results(session: Session, limit: int = 200) -> list[DedupResul
     return session.query(DedupResult).order_by(
         DedupResult.similarity_score.desc()
     ).limit(limit).all()
+
+
+def get_dedup_results_page(session: Session, unresolved_only: bool = True,
+                           page: int = 1, per_page: int = 20
+                           ) -> tuple[list[DedupResult], int]:
+    """分页查询查重结果（SQL LIMIT/OFFSET + 精确总数）。
+
+    返回:
+        (当前页结果列表, 满足条件的总条数)。
+
+    说明：旧实现先按 limit=100/200 取全量再内存切片，导致 total 被截断
+    （DB 有 261 行时 total 恒 ≤200，超出部分任何页都取不到）。
+    """
+    query = session.query(DedupResult)
+    if unresolved_only:
+        query = query.filter(DedupResult.is_resolved == False)  # noqa: E712
+    total = query.count()
+    rows = (
+        query.order_by(DedupResult.similarity_score.desc())
+        .offset(max(0, (page - 1) * per_page))
+        .limit(per_page)
+        .all()
+    )
+    return rows, total
 
 
 def get_units_by_ids(session: Session, unit_ids: list[int]) -> list[ResourceUnit]:

@@ -21,7 +21,10 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from app.core.exceptions import ThumbnailGenerationError, UnsupportedFormatError
 from app.utils.constants import THUMBNAIL_FILENAME_TEMPLATE
-from app.utils.image_helpers import VideoCapture_unicode
+from app.utils.image_helpers import VideoCapture_unicode, convert_to_rgb
+from app.utils.media_types import (
+    is_image_extension, is_raw_extension, is_video_extension,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,17 +142,15 @@ class ThumbnailGenerator:
                 pass  # 缓存损坏，重新生成
 
         ext = source_path.suffix.lower()
-        _image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif',
-                       '.heic', '.heif', '.ico', '.jp2'}
-        _raw_exts = {'.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2',
-                     '.pef', '.raf', '.3fr', '.x3f'}
-        if ext in _image_exts:
-            w, h = self._generate_image_thumb(source_path, cache_path)
-            method = "pillow"
-        elif ext in _raw_exts:
+        # 扩展名判定统一走 utils.media_types（单一事实源），
+        # 否则 .m2ts/.rmvb/.vob/.ogv/.asf 等会被误判为不支持
+        if is_raw_extension(ext):
             w, h = self._generate_raw_thumb(source_path, cache_path)
             method = "rawpy"
-        elif ext in {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.3gp', '.ts'}:
+        elif is_image_extension(ext):
+            w, h = self._generate_image_thumb(source_path, cache_path)
+            method = "pillow"
+        elif is_video_extension(ext):
             w, h = self._generate_video_thumb(source_path, cache_path)
             method = "opencv_mid"
         else:
@@ -254,9 +255,8 @@ class ThumbnailGenerator:
             with Image.open(source) as img:
                 # 移除 EXIF 方向信息以避免旋转问题
                 img = self._fix_orientation(img)
-                # 转为 RGB（确保 JPEG 兼容）
-                if img.mode in ("RGBA", "P", "LA"):
-                    img = img.convert("RGB")
+                # 转 RGB（透明区域用白底合成，避免 PNG/GIF 透明区变黑）
+                img = convert_to_rgb(img)
                 # 等比缩放
                 img.thumbnail((self._max_size, self._max_size), Image.LANCZOS)
                 # 保存结果
