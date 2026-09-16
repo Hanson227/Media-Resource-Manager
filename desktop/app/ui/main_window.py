@@ -195,7 +195,7 @@ class MainWindow(QMainWindow):
 
         dedup_btn = QPushButton("查重")
         dedup_btn.clicked.connect(self._on_start_dedup)
-        dedup_btn.setToolTip("自动计算哈希+人脸索引，然后执行查重 (Ctrl+D)")
+        dedup_btn.setToolTip("自动计算哈希索引（MD5/视频帧/感知哈希），然后执行查重 (Ctrl+D)")
         toolbar.addWidget(dedup_btn)
 
         toolbar.addSeparator()
@@ -302,6 +302,7 @@ class MainWindow(QMainWindow):
         self._status_bar = MainStatusBar(self._config)
         self.setStatusBar(self._status_bar)
         self._status_bar.set_api_status(True)
+        self._status_bar.cancel_requested.connect(self._on_cancel_current_task)
 
     # ============================================================
     # 系统托盘
@@ -392,6 +393,7 @@ class MainWindow(QMainWindow):
 
         self._status_bar.set_status(f"正在扫描: {root_path.name}...")
         self._status_bar.set_progress(0, 0)
+        self._status_bar.set_cancellable(True)
 
         # 取消旧 worker 避免信号冲突
         if self._scan_worker and self._scan_worker.isRunning():
@@ -405,6 +407,7 @@ class MainWindow(QMainWindow):
         )
         self._scan_worker.finished.connect(self._on_scan_finished)
         self._scan_worker.error_occurred.connect(self._on_scan_error)
+        self._scan_worker.cancelled.connect(self._on_scan_cancelled)
         self._scan_worker.start()
 
     @Slot(object)
@@ -427,6 +430,17 @@ class MainWindow(QMainWindow):
                 self._tree_view.setCurrentIndex(root_idx)
 
         # 缩略图由 ThumbLoader 按需生成，后台不自动启动哈希/人脸索引
+
+    @Slot()
+    def _on_scan_cancelled(self) -> None:
+        """扫描被取消：收起进度与取消按钮，并丢弃待扫描队列。
+
+        ScanWorker 取消时不 emit finished（避免把不完整的扫描结果写库），
+        因此必须由这个专用处理器收尾，否则取消按钮会一直留在状态栏上。
+        """
+        self._scan_queue = []
+        self._status_bar.set_status("扫描已取消")
+        self._status_bar.hide_progress()
 
     def _start_next_scan(self) -> None:
         """从扫描队列中弹出下一个路径并开始扫描。"""
@@ -928,7 +942,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self, "确认查重",
             f"哈希索引完成。将对 {len(unit_ids)} 个资源单元执行全量比对。\n"
-            f"策略：人脸识别 → MD5 → 视频帧 → pHash → dHash\n\n"
+            f"策略：MD5 → 视频帧 → pHash → dHash\n\n"
             f"确定继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
@@ -939,14 +953,13 @@ class MainWindow(QMainWindow):
 
         self._status_bar.set_status("正在查重...")
         self._status_bar.set_progress(0, 0)
+        self._status_bar.set_cancellable(True)
 
         self._dedup_worker = DedupWorker(self._config, unit_ids)
         self._dedup_worker.progress.connect(self._status_bar.set_progress)
         self._dedup_worker.duplicate_found.connect(self._on_duplicate_found)
         self._dedup_worker.finished.connect(self._on_dedup_finished)
-        self._dedup_worker.error_occurred.connect(
-            lambda e: self._status_bar.set_status(f"查重错误: {e}")
-        )
+        self._dedup_worker.error_occurred.connect(self._on_dedup_error)
         self._dedup_worker.start()
 
     @Slot()
@@ -970,9 +983,9 @@ class MainWindow(QMainWindow):
         if unindexed_total > 0:
             reply = QMessageBox.question(
                 self, "需要先计算哈希索引",
-                f"还有 {unindexed_total} 个文件未计算哈希值（含人脸识别）。\n\n"
+                f"还有 {unindexed_total} 个文件未计算哈希值。\n\n"
                 f"将先自动计算哈希索引，完成后自动进入查重。\n"
-                f"策略：人脸识别 → MD5 → 视频帧 → pHash → dHash\n\n"
+                f"策略：MD5 → 视频帧 → pHash → dHash\n\n"
                 f"确定继续？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
@@ -981,6 +994,7 @@ class MainWindow(QMainWindow):
 
             self._status_bar.set_status(f"正在计算哈希索引（{unindexed_total} 个文件）...")
             self._status_bar.set_progress(0, 0)
+            self._status_bar.set_cancellable(True)
 
             self._hash_worker = HashWorker(self._config)
             self._hash_worker.progress.connect(self._status_bar.set_progress)
@@ -1009,9 +1023,11 @@ class MainWindow(QMainWindow):
     def _on_dedup_finished(self, session) -> None:
         """查重完成。"""
         dup_count = len(session.duplicates_found)
-        self._status_bar.set_status(
-            f"查重完成: {session.total_units_compared} 个单元, 发现 {dup_count} 组重复"
-        )
+        related_count = len(getattr(session, "related_found", ()) or ())
+        status = f"查重完成: {session.total_units_compared} 个单元, 发现 {dup_count} 组重复"
+        if related_count:
+            status += f", {related_count} 对疑似相关"
+        self._status_bar.set_status(status)
         self._status_bar.hide_progress()
 
         if dup_count > 0:
@@ -1032,8 +1048,29 @@ class MainWindow(QMainWindow):
                 lambda a, b: self._resolve_dedup_pair(a, b, "ignore")
             )
             dialog.exec()
+            if related_count:
+                QMessageBox.information(
+                    self, "另有疑似相关",
+                    f"另外发现 {related_count} 对疑似相关单元"
+                    f"（同演员 / 同场景 / 部分文件重叠）。\n\n"
+                    f"它们不是重复，不需要删除，已汇总到「消息中心」供你查看。"
+                )
+        elif related_count:
+            # 只提醒，不推处置：用户明确表示"可以不删，但要知道"
+            QMessageBox.information(
+                self, "查重完成",
+                f"未发现重复的资源单元。\n\n"
+                f"但有 {related_count} 对疑似相关（同演员 / 同场景 / 部分文件重叠），"
+                f"已汇总到「消息中心」——仅作了解，不建议删除。"
+            )
         else:
             QMessageBox.information(self, "查重完成", "未发现重复的资源单元。")
+
+    @Slot(str)
+    def _on_dedup_error(self, msg: str) -> None:
+        """查重失败：报错并收起进度与取消按钮。"""
+        self._status_bar.set_status(f"查重错误: {msg}")
+        self._status_bar.hide_progress()
 
     def _resolve_dedup_pair(self, unit_a_id: int, unit_b_id: int, resolution: str) -> None:
         """按单元对处置查重结果（keep_a/keep_b/whitelist/ignore）。"""
@@ -1060,6 +1097,7 @@ class MainWindow(QMainWindow):
         self._cancel_all_workers()
         self._status_bar.set_status("正在后台计算文件哈希与人脸索引...")
         self._status_bar.set_progress(0, 0)
+        self._status_bar.set_cancellable(True)
 
         self._hash_worker = HashWorker(self._config)
         self._hash_worker.progress.connect(self._status_bar.set_progress)
@@ -1256,6 +1294,16 @@ class MainWindow(QMainWindow):
                 self._hash_worker.wait(3000)
 
             reset_db(self._config.db_path)
+            # 缩略图缓存随库一起作废：重置后 file_id 从 1 重新分配，旧缓存既不会
+            # 再被命中（读取端会校验归属），也没有别的回收时机 → 直接清空回收磁盘
+            try:
+                from app.services.cleanup_service import CleanupService
+                cleaned = CleanupService.clear_thumbnail_cache(
+                    self._config.thumbnail_cache_dir)
+                if cleaned:
+                    logger.info(f"重置数据库：已清空缩略图缓存 {cleaned} 个文件")
+            except Exception as e:
+                logger.warning(f"清空缩略图缓存失败: {e}")
             self._current_unit_id = None
             self._accordion.reset()
             self._tree_view.refresh_model()
@@ -1503,6 +1551,45 @@ class MainWindow(QMainWindow):
                     w.wait()
         self._grid_view._cancel_all_workers()
 
+    def stop_background_workers(self) -> None:
+        """停止全部后台任务（退出流程与测试用）。"""
+        self._cancel_all_workers()
+        self._status_bar.set_cancellable(False)
+
+    @Slot()
+    def _on_cancel_current_task(self) -> None:
+        """状态栏「取消」按钮：停止当前正在运行的后台任务。
+
+        worker.cancel() 只是置标志位，工作线程在文件/单元之间的检查点退出，
+        因此按钮点击后会先禁用，由 finished 处理器收起进度与按钮。
+        """
+        active = [
+            w for w in (self._scan_worker, self._hash_worker, self._dedup_worker)
+            if w is not None and w.isRunning()
+        ]
+        if not active:
+            self._status_bar.set_cancellable(False)
+            self._status_bar.set_status("没有正在运行的任务")
+            return
+        for w in active:
+            try:
+                w.cancel()
+                logger.info(f"用户取消了后台任务: {type(w).__name__}")
+            except Exception as e:  # noqa: BLE001 — 取消失败不应影响界面
+                logger.error(f"取消 {type(w).__name__} 失败: {e}")
+        self._status_bar.set_status("正在停止...")
+
+    def closeEvent(self, event) -> None:
+        """关闭窗口前先停掉后台线程。
+
+        原先没有 closeEvent，关窗时 Qt 直接退出事件循环，main.py 的
+        aboutToQuit 只做 api.stop() + DatabaseManager.dispose()，
+        后台 worker 仍在写库就被析构 —— 既可能丢数据也可能崩溃。
+        """
+        logger.info("关闭主窗口，停止后台任务...")
+        self._cancel_all_workers()
+        super().closeEvent(event)
+
     # ============================================================
     # 键盘快捷键
     # ============================================================
@@ -1572,7 +1659,7 @@ class MainWindow(QMainWindow):
             "用于管理电脑上的影视资源文件夹。\n\n"
             "核心功能：\n"
             "• 资源单元自动识别与管理\n"
-            "• 智能文件查重（MD5 / 感知哈希 / 人脸识别）\n"
+            "• 智能文件查重（MD5 / 视频帧 / 感知哈希）\n"
             "• 实时文件监控\n"
             "• 局域网 SMB 共享\n"
             "• 安卓端 API 预留",

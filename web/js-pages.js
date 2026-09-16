@@ -163,7 +163,9 @@ const UnitsPage = {
                     </div>
                     <button class="card-more" @click.stop="$root.showSheet(u.name, [
                       { label: u.is_starred ? '取消收藏' : '收藏', icon: u.is_starred ? 'mdi-star-off' : 'mdi-star-outline',
-                        action: () => toggleStar(u) }
+                        action: () => toggleStar(u) },
+                      { label: '删除文件夹', icon: 'mdi-delete-outline', danger: true,
+                        action: () => deleteUnit(u) }
                     ])" :title="u.is_starred ? '取消收藏' : '收藏'"><span class="mdi mdi-dots-horizontal"></span></button>
                   </div>
                 </div>
@@ -226,6 +228,20 @@ const UnitsPage = {
           if (ui >= 0) this.roots[ri].units[ui] = { ...unit };
         }
       } catch (e) { alert('操作失败: ' + e.message); }
+    },
+
+    /** 删除整个文件夹（资源单元）：移至回收站 + 删库记录，与桌面端一致。 */
+    async deleteUnit(unit) {
+      let msg = '确定将文件夹「' + unit.name + '」移至回收站？';
+      if (unit.file_count > 0) msg += '\n\n该文件夹包含 ' + unit.file_count + ' 个文件。';
+      msg += '\n（文件进入系统回收站，可手动恢复）';
+      if (!confirm(msg)) return;
+      try {
+        await api(this.serverUrl, '/api/units/' + unit.id, { method: 'DELETE' });
+        for (const g of this.roots) g.units = g.units.filter(x => x.id !== unit.id);
+        // 组内清空后整组消失，避免留下一个空标题
+        this.roots = this.roots.filter(g => g.units.length > 0);
+      } catch (e) { alert('删除失败: ' + e.message); }
     },
 
     setSort(field) {
@@ -355,8 +371,11 @@ const UnitFilesPage = {
       <template v-else>
         <div class="feed-header">
           <h2>{{ unitName }}</h2>
-          <div style="display:flex;align-items:center;gap:6px">
+          <div class="feed-header-actions">
             <span class="count">{{ filteredFiles.length }} / {{ files.length }} 个文件</span>
+            <button class="sort-btn" :class="{ active: selectMode }" @click="toggleSelectMode">
+              <span class="mdi" :class="selectMode ? 'mdi-close' : 'mdi-checkbox-multiple-marked-outline'"></span> {{ selectMode ? '取消' : '管理' }}
+            </button>
             <button class="sort-btn" :class="{ active: sortBy === 'size' }" @click="setSort('size')">
               <span class="mdi" :class="sortIcon('size')"></span> 大小
             </button>
@@ -380,6 +399,7 @@ const UnitFilesPage = {
         </div>
         <div class="feed-grid">
           <div v-for="f in sortedFiles" :key="f.id" class="feed-item"
+            :class="{ selected: selectMode && selectedIds.has(f.id) }"
             :data-file-id="f.id">
             <div class="thumb-wrap">
               <img :src="thumbUrl(f.id)" loading="lazy"
@@ -391,6 +411,9 @@ const UnitFilesPage = {
               </span>
               <span v-if="f.media_type === 'video'" class="vid-badge"><span class="mdi mdi-play"></span></span>
               <span v-if="f.media_type === 'video' && f.duration_ms" class="dur-badge">{{ fmtDuration(f.duration_ms) }}</span>
+              <span v-if="selectMode" class="select-mark">
+                <span class="mdi" :class="selectedIds.has(f.id) ? 'mdi-check-circle' : 'mdi-circle-outline'"></span>
+              </span>
             </div>
             <div class="file-info">
               <div class="info-row">
@@ -398,15 +421,31 @@ const UnitFilesPage = {
                   <div class="name">{{ f.filename }}</div>
                   <div class="meta">{{ formatSize(f.size_bytes) }}</div>
                 </div>
-                <button class="card-more" @click.stop="$root.showSheet(f.filename, [
+                <button v-if="!selectMode" class="card-more" @click.stop="$root.showSheet(f.filename, [
+                  { label: '多选管理', icon: 'mdi-checkbox-multiple-marked-outline',
+                    action: () => enterSelectMode(f.id) },
                   { label: '删除文件', icon: 'mdi-delete-outline', danger: true,
-                    action: () => _deleteFile(f) }
+                    action: () => deleteFile(f) }
                 ])" title="更多操作"><span class="mdi mdi-dots-horizontal"></span></button>
               </div>
             </div>
           </div>
         </div>
       </template>
+
+      <!-- 多选操作栏（仅选择模式下出现）；spacer 让最后一个卡片不被浮层遮住 -->
+      <div v-if="selectMode" class="select-bar-spacer"></div>
+      <div v-if="selectMode" class="select-bar">
+        <button class="select-bar-btn" @click="toggleSelectAll">
+          <span class="mdi" :class="allSelected ? 'mdi-checkbox-blank-outline' : 'mdi-checkbox-multiple-marked-outline'"></span>
+          {{ allSelected ? '取消全选' : '全选' }}
+        </button>
+        <span class="select-bar-count">已选 {{ selectedIds.size }}</span>
+        <button class="select-bar-btn danger" :disabled="selectedIds.size === 0 || deleting" @click="deleteSelected">
+          <span class="mdi" :class="deleting ? 'mdi-loading mdi-spin' : 'mdi-delete-outline'"></span>
+          删除
+        </button>
+      </div>
     </div>
   `,
   props: ['serverUrl'],
@@ -420,8 +459,16 @@ const UnitFilesPage = {
     allTags: [],
     activeTagIds: [],
     tagMapping: {},
+    // 文件管理（多选删除）
+    selectMode: false,
+    selectedIds: new Set(),
+    deleting: false,
   }},
   computed: {
+    allSelected() {
+      return this.sortedFiles.length > 0
+        && this.sortedFiles.every(f => this.selectedIds.has(f.id));
+    },
     filteredFiles() {
       let result = this.files;
       if (this.searchQuery) {
@@ -451,12 +498,64 @@ const UnitFilesPage = {
     },
   },
   methods: {
-    async _deleteFile(file) {
-      if (!confirm('确定删除「' + file.filename + '」？')) return;
+    /* ---- 文件管理：删除（移至回收站，与桌面端一致） ---- */
+
+    /** 删除单个文件（移至回收站）。方法名不能带下划线前缀：
+     *  Vue 3 渲染代理不暴露 `_` 开头的 key，模板里会抛 ReferenceError。 */
+    async deleteFile(file) {
+      if (!confirm('确定将「' + file.filename + '」移至回收站？\n（文件进入系统回收站，可手动恢复）')) return;
       try {
         await api(this.serverUrl, '/api/files/' + file.id, { method: 'DELETE' });
         this.files = this.files.filter(f => f.id !== file.id);
+        this.selectedIds.delete(file.id);
       } catch (e) { alert('删除失败: ' + e.message); }
+    },
+
+    enterSelectMode(fileId) {
+      this.selectMode = true;
+      if (fileId != null) this.selectedIds.add(fileId);
+    },
+
+    toggleSelectMode() {
+      this.selectMode = !this.selectMode;
+      if (!this.selectMode) this.selectedIds.clear();
+    },
+
+    toggleSelect(file) {
+      if (this.selectedIds.has(file.id)) this.selectedIds.delete(file.id);
+      else this.selectedIds.add(file.id);
+    },
+
+    toggleSelectAll() {
+      if (this.allSelected) this.selectedIds.clear();
+      else this.sortedFiles.forEach(f => this.selectedIds.add(f.id));
+    },
+
+    /** 批量删除选中文件（服务端逐条返回成功/失败，部分失败也保留成功项的结果）。 */
+    async deleteSelected() {
+      const ids = Array.from(this.selectedIds);
+      if (!ids.length) return;
+      const label = ids.length === 1 ? '该文件' : '选中的 ' + ids.length + ' 个文件';
+      if (!confirm('确定将' + label + '移至回收站？\n（文件进入系统回收站，可手动恢复）')) return;
+      this.deleting = true;
+      try {
+        const res = await api(this.serverUrl, '/api/files/batch-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_ids: ids, mode: 'trash' }),
+        });
+        const done = new Set(res.deleted || []);
+        this.files = this.files.filter(f => !done.has(f.id));
+        this.selectedIds.clear();
+        this.selectMode = false;
+        if (res.failed && res.failed.length) {
+          alert('部分文件删除失败：\n' + res.failed.map(x => '#' + x.file_id + ': ' + x.reason).join('\n'));
+        }
+      } catch (e) {
+        alert('删除失败: ' + e.message);
+      } finally {
+        this.deleting = false;
+      }
     },
 
     thumbUrl(id) { return mediaUrl(this.serverUrl, '/api/files/' + id + '/thumbnail'); },
@@ -567,6 +666,12 @@ const UnitFilesPage = {
           exclude: 'button, a, input, select, textarea',
           onTap: (el) => {
             const id = parseInt(el.dataset.fileId, 10);
+            // 选择模式下点击 = 勾选/取消，不再进入预览
+            if (this.selectMode) {
+              const picked = this.files.find((x) => x.id === id);
+              if (picked) this.toggleSelect(picked);
+              return;
+            }
             const f = this.sortedFiles.find((x) => x.id === id);
             if (f) this.preview(f);
           },
@@ -577,6 +682,8 @@ const UnitFilesPage = {
   beforeUnmount() {
     if (this._ptrDestroy) { this._ptrDestroy(); this._ptrDestroy = null; }
     if (this._tapDestroy) { this._tapDestroy(); this._tapDestroy = null; }
+    this.selectMode = false;
+    this.selectedIds.clear();
   }
 };
 
@@ -1399,33 +1506,94 @@ const PreviewPage = {
 const DedupPage = {
   template: `
     <div class="page">
+      <!-- 一键查重：与桌面端一致，先为未索引文件算哈希（MD5/视频帧/人脸）再比对 -->
+      <div class="dedup-run">
+        <div class="dedup-run-text">
+          <div class="run-title">一键查重</div>
+          <div class="run-sub">{{ runSub }}</div>
+        </div>
+        <button class="btn btn-primary dedup-run-btn" :disabled="running" @click="startDedup">
+          <span class="mdi" :class="running ? 'mdi-loading mdi-spin' : 'mdi-compare'"></span>
+          {{ running ? '查重中…' : '开始查重' }}
+        </button>
+      </div>
+      <div v-if="running && runProgress" class="run-progress">
+        <div class="run-progress-bar" :style="{ width: runPercent + '%' }"></div>
+      </div>
+
+      <div class="dedup-tabs">
+        <button v-for="t in tabs" :key="t.key" class="dedup-tab"
+          :class="{ active: level === t.key }" @click="setLevel(t.key)">
+          {{ t.label }}<span class="tab-count">{{ t.count }}</span>
+        </button>
+      </div>
+
       <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
       <template v-else-if="results.length === 0">
         <div class="empty-state">
-          <span class="mdi mdi-check-circle-outline" style="color:var(--green)"></span>
-          <p>暂无查重结果</p>
+          <span class="mdi" :class="level === 'related' ? 'mdi-account-search-outline' : 'mdi-check-circle-outline'"
+            :style="{ color: level === 'related' ? 'var(--amber)' : 'var(--green)' }"></span>
+          <p>{{ level === 'related' ? '暂无疑似相关单元' : '暂无查重结果' }}</p>
         </div>
       </template>
       <template v-else>
-        <div v-for="r in results" :key="r.id" class="card" @click="$router.push('/dedup/' + r.id)">
+        <div v-for="r in results" :key="r.id" class="card"
+          :class="{ 'card-related': r.match_level === 'related' }"
+          @click="$router.push('/dedup/' + r.id)">
           <div class="card-row">
-            <div class="card-icon" :class="scoreColor(r.similarity_score)"><span class="mdi mdi-compare-arrows"></span></div>
+            <div class="card-icon" :class="r.match_level === 'related' ? 'amber' : scoreColor(r.similarity_score)">
+              <span class="mdi" :class="r.match_level === 'related' ? 'mdi-account-multiple-outline' : 'mdi-compare-arrows'"></span>
+            </div>
             <div class="card-body">
               <div class="card-title">{{ r.unit_a_name }} ↔ {{ r.unit_b_name }}</div>
-              <div class="card-sub">匹配 {{ r.match_count }} 个文件 · {{ r.match_types }}</div>
+              <div class="card-sub">
+                <span class="lvl-badge" :class="r.match_level">{{ levelLabel(r.match_level) }}</span>
+                <span v-if="r.match_level === 'related'">{{ r.match_count }} 处线索 · 不建议删除</span>
+                <span v-else>匹配 {{ r.match_count }} 个文件 · {{ typeLabels(r.match_types) }}</span>
+              </div>
             </div>
             <div class="card-meta">
-              <div class="count" :style="{color: scoreHex(r.similarity_score)}">{{ (r.similarity_score * 100).toFixed(0) }}%</div>
-              <div class="label">相似</div>
+              <div class="count" :style="{color: r.match_level === 'related' ? 'var(--amber)' : scoreHex(r.similarity_score)}">
+                {{ (r.similarity_score * 100).toFixed(0) }}%
+              </div>
+              <div class="label">{{ r.match_level === 'related' ? '杰卡德' : '相似' }}</div>
             </div>
           </div>
         </div>
+        <button v-if="hasMore" class="btn btn-secondary more-btn" @click="loadMore">加载更多</button>
       </template>
     </div>
   `,
   props: ['serverUrl'],
   emits: ['loading'],
-  data() { return { loading: true, results: [] };},
+  data() { return {
+    loading: true, results: [], level: 'duplicate', total: 0, page: 1,
+    counts: { duplicate: 0, related: 0, total: 0 },
+    running: false, runPhase: '', runProgress: null, runSummary: '',
+    tabs: [
+      { key: 'duplicate', label: '疑似重复', count: 0 },
+      { key: 'related', label: '疑似相关', count: 0 },
+    ],
+  };},
+  computed: {
+    hasMore() { return this.results.length < this.total; },
+    runPercent() {
+      if (!this.runProgress || !this.runProgress[1]) return 0;
+      return Math.min(100, Math.round(this.runProgress[0] / this.runProgress[1] * 100));
+    },
+    runSub() {
+      if (this.running) {
+        if (this.runPhase === 'indexing' && this.runProgress) {
+          return '正在计算哈希 ' + this.runProgress[0] + ' / ' + this.runProgress[1];
+        }
+        if (this.runPhase === 'comparing' && this.runProgress) {
+          return '正在比对 ' + this.runProgress[0] + ' / ' + this.runProgress[1] + ' 对';
+        }
+        return '任务已提交，等待开始…';
+      }
+      return this.runSummary || '对所有资源单元比对重复与疑似相关';
+    },
+  },
   methods: {
     scoreColor(s) {
       if (s >= 0.9) return 'red';
@@ -1436,16 +1604,123 @@ const DedupPage = {
       if (s >= 0.9) return 'var(--red)';
       if (s >= 0.8) return 'var(--accent)';
       return 'var(--blue)';
-    }
+    },
+    levelLabel(l) { return l === 'related' ? '疑似相关' : '疑似重复'; },
+    typeLabels(types) {
+      const map = { md5: '内容相同', phash: '画面相似', dhash: '结构相似',
+                    video: '视频帧匹配', face: '人脸相似' };
+      return String(types || '').split(',').filter(Boolean)
+        .map(t => map[t] || t).join(' · ');
+    },
+    setLevel(key) {
+      if (this.level === key) return;
+      this.level = key;
+      this.results = [];
+      this.page = 1;
+      this.total = 0;
+      this.load(true);
+    },
+    async loadCounts() {
+      try {
+        const c = await api(this.serverUrl, '/api/dedup/counts');
+        this.counts = c;
+        this.tabs[0].count = c.duplicate || 0;
+        this.tabs[1].count = c.related || 0;
+      } catch (e) { /* 计数失败不影响列表 */ }
+    },
+    async load(reset) {
+      this.loading = reset;
+      try {
+        const data = await api(this.serverUrl,
+          '/api/dedup/results?unresolved_only=true&level=' + this.level
+          + '&page=' + this.page + '&per_page=30');
+        const rows = data.results || [];
+        this.results = reset ? rows : this.results.concat(rows);
+        this.total = data.total || 0;
+      } catch (e) {
+        if (reset) this.results = [];
+      } finally {
+        this.loading = false;
+        this.$emit('loading', false);
+      }
+    },
+    loadMore() {
+      this.page += 1;
+      this.load(false);
+    },
+    async refresh() {
+      await this.loadCounts();
+      this.page = 1;
+      await this.load(true);
+    },
+    async startDedup() {
+      if (this.running) return;
+      if (!confirm('对所有资源单元执行查重？\n（会先为未索引文件计算哈希/人脸，耗时可能较长）')) return;
+      let unitIds = [];
+      try {
+        const data = await api(this.serverUrl, '/api/units');
+        unitIds = (data.units || []).map(u => u.id);
+      } catch (e) {
+        alert('获取资源单元失败：' + e.message);
+        return;
+      }
+      if (unitIds.length < 2) { alert('至少需要 2 个资源单元才能查重'); return; }
+
+      this.running = true;
+      this.runPhase = 'queued';
+      this.runProgress = null;
+      this.runSummary = '';
+      try {
+        const res = await api(this.serverUrl, '/api/dedup/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ unit_ids: unitIds, index_first: true }),
+        });
+        this.pollTask(res.task_id);
+      } catch (e) {
+        this.running = false;
+        alert('查重启动失败：' + e.message);
+      }
+    },
+    pollTask(taskId) {
+      if (this._timer) clearInterval(this._timer);
+      this._timer = setInterval(async () => {
+        let t;
+        try {
+          t = await api(this.serverUrl, '/api/dedup/run/' + taskId);
+        } catch (e) {
+          this.stopPolling();
+          alert('查重状态查询失败：' + e.message);
+          return;
+        }
+        this.runPhase = t.phase || t.status;
+        this.runProgress = t.progress || null;
+        if (t.status === 'completed') {
+          this.stopPolling();
+          const r = t.result || {};
+          this.runSummary = '完成：重复 ' + (r.duplicates_found || 0) + ' 组 · 疑似相关 '
+            + (r.related_found || 0) + ' 对（耗时 ' + (r.elapsed_seconds || 0) + 's）';
+          await this.refresh();
+        } else if (t.status === 'failed') {
+          this.stopPolling();
+          alert('查重失败：' + (t.error || '未知错误'));
+        }
+      }, 1000);
+    },
+    stopPolling() {
+      if (this._timer) { clearInterval(this._timer); this._timer = null; }
+      this.running = false;
+      this.runProgress = null;
+      this.runPhase = '';
+    },
   },
   async mounted() {
     this.$emit('loading', true);
-    try {
-      const data = await api(this.serverUrl, '/api/dedup/results?unresolved_only=true');
-      this.results = data.results || [];
-    } catch(e) {
-      this.results = [];
-    } finally { this.loading = false; this.$emit('loading', false); }
+    await this.loadCounts();
+    await this.load(true);
+  },
+  beforeUnmount() {
+    if (this._timer) { clearInterval(this._timer); this._timer = null; }
   }
 };
 
@@ -1455,28 +1730,53 @@ const DedupDetailPage = {
     <div class="page">
       <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
       <template v-else-if="detail">
-        <div class="dedup-header">
-          <div class="score">{{ (detail.similarity_score * 100).toFixed(0) }}%</div>
+        <div class="dedup-header" :class="{ 'is-related': isRelated }">
+          <div class="score" :class="{ related: isRelated }">
+            {{ isRelated ? '疑似相关' : (detail.similarity_score * 100).toFixed(0) + '%' }}
+          </div>
           <div class="units">{{ detail.unit_a.name }} ↔ {{ detail.unit_b.name }}</div>
-          <div class="match-info">匹配 {{ detail.match_count }} 个文件</div>
+          <div class="match-info">
+            杰卡德 {{ (detail.similarity_score * 100).toFixed(1) }}% ·
+            匹配 {{ detail.match_count }} 个文件<span v-if="faceHints.length"> · 人脸线索 {{ faceHints.length }} 对</span>
+          </div>
+          <div v-if="isRelated" class="related-note">
+            这两个单元有同演员 / 同场景 / 部分文件重叠的迹象，但未达「重复」标准，
+            仅供了解，<b>不建议删除</b>。
+          </div>
           <div v-if="!detail.is_resolved" class="resolve-actions">
-            <button class="btn btn-success" @click="resolve('keep_a')">保留 A</button>
-            <button class="btn btn-primary" @click="resolve('keep_b')">保留 B</button>
+            <template v-if="!isRelated">
+              <button class="btn btn-success" @click="resolve('keep_a')">保留 A</button>
+              <button class="btn btn-primary" @click="resolve('keep_b')">保留 B</button>
+            </template>
             <button class="btn btn-secondary" @click="resolve('whitelist')">白名单</button>
+            <button class="btn btn-secondary" @click="resolve('ignore')">暂时忽略</button>
           </div>
           <div v-else style="margin-top:12px;font-size:13px;color:var(--text-secondary)">
-            已处理：{{ detail.resolution }}
+            已处理：{{ resolutionLabel(detail.resolution) }}
           </div>
         </div>
-        <h3 style="font-size:14px;padding:8px 4px;color:var(--text-secondary)">匹配文件</h3>
-        <div v-for="m in detail.file_matches || []" :key="m.id" class="match-pair">
+
+        <h3 class="section-title">匹配文件（计入判定）</h3>
+        <div v-for="m in countedMatches" :key="m.id" class="match-pair">
           <span class="mdi mdi-file-document-outline" style="color:var(--text-tertiary)"></span>
-          <span class="filename">#{{ m.file_a_id }} ↔ #{{ m.file_b_id }}</span>
-          <span class="tag" :class="m.match_type">{{ m.match_type }}</span>
+          <span class="filename">{{ m.file_a_name }} ↔ {{ m.file_b_name }}</span>
+          <span class="tag" :class="m.match_type">{{ typeLabel(m.match_type) }}</span>
         </div>
-        <div v-if="!detail.file_matches || detail.file_matches.length === 0" class="empty-state" style="padding:20px">
+        <div v-if="countedMatches.length === 0" class="empty-state" style="padding:20px">
           <p>无匹配文件详情</p>
         </div>
+
+        <template v-if="faceHints.length">
+          <h3 class="section-title">人脸相似线索（未计入重复判定）</h3>
+          <div v-for="m in faceHints" :key="'f' + m.id" class="match-pair hint-pair">
+            <span class="mdi mdi-account-outline" style="color:var(--amber)"></span>
+            <span class="filename">{{ m.file_a_name }} ↔ {{ m.file_b_name }}</span>
+            <span class="tag face">人脸相似</span>
+          </div>
+          <div class="face-hint-note">
+            人脸相似只说明是同一个人，不能说明是同一份文件，请人工判断。
+          </div>
+        </template>
       </template>
       <template v-else>
         <div class="empty-state"><p>查重结果不存在</p></div>
@@ -1486,10 +1786,27 @@ const DedupDetailPage = {
   props: ['serverUrl'],
   emits: ['loading'],
   data() { return { loading: true, detail: null };},
+  computed: {
+    isRelated() { return !!this.detail && this.detail.match_level === 'related'; },
+    matches() { return (this.detail && this.detail.file_matches) || []; },
+    /** 人脸行是"线索"不是"证据"：服务端 is_hint 标记优先，旧数据按 match_type 兜底 */
+    faceHints() { return this.matches.filter(m => m.is_hint || m.match_type === 'face'); },
+    countedMatches() { return this.matches.filter(m => !(m.is_hint || m.match_type === 'face')); },
+  },
   methods: {
+    typeLabel(t) {
+      const map = { md5: '内容相同', phash: '画面相似', dhash: '结构相似',
+                    video: '视频帧匹配', face: '人脸相似' };
+      return map[t] || t;
+    },
+    resolutionLabel(r) {
+      const map = { keep_a: '保留 A', keep_b: '保留 B', whitelist: '加入白名单',
+                    ignore: '暂时忽略', merge: '合并', pending: '待处理' };
+      return map[r] || r;
+    },
     async resolve(action) {
       try {
-        await api(this.serverUrl, `/api/dedup/results/${this.$route.params.id}/resolve`, {
+        await api(this.serverUrl, '/api/dedup/results/' + this.$route.params.id + '/resolve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ resolution: action }),
@@ -1502,7 +1819,7 @@ const DedupDetailPage = {
   async mounted() {
     this.$emit('loading', true);
     try {
-      this.detail = await api(this.serverUrl, `/api/dedup/results/${this.$route.params.id}`);
+      this.detail = await api(this.serverUrl, '/api/dedup/results/' + this.$route.params.id);
     } catch(e) { this.detail = null; }
     finally { this.loading = false; this.$emit('loading', false); }
   }

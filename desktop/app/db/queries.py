@@ -18,7 +18,7 @@ from app.db.models import (
     Whitelist, ScanSession, FileTag, FileTagMapping,
 )
 from app.utils.constants import (
-    MessageType, ResolutionStatus, UnitStatus, WhitelistMatchType,
+    MatchLevel, MessageType, ResolutionStatus, UnitStatus, WhitelistMatchType,
 )
 
 
@@ -505,7 +505,8 @@ def get_video_frame_hashes_by_files(session: Session, file_ids: list[int],
 def upsert_dedup_result(session: Session, unit_a_id: int, unit_b_id: int,
                         similarity_score: float, match_count: int,
                         total_files_a: int, total_files_b: int,
-                        match_types: str) -> DedupResult:
+                        match_types: str,
+                        match_level: str = MatchLevel.DUPLICATE.value) -> DedupResult:
     """插入或更新查重结果（按单元对去重）。
 
     注意：已处置（is_resolved=True）的记录不会被重置为 pending ——
@@ -526,6 +527,7 @@ def upsert_dedup_result(session: Session, unit_a_id: int, unit_b_id: int,
         existing.total_files_a = total_files_a
         existing.total_files_b = total_files_b
         existing.match_types = match_types
+        existing.match_level = match_level
         if not existing.is_resolved:
             # 仅在用户尚未处置时保持 pending；已处置的保留原状态
             existing.is_resolved = False
@@ -542,6 +544,7 @@ def upsert_dedup_result(session: Session, unit_a_id: int, unit_b_id: int,
             total_files_a=total_files_a,
             total_files_b=total_files_b,
             match_types=match_types,
+            match_level=match_level,
         )
         session.add(dr)
         session.flush()
@@ -662,9 +665,17 @@ def get_all_dedup_results(session: Session, limit: int = 200) -> list[DedupResul
 
 
 def get_dedup_results_page(session: Session, unresolved_only: bool = True,
-                           page: int = 1, per_page: int = 20
+                           page: int = 1, per_page: int = 20,
+                           level: Optional[str] = None
                            ) -> tuple[list[DedupResult], int]:
     """分页查询查重结果（SQL LIMIT/OFFSET + 精确总数）。
+
+    参数:
+        unresolved_only: 仅返回未处置的记录。
+        page / per_page: 分页。
+        level: 仅返回指定命中等级（duplicate / related）；None 表示不过滤。
+            实测本库 166 个单元会产生 200+ 对"疑似相关"，不过滤时它们会和
+            真正的重复混在一页里 —— 客户端按等级分开取才能各看各的。
 
     返回:
         (当前页结果列表, 满足条件的总条数)。
@@ -675,6 +686,8 @@ def get_dedup_results_page(session: Session, unresolved_only: bool = True,
     query = session.query(DedupResult)
     if unresolved_only:
         query = query.filter(DedupResult.is_resolved == False)  # noqa: E712
+    if level:
+        query = query.filter(DedupResult.match_level == level)
     total = query.count()
     rows = (
         query.order_by(DedupResult.similarity_score.desc())
@@ -683,6 +696,21 @@ def get_dedup_results_page(session: Session, unresolved_only: bool = True,
         .all()
     )
     return rows, total
+
+
+def count_dedup_results_by_level(session: Session) -> dict[str, int]:
+    """按命中等级统计未处置的查重结果数量（供客户端分组显示）。"""
+    rows = (
+        session.query(DedupResult.match_level, func.count(DedupResult.id))
+        .filter(DedupResult.is_resolved == False)  # noqa: E712
+        .group_by(DedupResult.match_level)
+        .all()
+    )
+    counts = {"duplicate": 0, "related": 0}
+    for level, n in rows:
+        counts[level or MatchLevel.DUPLICATE.value] = int(n)
+    counts["total"] = counts["duplicate"] + counts["related"]
+    return counts
 
 
 def get_units_by_ids(session: Session, unit_ids: list[int]) -> list[ResourceUnit]:

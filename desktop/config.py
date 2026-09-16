@@ -12,6 +12,9 @@ from typing import FrozenSet, Optional, get_type_hints, get_origin
 import json
 import warnings
 
+# 仅依赖无第三方依赖的常量模块，保持 config 可在早期安全导入
+from app.utils.constants import FACE_SIMILARITY_THRESHOLD
+
 # 敏感字段不写入 config.json（后者在版本库中被跟踪，明文 PIN 会被提交）。
 # 改为存放在 config.json 同级的 data/.web_pin —— data/ 已被 .gitignore 忽略。
 _SENSITIVE_FIELDS = frozenset({"web_pin"})
@@ -92,8 +95,16 @@ class AppConfig:
     dhash_hamming_threshold: int = 5
     """dHash 汉明距离阈值，≤ 此值视为匹配。"""
 
-    face_distance_threshold: float = 0.6
-    """人脸向量欧氏距离阈值，≤ 此值视为同一人物。"""
+    face_similarity_threshold: float = FACE_SIMILARITY_THRESHOLD
+    """人脸特征余弦相似度阈值，≥ 此值视为同一人物（SFace 官方推荐 0.363）。"""
+
+    related_min_matches: int = 2
+    """"疑似相关"的最少证据数（计数匹配 + 人脸线索之和）。
+
+    达不到"重复"阈值、但证据数 ≥ 此值的单元对会被记为一档"疑似相关"仅作提醒。
+    实测：本库 166 个单元中，证据 ≥1 有 672 对（含大量单条人脸误配），
+    ≥2 有 234 对，≥3 有 99 对。取 2 以过滤"只有一条人脸凑巧相似"的噪声。
+    """
 
     # ========== 人脸识别 ==========
     face_detection_enabled: bool = True

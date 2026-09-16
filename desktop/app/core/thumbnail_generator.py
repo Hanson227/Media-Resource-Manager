@@ -97,8 +97,29 @@ class ThumbnailGenerator:
         return cache_dir / THUMBNAIL_FILENAME_TEMPLATE.format(file_id=file_id, fmt=self._format)
 
     def exists(self, file_id: int, cache_dir: Path) -> bool:
-        """检查缩略图缓存是否已存在。"""
+        """检查缩略图缓存是否已存在。
+
+        注意：只能回答"有没有"，不能回答"是不是这个文件的"。缓存以 file_id
+        命名而 file_id 会被复用（重置数据库、删除最大 id 后重扫），要判断归属
+        请用 `valid_cache_path()` / `is_cache_valid()`。
+        """
         return self.get_thumbnail_path(file_id, cache_dir).is_file()
+
+    def valid_cache_path(self, file_id: int, cache_dir: Path,
+                         source_path: Optional[Path]) -> Optional[Path]:
+        """返回可安全用于该源文件的缓存路径；缓存缺失/不属于该文件时返回 None。
+
+        参数:
+            file_id: 文件 ID（缓存文件名的一部分）。
+            cache_dir: 缓存目录。
+            source_path: 源文件路径；None 表示无法校验归属 → 一律视为未命中。
+        """
+        if source_path is None:
+            return None
+        path = self.get_thumbnail_path(file_id, cache_dir)
+        if path.is_file() and self.is_cache_valid(path, source_path):
+            return path
+        return None
 
     def generate(self, source_path: Path, cache_dir: Path,
                  file_id: Optional[int] = None) -> ThumbnailInfo:
@@ -128,7 +149,7 @@ class ThumbnailGenerator:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 检查缓存（同时校验源文件匹配）
-        if cache_path.is_file() and self._check_cache_valid(cache_path, source_path):
+        if cache_path.is_file() and self.is_cache_valid(cache_path, source_path):
             try:
                 with Image.open(cache_path) as im:
                     w, h = im.size
@@ -221,17 +242,32 @@ class ThumbnailGenerator:
         return thumbnail_path.with_name(thumbnail_path.name + ".meta")
 
     @staticmethod
-    def _check_cache_valid(thumbnail_path: Path, source_path: Path) -> bool:
-        """校验缓存是否与源文件匹配（通过 sidecar meta 对比 mtime 和 size）。"""
+    def is_cache_valid(thumbnail_path: Path, source_path: Path) -> bool:
+        """校验缓存是否**属于**该源文件且未过期（读 sidecar meta）。
+
+        判定分两步：
+
+        1. **归属（必须）**：meta.source_path 必须等于源路径。缓存文件名只带
+           file_id，而 file_id 会被复用 —— 「工具 → 重置数据库」后 id 从 1 重新
+           分配，删除最大 id 的记录后下一条也会拿到同一个 id。只凭文件名无法
+           区分"这是不是这个文件的图"，归属不符一律视为无效。
+        2. **新鲜度（尽力）**：源文件可 stat 时再比对 mtime/size，捕捉"原地替换
+           了同名文件"。源不可达（盘未挂载、文件已删）时**跳过**第 2 步而不是
+           判无效 —— 否则离线媒体库会从"继续显示缓存缩略图"退化成"整页占位图"。
+        """
         meta_path = ThumbnailGenerator._get_meta_path(thumbnail_path)
         if not meta_path.is_file():
             return False
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            st = source_path.stat()
+            if meta.get("source_path") != str(source_path):
+                return False
+            try:
+                st = source_path.stat()
+            except OSError:
+                return True  # 源不可达：归属正确就先沿用缓存
             return (
-                meta.get("source_path") == str(source_path)
-                and meta.get("source_mtime") == st.st_mtime
+                meta.get("source_mtime") == st.st_mtime
                 and meta.get("source_size") == st.st_size
             )
         except Exception:

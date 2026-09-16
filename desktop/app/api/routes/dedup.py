@@ -20,6 +20,7 @@ from app.db.engine import DatabaseManager
 from app.db import queries as q
 from app.services.dedup_gate import acquire_dedup_gate, release_dedup_gate
 from app.services.dedup_service import run_dedup_pipeline
+from app.utils.constants import MatchType
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,11 @@ logger = logging.getLogger(__name__)
 class DedupRunRequest(BaseModel):
     unit_ids: list[int] = Field(..., min_length=2)
     threshold: float = Field(default=0.80, ge=0.0, le=1.0)
+    index_first: bool = Field(
+        default=False,
+        description="先为未索引文件计算哈希（MD5/视频帧/人脸）再比对。"
+                    "与桌面端「一键查重」一致；为 False 时未索引文件对查重不可见。",
+    )
 
 
 # ============================================================
@@ -58,8 +64,13 @@ def _prune_tasks(now: float) -> None:
 
 
 def _run_dedup_task(task_id: str, unit_ids: list[int], threshold: float,
-                    cfg_fields: dict) -> None:
-    """后台执行查重管线，并把状态/进度/结果写回任务表。"""
+                    cfg_fields: dict, config, index_first: bool = False) -> None:
+    """后台执行查重管线，并把状态/进度/结果写回任务表。
+
+    参数:
+        index_first: 为 True 时先跑索引管线（与桌面端「一键查重」一致）。
+            不索引就比对，未索引文件对查重完全不可见，却会返回"查重完成"。
+    """
     def update(**kw) -> None:
         with _tasks_lock:
             if task_id in _dedup_tasks:
@@ -73,13 +84,33 @@ def _run_dedup_task(task_id: str, unit_ids: list[int], threshold: float,
                    finished_at=time.time())
             return
         try:
+            indexed_count = 0
+            unindexed_before = 0
+            if index_first:
+                from app.db.engine import DatabaseManager
+                from app.db import queries as q
+                from app.services.index_service import run_index_pipeline
+                with DatabaseManager.session() as session:
+                    unindexed_before = q.get_unindexed_file_count(session)
+                if unindexed_before > 0:
+                    update(phase="indexing", progress=[0, unindexed_before])
+                    index_result = run_index_pipeline(
+                        config,
+                        progress_callback=lambda cur, total: update(
+                            phase="indexing", progress=[cur, total]),
+                    )
+                    indexed_count = index_result.hashed_count
+                    update(phase="comparing", progress=None)
+
+            update(phase="comparing")
             outcome = run_dedup_pipeline(
                 unit_ids,
                 threshold=threshold,
                 phash_hamming_threshold=cfg_fields["phash_hamming_threshold"],
                 dhash_hamming_threshold=cfg_fields["dhash_hamming_threshold"],
-                face_distance_threshold=cfg_fields["face_distance_threshold"],
+                face_similarity_threshold=cfg_fields["face_similarity_threshold"],
                 face_enabled=cfg_fields["face_enabled"],
+                related_min_matches=cfg_fields["related_min_matches"],
                 load_face=cfg_fields["face_enabled"],  # 与 GUI 行为一致
                 progress_callback=lambda cur, total: update(progress=[cur, total]),
             )
@@ -87,14 +118,19 @@ def _run_dedup_task(task_id: str, unit_ids: list[int], threshold: float,
             release_dedup_gate()
         update(
             status="completed",
+            phase=None,
             progress=None,
             finished_at=time.time(),
             result={
                 "total_compared": outcome.session.total_units_compared,
                 "duplicates_found": len(outcome.session.duplicates_found),
+                "related_found": len(outcome.session.related_found),
                 "saved_count": outcome.saved_count,
+                "related_saved": outcome.related_saved,
                 "skipped_pairs": outcome.skipped_pairs,
                 "elapsed_seconds": outcome.elapsed_seconds,
+                "unindexed_before": unindexed_before,
+                "indexed_count": indexed_count,
             },
         )
     except ValueError as e:
@@ -110,6 +146,10 @@ router = APIRouter(prefix="/api/dedup", tags=["查重"])
 @router.get("/results", response_model=DedupListResponse)
 def list_dedup_results(
     unresolved_only: bool = Query(True, description="仅显示未处理"),
+    level: Optional[str] = Query(
+        None, pattern="^(duplicate|related)$",
+        description="按命中等级过滤：duplicate=建议处置的重复；related=仅提醒的疑似相关",
+    ),
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
 ):
@@ -118,7 +158,7 @@ def list_dedup_results(
         with DatabaseManager.session() as session:
             page_results, total = q.get_dedup_results_page(
                 session, unresolved_only=unresolved_only,
-                page=page, per_page=per_page,
+                page=page, per_page=per_page, level=level,
             )
 
             # 批量取涉及单元名
@@ -134,6 +174,7 @@ def list_dedup_results(
                     similarity_score=dr.similarity_score,
                     match_count=dr.match_count,
                     match_types=dr.match_types or "",
+                    match_level=dr.match_level,
                     is_resolved=dr.is_resolved,
                     resolution=dr.resolution,
                     created_at=dr.created_at,
@@ -141,6 +182,17 @@ def list_dedup_results(
                 for dr in page_results
             ]
             return DedupListResponse(results=items, total=total)
+    except Exception as e:
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
+
+
+@router.get("/counts")
+def get_dedup_counts():
+    """按命中等级统计未处置结果数量（列表页分组标题用）。"""
+    try:
+        with DatabaseManager.session() as session:
+            return q.count_dedup_results_by_level(session)
     except Exception as e:
         logger.error(f"操作失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="内部服务器错误")
@@ -159,6 +211,19 @@ def get_dedup_detail(result_id: int):
             unit_a = q.get_unit_by_id(session, dr.unit_a_id)
             unit_b = q.get_unit_by_id(session, dr.unit_b_id)
 
+            # 文件名：只显示 "#101 ↔ #103" 无法让用户判断该不该处理。
+            # 一次 IN 查询取出本结果涉及的全部文件名（避免 N+1）。
+            file_ids = {fm.file_a_id for fm in matches} | {fm.file_b_id for fm in matches}
+            name_map: dict[int, str] = {}
+            if file_ids:
+                from app.db.models import MediaFile
+                rows = (
+                    session.query(MediaFile.id, MediaFile.filename)
+                    .filter(MediaFile.id.in_(list(file_ids)))
+                    .all()
+                )
+                name_map = {fid: fname for fid, fname in rows}
+
             return {
                 "id": dr.id,
                 "unit_a": {"id": dr.unit_a_id, "name": unit_a.name if unit_a else ""},
@@ -166,12 +231,17 @@ def get_dedup_detail(result_id: int):
                 "similarity_score": dr.similarity_score,
                 "match_count": dr.match_count,
                 "match_types": dr.match_types,
+                "match_level": dr.match_level,
                 "is_resolved": dr.is_resolved,
                 "resolution": dr.resolution,
                 "created_at": dr.created_at.isoformat() if dr.created_at else "",
                 "file_matches": [
                     {"id": fm.id, "file_a_id": fm.file_a_id, "file_b_id": fm.file_b_id,
-                     "similarity_score": fm.similarity_score, "match_type": fm.match_type}
+                     "file_a_name": name_map.get(fm.file_a_id, f"#{fm.file_a_id}"),
+                     "file_b_name": name_map.get(fm.file_b_id, f"#{fm.file_b_id}"),
+                     "similarity_score": fm.similarity_score, "match_type": fm.match_type,
+                     # 人脸匹配是"线索"而非重复证据（不计入杰卡德），客户端要能区分
+                     "is_hint": fm.match_type == MatchType.FACE.value}
                     for fm in matches
                 ],
             }
@@ -211,6 +281,7 @@ def run_dedup(body: DedupRunRequest, request: Request):
     entry = {
         "task_id": task_id,
         "status": "queued",
+        "phase": None,
         "created_at": now,
         "started_at": None,
         "finished_at": None,
@@ -224,12 +295,14 @@ def run_dedup(body: DedupRunRequest, request: Request):
     cfg_fields = {
         "phash_hamming_threshold": cfg.phash_hamming_threshold,
         "dhash_hamming_threshold": cfg.dhash_hamming_threshold,
-        "face_distance_threshold": cfg.face_distance_threshold,
+        "face_similarity_threshold": cfg.face_similarity_threshold,
         "face_enabled": cfg.face_detection_enabled,
+        "related_min_matches": cfg.related_min_matches,
     }
     threading.Thread(
         target=_run_dedup_task,
-        args=(task_id, list(body.unit_ids), float(body.threshold), cfg_fields),
+        args=(task_id, list(body.unit_ids), float(body.threshold), cfg_fields,
+              cfg, bool(body.index_first)),
         daemon=True,
         name=f"dedup-task-{task_id}",
     ).start()

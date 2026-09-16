@@ -10,15 +10,16 @@
 """
 
 import logging
+import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional, Sequence
 
 import numpy as np
 
 from app.registry.hash_registry import HashAlgorithmRegistry, create_default_registry
 from app.core.hash_engine import FileHashes
-from app.utils.constants import MatchType
+from app.utils.constants import FACE_SIMILARITY_THRESHOLD, MatchLevel, MatchType
 from app.utils.hash_helpers import hamming_distance
 
 logger = logging.getLogger(__name__)
@@ -27,10 +28,16 @@ logger = logging.getLogger(__name__)
 # 每条视频参与比对的帧数上限（按索引均匀采样）。同内容不同码率/分辨率的
 # 视频抽帧时间戳一致，采样后仍然对齐；极端时长差异属已知限制。
 VIDEO_FRAME_MAX_SAMPLES = 32
-# 匹配帧数占“较短视频帧数”的比例下限
-VIDEO_FRAME_MATCH_RATIO = 0.5
-# 最少匹配帧数（短视频自动放宽到 min(该值, 两视频帧数)）
-VIDEO_FRAME_MIN_MATCHES = 2
+# 匹配帧数占“较短视频帧数”的比例下限。
+# 取 0.75：真正的重编码/裁剪同源视频几乎逐帧对应，比例接近 1.0；
+# 而 0.5 会把“仅共享一半抽帧”的不同视频判为同一视频（假阳性 → 误导用户删文件）。
+VIDEO_FRAME_MATCH_RATIO = 0.75
+# 最少匹配帧数：证据量低于此值不足以判定同一视频。
+VIDEO_FRAME_MIN_MATCHES = 3
+# 抽帧数下限：短于该帧数的视频不参与帧级判定。否则“1 帧恰好相同”即可
+# 判为同一视频（分母 max(1, min(...)) = 1 → 比例恒为 1.0）。
+# 这类短视频的精确重复仍由 MD5 兜住，不会漏报完全相同的文件。
+VIDEO_FRAME_MIN_FRAMES = 3
 
 
 # ============================================================
@@ -74,6 +81,22 @@ class UnitComparisonResult:
     file_matches: tuple = ()
     """匹配到的文件对列表（不可变元组）。"""
 
+    face_hints: tuple = ()
+    """人脸相似提示（不计入杰卡德）。
+
+    人脸向量回答的是“是不是同一个人”，不是“是不是同一个文件”。
+    把它计入文件级匹配会让同一演员的不同作品被判为重复单元，
+    因此只作为辅助线索单独返回，供界面提示，不参与重复判定。
+    """
+
+    level: str = MatchLevel.DUPLICATE.value
+    """命中等级：duplicate（建议处置）/ related（仅提醒，见 MatchLevel）。"""
+
+    @property
+    def evidence_count(self) -> int:
+        """证据总数 = 计数匹配 + 人脸线索。用于排序与"是否值得提醒"。"""
+        return len(self.file_matches) + len(self.face_hints)
+
     match_counts: dict = field(default_factory=dict)
     """各类匹配数量统计 {'md5': N, 'phash': M, ...}。"""
 
@@ -95,13 +118,19 @@ class DedupSession:
     """所有两两比对结果。"""
 
     duplicates_found: tuple
-    """达到阈值的重复结果。"""
+    """达到"重复"阈值的单元对（建议处置）。"""
 
     total_units_compared: int
     """参与比对的资源单元数。"""
 
     elapsed_seconds: float
     """耗时（秒）。"""
+
+    related_found: tuple = ()
+    """疑似相关但未达重复阈值的单元对（仅提醒，不建议处置）。
+
+    包括同演员、同场景、部分文件重叠等情形 —— 用户希望知情但不打算删除。
+    """
 
 
 # ============================================================
@@ -119,10 +148,11 @@ class DedupEngine:
         jaccard_threshold: float = 0.80,
         phash_hamming_threshold: int = 5,
         dhash_hamming_threshold: int = 5,
-        face_distance_threshold: float = 0.6,
+        face_similarity_threshold: float = FACE_SIMILARITY_THRESHOLD,
         face_enabled: bool = True,
         registry: Optional[HashAlgorithmRegistry] = None,
         file_count_ratio_limit: float = 0.05,
+        related_min_matches: int = 2,
     ) -> None:
         """初始化查重引擎。
 
@@ -130,19 +160,22 @@ class DedupEngine:
             jaccard_threshold: 杰卡德指数阈值 [0.0, 1.0]。
             phash_hamming_threshold: pHash 汉明距离阈值。
             dhash_hamming_threshold: dHash 汉明距离阈值。
-            face_distance_threshold: 人脸欧氏距离阈值。
+            face_similarity_threshold: 人脸余弦相似度阈值，≥ 此值视为同一人物。
             face_enabled: 是否启用人脸比对。
             registry: 哈希算法注册器。
             file_count_ratio_limit: 单元文件数比例下限（默认 0.05 = 1/20，
                 即两单元文件数相差 20 倍以上时杰卡德指数不可能达标，直接跳过）。
+            related_min_matches: 未达重复阈值时，"疑似相关"所需的最少证据数
+                （计数匹配 + 人脸线索）。
         """
         self._jaccard_threshold = jaccard_threshold
         self._phash_threshold = phash_hamming_threshold
         self._dhash_threshold = dhash_hamming_threshold
-        self._face_threshold = face_distance_threshold
+        self._face_threshold = face_similarity_threshold
         self._face_enabled = face_enabled
         self._registry = registry or create_default_registry()
         self._file_count_ratio_limit = file_count_ratio_limit
+        self._related_min_matches = max(1, related_min_matches)
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -195,11 +228,10 @@ class DedupEngine:
         matched_a_indices: set[int] = set()
         matched_b_indices: set[int] = set()
 
-        # 人脸匹配优先（最可靠），然后 MD5 精确，最后 pHash/dHash 备用
-        if self._face_enabled:
-            matches.extend(self._match_by_face(
-                files_a, files_b, matched_a_indices, matched_b_indices))
-
+        # 精确身份优先：MD5 → 视频帧 → pHash → dHash。
+        # 顺序有意义：matched_* 跨策略共享，先跑的策略会“消费”文件对。
+        # 若把模糊策略排到 MD5 之前，字节级一致的铁证会被记为模糊匹配，
+        # 甚至抢占到错误的对手方，导致真正的重复对被漏配。
         for match_type, match_func in [
             ("md5", self._match_by_md5),
             ("video", self._match_by_video_frames),
@@ -212,6 +244,13 @@ class DedupEngine:
             matches.extend(match_func(
                 files_a, files_b, matched_a_indices, matched_b_indices))
 
+        # 人脸只作为辅助提示：用独立的 matched 集合计算，既不消费文件对，
+        # 也不计入杰卡德 —— 见 UnitComparisonResult.face_hints 的说明。
+        face_hints: tuple = ()
+        if self._face_enabled:
+            face_hints = tuple(self._match_by_face(
+                files_a, files_b, set(), set()))
+
         # 计算杰卡德指数
         n_matches = len(matches)
         jaccard = n_matches / (n_a + n_b - n_matches) if (n_a + n_b - n_matches) > 0 else 0.0
@@ -221,13 +260,14 @@ class DedupEngine:
         for m in matches:
             match_counts[m.match_type] = match_counts.get(m.match_type, 0) + 1
 
-        result = UnitComparisonResult(
+        result_dup = UnitComparisonResult(
             unit_a_id=unit_a_id,
             unit_b_id=unit_b_id,
             unit_a_name=unit_a_name,
             unit_b_name=unit_b_name,
             jaccard_similarity=round(jaccard, 4),
             file_matches=tuple(matches),
+            face_hints=face_hints,
             match_counts=match_counts,
             total_files_a=n_a,
             total_files_b=n_b,
@@ -238,7 +278,17 @@ class DedupEngine:
                 f"查重命中: [{unit_a_name}] vs [{unit_b_name}] "
                 f"杰卡德={jaccard:.3f} 匹配={n_matches}"
             )
-            return result
+            return result_dup
+
+        # 未达"重复"阈值，但证据足够 → 记为一档"疑似相关"（仅提醒）。
+        # 典型来源：同演员的不同片子（人脸线索）、同场景不同剪辑（帧匹配）。
+        if result_dup.evidence_count >= self._related_min_matches:
+            logger.info(
+                f"疑似相关: [{unit_a_name}] vs [{unit_b_name}] "
+                f"杰卡德={jaccard:.3f} 证据={result_dup.evidence_count}"
+                f"（匹配{n_matches} + 人脸{len(face_hints)}）"
+            )
+            return replace(result_dup, level=MatchLevel.RELATED.value)
 
         logger.debug(
             f"未达阈值: [{unit_a_name}] vs [{unit_b_name}] "
@@ -271,6 +321,7 @@ class DedupEngine:
         skip = skip_pairs or set()
         comparisons: list[UnitComparisonResult] = []
         duplicates: list[UnitComparisonResult] = []
+        related: list[UnitComparisonResult] = []
 
         # 计算总比对对数
         total_pairs = n_units * (n_units - 1) // 2
@@ -300,8 +351,10 @@ class DedupEngine:
                     )
                     if result is not None:
                         comparisons.append(result)
-                        if result.jaccard_similarity >= self._jaccard_threshold:
+                        if result.level == MatchLevel.DUPLICATE.value:
                             duplicates.append(result)
+                        elif result.level == MatchLevel.RELATED.value:
+                            related.append(result)
                 except Exception as e:
                     logger.error(f"比对失败: 单元{uid_a} vs 单元{uid_b} - {e}")
 
@@ -316,12 +369,14 @@ class DedupEngine:
         session = DedupSession(
             comparisons=tuple(comparisons),
             duplicates_found=tuple(duplicates),
+            related_found=tuple(related),
             total_units_compared=n_units,
             elapsed_seconds=round(elapsed, 2),
         )
         logger.info(
             f"查重完成: {n_units} 个单元，{completed_pairs} 对，"
-            f"发现 {len(duplicates)} 组重复，耗时 {elapsed:.1f}s"
+            f"发现 {len(duplicates)} 组重复、{len(related)} 对疑似相关，"
+            f"耗时 {elapsed:.1f}s"
         )
         return session
 
@@ -481,55 +536,155 @@ class DedupEngine:
 
     def _match_by_video_frames(self, files_a: list[dict], files_b: list[dict],
                                 matched_a: set[int], matched_b: set[int]) -> list[FileMatch]:
-        """视频帧级匹配 —— 关键帧 pHash 集合相似即视为同一视频。
+        """视频帧级匹配 —— 关键帧 pHash 序列相似才视为同一视频。
 
         视频没有整片 phash/dhash（恒为空串），只有 video_frames 里的抽帧哈希。
-        此前这些帧哈希算完即弃，导致重编码/换分辨率的近似视频永远查不出来。
-        这里对帧哈希做一对一贪心配对：匹配帧数 ≥ 较短视频帧数的一半即判定为
-        同一视频。帧距离沿用 pHash 汉明阈值。
+        这里对帧哈希做一对一贪心配对，判定同一视频需同时满足三个条件：
+
+        1. 匹配帧数 ≥ VIDEO_FRAME_MIN_MATCHES；
+        2. 匹配比例 ≥ VIDEO_FRAME_MATCH_RATIO（分母为较短视频的帧数）；
+        3. 匹配对在时间轴上同序（最长递增子序列 ≥ 比例的帧数）。
+
+        条件 1、3 是后加的：只有比例一条时，“1 帧恰好命中”和
+        “帧集合相同但顺序被打乱的剪辑”都会被判为同一视频。
+        帧距离沿用 pHash 汉明阈值。
+
+        性能：B 侧所有帧按鸽巢切片建一次倒排索引，每个 A 侧帧只与
+        “至少有一段完全相同”的候选帧算精确距离。距离 ≤ 阈值必然出现在
+        候选中（鸽巢原理），零漏配；非候选帧本就永远不可能入选贪心配对，
+        因此结果与逐帧暴力比对完全一致，但复杂度从 O(|A|·|B|·F²) 降为
+        接近线性（见 test_dedup_video_frame_index_equivalence 的差分验证）。
         """
         algo = self._registry.get("phash")
         if not algo:
             return []
+
+        slices = self._phash_threshold + 1
+        frames_b_cache: dict[int, list[str]] = {}
+        frame_index = self._build_frame_index(
+            files_b, matched_b, slices, frames_b_cache)
 
         matches: list[FileMatch] = []
         for idx_a, fa in enumerate(files_a):
             if idx_a in matched_a:
                 continue
             frames_a = self._sample_frames(fa.get("video_frames"))
-            if not frames_a:
+            # 抽帧太少时证据不足，直接放弃判定（精确重复交给 MD5）
+            if len(frames_a) < VIDEO_FRAME_MIN_FRAMES:
                 continue
 
-            best = None          # (idx_b, fb, matched_count, frames_b_len, ratio)
+            # 该 A 视频在每个候选 B 视频上可能命中的帧位置
+            candidate_positions: dict[int, set[int]] = {}
+            for hash_a in frames_a:
+                for idx_b, pos in self._frame_candidates(hash_a, frame_index, slices):
+                    if idx_b in matched_b:
+                        continue
+                    candidate_positions.setdefault(idx_b, set()).add(pos)
+
+            best = None          # (idx_b, fb, count, frames_b_len, ratio, pairs)
             best_ratio = 0.0
-            for idx_b, fb in enumerate(files_b):
+            # 按 idx_b 升序迭代：候选是发现序（取决于切片命中顺序），
+            # 而暴力路径按 files_b 顺序迭代；比例相同时两者必须选中同一个
+            # B 视频，否则索引化会改变匹配结果。
+            for idx_b in sorted(candidate_positions):
                 if idx_b in matched_b:
-                    continue
-                frames_b = self._sample_frames(fb.get("video_frames"))
-                if not frames_b:
-                    continue
-                ratio, count = self._frame_set_similarity(frames_a, frames_b, algo)
+                    continue  # 同一次 A 循环内可能已被标记
+                full_frames = frames_b_cache[idx_b]
+                ordered = sorted(candidate_positions[idx_b])
+                # 只保留候选帧参与贪心配对（非候选帧距离必然超阈值，永不入选）
+                subset = [full_frames[j] for j in ordered]
+                ratio, count, sub_pairs = self._frame_set_similarity(
+                    frames_a, subset, algo, denom_frames_b=len(full_frames))
                 if ratio > best_ratio:
+                    # 把子集索引还原成 B 侧真实帧位置，供时序判定使用
+                    pairs = [(i_a, ordered[j_b]) for i_a, j_b in sub_pairs]
                     best_ratio = ratio
-                    best = (idx_b, fb, count, len(frames_b))
+                    best = (idx_b, files_b[idx_b], count, len(full_frames), pairs)
 
             if best is None:
                 continue
-            idx_b, fb, count, frames_b_len = best
+            idx_b, fb, count, frames_b_len, pairs = best
             required = min(VIDEO_FRAME_MIN_MATCHES, len(frames_a), frames_b_len)
-            if count >= required and best_ratio >= VIDEO_FRAME_MATCH_RATIO:
+            # 时序一致性：同源视频的抽帧在时间轴上应同序，逆序对多说明是
+            # 拼剪/混排。允许少量错位（静态画面会有近似帧抢配）。
+            monotone = self._longest_increasing([pb for _, pb in pairs])
+            monotone_required = max(
+                VIDEO_FRAME_MIN_MATCHES,
+                math.ceil(VIDEO_FRAME_MATCH_RATIO * count),
+            )
+            if (count >= required
+                    and best_ratio >= VIDEO_FRAME_MATCH_RATIO
+                    and monotone >= monotone_required):
                 matches.append(FileMatch(
                     file_a_id=fa["id"],
                     file_b_id=fb["id"],
                     file_a_path=fa.get("path", ""),
                     file_b_path=fb.get("path", ""),
-                    # 帧比对本质是 pHash 比对，沿用已有 match_type（避免改库约束）
-                    match_type=MatchType.PHASH.value,
+                    # 独立记为 video：帧级匹配证据最弱，混记为 phash 会让
+                    # 界面无法区分"整图感知哈希命中"与"视频帧命中"。
+                    match_type=MatchType.VIDEO.value,
                     score=round(min(1.0, best_ratio), 4),
                 ))
                 matched_a.add(idx_a)
                 matched_b.add(idx_b)
         return matches
+
+    def _build_frame_index(self, files_b: list[dict], exclude: set[int],
+                           slices: int,
+                           cache: dict[int, list[str]]) -> list[dict]:
+        """按切片键建立帧级倒排索引：index[k][key] = [(idx_b, 帧位置), ...]。
+
+        同时把每个 B 视频采样后的帧列表写入 cache（避免重复采样）。
+        抽帧数不足 VIDEO_FRAME_MIN_FRAMES 的视频不参与帧级判定，不入索引。
+        """
+        index: list[dict] = [dict() for _ in range(slices)]
+        for idx_b, fb in enumerate(files_b):
+            if idx_b in exclude:
+                continue
+            frames = self._sample_frames(fb.get("video_frames"))
+            if len(frames) < VIDEO_FRAME_MIN_FRAMES:
+                continue
+            cache[idx_b] = frames
+            for pos, h in enumerate(frames):
+                if not h:
+                    continue
+                for k, key in enumerate(self._slice_keys(h, slices)):
+                    index[k].setdefault(key, []).append((idx_b, pos))
+        return index
+
+    @staticmethod
+    def _frame_candidates(hash_hex: str, index: list[dict],
+                          slices: int) -> list[tuple[int, int]]:
+        """返回与 hash_hex 至少共享一个完全相同切片的帧 (idx_b, 帧位置)。
+
+        鸽巢原理保证：距离 ≤ 阈值(切片数-1) 的帧对必然共享至少一段，
+        因此候选集合是零漏配的超集。
+        """
+        seen: set[tuple[int, int]] = set()
+        out: list[tuple[int, int]] = []
+        for k, key in enumerate(DedupEngine._slice_keys(hash_hex, slices)):
+            for cand in index[k].get(key, ()):
+                if cand not in seen:
+                    seen.add(cand)
+                    out.append(cand)
+        return out
+
+    @staticmethod
+    def _longest_increasing(seq: Sequence[int]) -> int:
+        """最长严格递增子序列长度（耐心排序，O(n log n)）。
+
+        用于帧级匹配的时序一致性判定：把匹配对按 A 侧帧序排列后，
+        B 侧索引序列的 LIS 就是“能按时间轴对齐的匹配帧数”。
+        """
+        import bisect
+        tails: list[int] = []
+        for x in seq:
+            i = bisect.bisect_left(tails, x)
+            if i == len(tails):
+                tails.append(x)
+            else:
+                tails[i] = x
+        return len(tails)
 
     @staticmethod
     def _sample_frames(frames) -> list[str]:
@@ -547,11 +702,25 @@ class DedupEngine:
         return [frames[int(i * step)] for i in range(VIDEO_FRAME_MAX_SAMPLES)]
 
     def _frame_set_similarity(self, frames_a: list[str], frames_b: list[str],
-                              algo) -> tuple[float, int]:
-        """两两帧哈希贪心配对，返回 (匹配比例, 匹配帧数)。"""
+                              algo,
+                              denom_frames_b: Optional[int] = None
+                              ) -> tuple[float, int, list[tuple[int, int]]]:
+        """两两帧哈希贪心配对。
+
+        参数:
+            frames_a: A 侧帧哈希。
+            frames_b: B 侧参与配对的帧哈希（索引化路径下为候选子集）。
+            algo: 哈希算法。
+            denom_frames_b: 计算比例时分母使用的 B 侧帧数。索引化路径传入
+                B 视频的完整帧数（frames_b 只是候选子集），暴力路径留空。
+
+        返回:
+            (匹配比例, 匹配帧数, 匹配对索引列表)。匹配对按 A 侧帧序排列，
+            索引是传入 frames_b 的下标，供调用方做时序一致性判定。
+        """
         used: set[int] = set()
-        matched = 0
-        for hash_a in frames_a:
+        pairs: list[tuple[int, int]] = []
+        for i_a, hash_a in enumerate(frames_a):
             best_j = None
             best_dist = self._phash_threshold + 1
             for j, hash_b in enumerate(frames_b):
@@ -566,9 +735,11 @@ class DedupEngine:
                     best_j = j
             if best_j is not None:
                 used.add(best_j)
-                matched += 1
-        denom = max(1, min(len(frames_a), len(frames_b)))
-        return matched / denom, matched
+                pairs.append((i_a, best_j))
+        matched = len(pairs)
+        denom_b = len(frames_b) if denom_frames_b is None else denom_frames_b
+        denom = max(1, min(len(frames_a), denom_b))
+        return matched / denom, matched, pairs
 
     def _match_by_face(self, files_a: list[dict], files_b: list[dict],
                        matched_a: set[int], matched_b: set[int]) -> list[FileMatch]:
@@ -593,7 +764,7 @@ class DedupEngine:
 
             best_overall: Optional[FileMatch] = None
             best_b_idx: Optional[int] = None
-            best_overall_dist = self._face_threshold + 1.0
+            best_overall_sim = self._face_threshold - 1.0
             # 追踪最佳匹配对应的 B 人脸 key，最终匹配确认后才标记为已消费
             best_face_keys: set[tuple[int, int]] = set()
 
@@ -611,23 +782,22 @@ class DedupEngine:
                         if face_key in matched_faces_b:
                             continue
 
-                        dist = self._euclidean_distance(vec_a, vec_b)
-                        if dist < best_overall_dist:
-                            best_overall_dist = dist
-                            score = max(0.0, 1.0 - dist / 2.0)
+                        sim = self._cosine_similarity(vec_a, vec_b)
+                        if sim > best_overall_sim:
+                            best_overall_sim = sim
                             best_overall = FileMatch(
                                 file_a_id=fa["id"],
                                 file_b_id=fb["id"],
                                 file_a_path=fa.get("path", ""),
                                 file_b_path=fb.get("path", ""),
                                 match_type=MatchType.FACE.value,
-                                score=round(score, 4),
+                                score=round(max(0.0, min(1.0, sim)), 4),
                             )
                             best_b_idx = idx_b
                             best_face_keys = {face_key}
 
             if (best_overall is not None and best_b_idx is not None
-                    and best_overall_dist <= self._face_threshold):
+                    and best_overall_sim >= self._face_threshold):
                 matches.append(best_overall)
                 matched_faces_b.update(best_face_keys)
                 matched_a.add(idx_a)
@@ -636,12 +806,23 @@ class DedupEngine:
         return matches
 
     @staticmethod
-    def _euclidean_distance(vec_a: tuple, vec_b: tuple) -> float:
-        """计算两个特征向量的欧氏距离。"""
+    def _cosine_similarity(vec_a: tuple, vec_b: tuple) -> float:
+        """计算两个人脸特征向量的余弦相似度（SFace 官方度量）。
+
+        旧实现是 OpenFace nn4 + 欧氏距离；换成 SFace 后必须改用余弦相似度，
+        阈值也随之变为 FACE_SIMILARITY_THRESHOLD(0.363)。维度不一致返回 -1。
+        """
         import math
-        if len(vec_a) != len(vec_b):
-            return float('inf')
-        return math.sqrt(sum((a - b) ** 2 for a, b in zip(vec_a, vec_b)))
+        if not vec_a or len(vec_a) != len(vec_b):
+            return -1.0
+        dot = norm_a = norm_b = 0.0
+        for a, b in zip(vec_a, vec_b):
+            dot += a * b
+            norm_a += a * a
+            norm_b += b * b
+        if norm_a <= 0.0 or norm_b <= 0.0:
+            return -1.0
+        return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
 
     # ============================================================
     # 辅助方法

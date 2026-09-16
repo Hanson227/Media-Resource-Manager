@@ -184,6 +184,12 @@ def main() -> None:
     def on_exit() -> None:
         """程序退出时的清理工作。"""
         logger.info("程序退出，执行清理...")
+        # 先停后台线程：worker 仍在写库时 dispose 引擎会丢数据甚至崩溃。
+        # 正常关窗由 MainWindow.closeEvent 处理，这里覆盖托盘退出等其它路径。
+        try:
+            main_window.stop_background_workers()
+        except Exception as e:  # noqa: BLE001 — 退出流程不应再抛错
+            logger.warning(f"停止后台任务失败: {e}")
         if api_server:
             api_server.stop()
         DatabaseManager.dispose()

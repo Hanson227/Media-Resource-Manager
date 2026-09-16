@@ -15,6 +15,7 @@ Web 前端页面级功能测试 —— 基于 Playwright 的 Vue SPA 浏览器�
 import sys
 import io
 import json
+import tempfile
 import time
 import threading
 from pathlib import Path
@@ -127,12 +128,28 @@ def ensure_db():
     return root
 
 
+_THUMB_CACHE_DIR = None
+
+
+def _thumb_cache_dir() -> Path:
+    """测试专用缩略图缓存目录。
+
+    测试库的 file_id 与真实库重叠（都从 1 开始分配），而缓存以
+    `{file_id}_thumb.jpg` 命名 —— 不隔离就会读写真实库的 `data/.thumbnails`，
+    表现为"测试文件显示真实库的照片"（实测截图里出现过），且测试会覆写用户缓存。
+    """
+    global _THUMB_CACHE_DIR
+    if _THUMB_CACHE_DIR is None:
+        _THUMB_CACHE_DIR = Path(tempfile.mkdtemp(prefix="web_thumbs_"))
+    return _THUMB_CACHE_DIR
+
+
 def start_server():
     """启动 API 服务器。"""
     global _server, _server_thread, _app
     import requests
     ensure_db()
-    config = AppConfig()
+    config = AppConfig().with_updates(thumbnail_cache_dir=_thumb_cache_dir())
     from app.api.server import create_app
     app = create_app(config)
     _app = app
@@ -143,6 +160,22 @@ def start_server():
     )
     _server_thread = threading.Thread(target=_server.run, daemon=True)
     _server_thread.start()
+
+    # 端口被占用时 uvicorn 绑定失败会直接结束线程，而**另一个**进程可能正在同一
+    # 端口上应答健康检查 —— 不校验就会"借用"别人的服务器：两个测试进程共用同一个
+    # DB 文件，互相删表/重建，结果是随机失败（实测并发跑两次本套件时踩到过）。
+    for _ in range(50):
+        if getattr(_server, "started", False):
+            break
+        if not _server_thread.is_alive():
+            raise RuntimeError(
+                f"API 服务器启动失败：端口 {_PORT} 可能已被占用"
+                f"（请先结束另一个 test_web_playwright 进程）"
+            )
+        time.sleep(0.1)
+    else:
+        raise RuntimeError("API 服务器启动超时")
+
     for _ in range(50):
         try:
             if requests.get(f"http://127.0.0.1:{_PORT}/api/health", timeout=1).status_code == 200:
@@ -800,6 +833,369 @@ def test_cancel_pin_does_not_lock_out(page):
                 print(f"  [INFO] 还原 data/.web_pin 失败: {e}")
 
 
+def _seed_temp_unit(name: str, files: list) -> tuple:
+    """在测试库里建一个含真实图片文件的临时单元。
+
+    参数:
+        name: 单元（文件夹）名，同时也是页面上的显示名。
+        files: 文件名列表。
+
+    返回:
+        (unit_id, [file_id, ...], [Path, ...])。
+    """
+    from app.db import queries as q
+    from PIL import Image
+    import tempfile
+
+    root_dir = Path(tempfile.mkdtemp(prefix="web_seed_"))
+    unit_dir = root_dir / name
+    unit_dir.mkdir(parents=True)
+    paths = []
+    for i, fname in enumerate(files):
+        p = unit_dir / fname
+        Image.new("RGB", (64, 64), color=(i * 40 % 255, 60, 90)).save(p)
+        paths.append(p)
+
+    with DatabaseManager.session() as session:
+        # media_library_roots.path 有唯一约束：同根复用，不重复插入
+        root = next(
+            (r for r in q.get_all_roots(session) if r.path == str(root_dir)), None
+        )
+        if root is None:
+            root = q.add_library_root(session, str(root_dir))
+        unit = q.create_unit(
+            session, str(unit_dir), name, root.id,
+            file_count=len(paths),
+            total_size=sum(p.stat().st_size for p in paths),
+        )
+        ids = []
+        for p in paths:
+            mf = q.insert_media_file(
+                session, path=str(p), filename=p.name, extension=".jpg",
+                media_type="image", size_bytes=p.stat().st_size,
+                resource_unit_id=unit.id,
+            )
+            ids.append(mf.id)
+    return unit.id, ids, paths
+
+
+def _attach_dialog_auto_accept(page, sink: list):
+    """自动接受 confirm/alert 并把文案记入 sink（返回 handler 以便移除）。"""
+    def _on_dialog(d):
+        sink.append(f"[{d.type}] {d.message}")
+        try:
+            d.accept()
+        except Exception:
+            pass
+    page.on("dialog", _on_dialog)
+    return _on_dialog
+
+
+def test_file_management_delete(page):
+    """Web 文件管理：多选 + 批量删除（移至回收站）。
+
+    回归：Web 端唯一的删除入口曾是 `_deleteFile`（下划线开头），Vue 3 渲染代理
+    不暴露 `_` 开头的 key → 点击抛 `ReferenceError: _deleteFile is not defined`，
+    删除完全无效。这里既验证功能，也断言页面无此类 JS 错误。
+    """
+    section("Web 测试 11: 文件管理（多选批量删除）")
+    from app.db import queries as q
+
+    unit_id, file_ids, paths = _seed_temp_unit(
+        "Web删除测试", ["d1.jpg", "d2.jpg", "d3.jpg"])
+    dialogs: list = []
+    page_errors: list = []
+    on_dialog = _attach_dialog_auto_accept(page, dialogs)
+    on_error = lambda e: page_errors.append(str(e))  # noqa: E731
+    page.on("pageerror", on_error)
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+        # 必须强制重新加载：导航到与当前完全相同的 URL 是同文档导航，
+        # 不会重跑 Vue 挂载，页面会停留在种入新单元之前的旧列表上
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        card = page.locator(".unit-card", has_text="Web删除测试").first
+        card.wait_for(state="attached", timeout=5000)
+        check("临时单元卡片已渲染", card.count() > 0)
+        card.click()
+
+        page.locator(".feed-header").wait_for(state="attached", timeout=5000)
+        feed_items = page.locator(".feed-item")
+        feed_items.first.wait_for(state="attached", timeout=5000)
+        check(f"文件列表渲染 3 个文件（实际 {feed_items.count()}）",
+              feed_items.count() == 3)
+        check("管理按钮存在",
+              page.locator(".feed-header .sort-btn", has_text="管理").count() > 0)
+
+        # 卡片菜单 → 多选管理：进入选择模式并选中该文件
+        more = page.locator(".feed-item .card-more").first
+        check("卡片操作按钮存在", more.count() > 0)
+        more.click()
+        sheet = page.locator(".sheet-panel")
+        sheet.wait_for(state="visible", timeout=3000)
+        check("菜单含「多选管理」", page.locator(".sheet-item", has_text="多选管理").count() > 0)
+        check("菜单含「删除文件」", page.locator(".sheet-item", has_text="删除文件").count() > 0)
+        page.locator(".sheet-item", has_text="多选管理").first.click()
+        page.wait_for_timeout(200)
+
+        select_bar = page.locator(".select-bar")
+        check("多选操作栏出现", select_bar.count() > 0)
+        count_text = page.locator(".select-bar-count").text_content() or ""
+        check(f"进入即选中该文件（{count_text.strip()}）", "1" in count_text)
+        check("选择模式下隐藏卡片操作按钮",
+              page.locator(".feed-item .card-more").count() == 0)
+        check("选中态样式生效", page.locator(".feed-item.selected").count() == 1)
+
+        # 全选 → 3 个
+        page.locator(".select-bar-btn", has_text="全选").first.click()
+        page.wait_for_timeout(200)
+        count_text = page.locator(".select-bar-count").text_content() or ""
+        check(f"全选后计数为 3（{count_text.strip()}）",
+              "3" in count_text and page.locator(".feed-item.selected").count() == 3)
+
+        # 删除（确认框由 handler 自动接受）
+        page.locator(".select-bar-btn", has_text="删除").first.click()
+        page.wait_for_timeout(1200)
+
+        check("弹出删除确认框", any("回收站" in m for m in dialogs))
+        check("删除后退出选择模式", page.locator(".select-bar").count() == 0)
+
+        # UI 与数据库一致（回收站不可用时服务端会保留记录并回报失败）
+        with DatabaseManager.session() as session:
+            rows = q.get_files_by_unit(session, unit_id)
+            remaining = len(rows)
+            expected_size = sum(f.size_bytes or 0 for f in rows)
+            unit = q.get_unit_by_id(session, unit_id)
+        ui_count = page.locator(".feed-item").count()
+        check(f"页面剩余文件数与数据库一致（UI {ui_count} / DB {remaining}）",
+              ui_count == remaining)
+        if remaining == 0:
+            check("三个文件已全部删除", True)
+            check("删除后单元 file_count 同步为 0", unit.file_count == 0)
+            check("删除后单元 total_size 同步为 0", unit.total_size == 0)
+        else:
+            check(f"回收站不可用时保留记录并回报失败（剩余 {remaining}）",
+                  remaining == 3 and any("失败" in m for m in dialogs))
+            check("单元统计与剩余记录一致",
+                  unit.file_count == remaining and unit.total_size == expected_size)
+
+        # 关键回归：模板里的下划线方法调用会产生 ReferenceError
+        bad = [e for e in page_errors if "_deleteFile" in e or "is not defined" in e]
+        check(f"删除过程无 JS 未定义错误（{bad[:1]}）", not bad)
+    finally:
+        page.remove_listener("dialog", on_dialog)
+        page.remove_listener("pageerror", on_error)
+        import shutil
+        with DatabaseManager.session() as session:
+            q.delete_resource_unit(session, unit_id)
+        shutil.rmtree(paths[0].parent.parent, ignore_errors=True)
+
+
+def test_unit_delete_from_card_menu(page):
+    """Web 单元卡片菜单 → 删除文件夹（移至回收站 + 删库记录）。"""
+    section("Web 测试 12: 删除文件夹")
+    from app.db import queries as q
+
+    unit_id, file_ids, paths = _seed_temp_unit("Web删文件夹", ["u1.jpg", "u2.jpg"])
+    dialogs: list = []
+    on_dialog = _attach_dialog_auto_accept(page, dialogs)
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        card = page.locator(".unit-card", has_text="Web删文件夹").first
+        card.wait_for(state="attached", timeout=5000)
+        card.locator(".card-more").click()
+
+        sheet = page.locator(".sheet-panel")
+        sheet.wait_for(state="visible", timeout=3000)
+        check("单元菜单含「删除文件夹」",
+              page.locator(".sheet-item", has_text="删除文件夹").count() > 0)
+        page.locator(".sheet-item", has_text="删除文件夹").first.click()
+        page.wait_for_timeout(1200)
+
+        check("弹出删除确认框（提示含文件数）",
+              any("回收站" in m for m in dialogs))
+        with DatabaseManager.session() as session:
+            gone = q.get_unit_by_id(session, unit_id) is None
+        if gone:
+            check("文件夹已移走（原路径不存在）", not paths[0].parent.exists())
+            check("单元记录已删除", True)
+            page.wait_for_timeout(300)
+            check("页面卡片已移除",
+                  page.locator(".unit-card", has_text="Web删文件夹").count() == 0)
+        else:
+            check("回收站不可用时单元记录保留（无孤儿）", True)
+            check("回收站不可用时文件夹仍在", paths[0].parent.exists())
+    finally:
+        page.remove_listener("dialog", on_dialog)
+        import shutil
+        with DatabaseManager.session() as session:
+            q.delete_resource_unit(session, unit_id)
+        shutil.rmtree(paths[0].parent.parent, ignore_errors=True)
+
+
+def _seed_dedup_levels() -> tuple:
+    """造一组 duplicate + 一组 related 查重结果（含人脸线索行）。"""
+    from app.db import queries as q
+
+    extra_uid, extra_ids, extra_paths = _seed_temp_unit("查重相关单元", ["r1.jpg"])
+    with DatabaseManager.session() as session:
+        units = {u.name: u for u in q.get_all_active_units(session)}
+        ua = units.get("片段A")
+        ub = units.get("片段B")
+        if ua is None or ub is None:
+            return None
+        files_a = q.get_files_by_unit(session, ua.id)
+        files_b = q.get_files_by_unit(session, ub.id)
+        if not files_a or not files_b:
+            return None
+
+        dup = q.upsert_dedup_result(
+            session, unit_a_id=ua.id, unit_b_id=ub.id,
+            similarity_score=0.95, match_count=1,
+            total_files_a=len(files_a), total_files_b=len(files_b),
+            match_types="md5", match_level="duplicate",
+        )
+        q.insert_file_match(session, dedup_result_id=dup.id,
+                            file_a_id=files_a[0].id, file_b_id=files_b[0].id,
+                            similarity_score=1.0, match_type="md5")
+
+        rel = q.upsert_dedup_result(
+            session, unit_a_id=ua.id, unit_b_id=extra_uid,
+            similarity_score=0.08, match_count=1,
+            total_files_a=len(files_a), total_files_b=1,
+            match_types="face", match_level="related",
+        )
+        q.insert_file_match(session, dedup_result_id=rel.id,
+                            file_a_id=files_a[0].id, file_b_id=extra_ids[0],
+                            similarity_score=0.72, match_type="face")
+        return {"dup_id": dup.id, "rel_id": rel.id,
+                "extra_uid": extra_uid, "extra_paths": extra_paths}
+
+
+def test_dedup_level_semantics(page):
+    """Web 查重：区分「疑似重复」与「疑似相关」，related 不给删除入口。
+
+    桌面端对 related 只提供"白名单/暂时忽略"（不给保留 A/B），因为 related
+    的语义是"仅供了解、不建议删除"。Web 端必须一致，否则等于诱导用户删文件。
+    """
+    section("Web 测试 13: 查重分级语义")
+    from app.db import queries as q
+
+    seeded = _seed_dedup_levels()
+    if seeded is None:
+        check("查重分级测试: 缺少 片段A/片段B，跳过", True)
+        return
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
+        # 同 URL 的 goto 是同文档导航，不会重新拉取刚种入的查重结果
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        page.locator(".dedup-tabs").wait_for(state="attached", timeout=5000)
+
+        tabs = page.locator(".dedup-tab")
+        check("分级 Tab 存在（疑似重复/疑似相关）", tabs.count() == 2)
+        check("默认选中「疑似重复」",
+              "疑似重复" in (page.locator(".dedup-tab.active").text_content() or ""))
+        check("重复列表出现等级徽标",
+              page.locator(".lvl-badge.duplicate").count() > 0)
+        check("重复卡片显示相似度百分比",
+              "%" in (page.locator(".card-meta .count").first.text_content() or ""))
+
+        # 切到「疑似相关」
+        page.locator(".dedup-tab", has_text="疑似相关").first.click()
+        page.wait_for_timeout(600)
+        related_cards = page.locator(".card.card-related")
+        check("疑似相关列表出现卡片", related_cards.count() > 0)
+        check("相关卡片带「疑似相关」徽标",
+              page.locator(".lvl-badge.related").count() > 0)
+        check("相关卡片文案声明不建议删除",
+              "不建议删除" in (related_cards.first.text_content() or ""))
+
+        # 相关详情：无保留 A/B，有忽略；人脸线索单独成段
+        related_cards.first.click()
+        page.locator(".dedup-header").wait_for(state="attached", timeout=5000)
+        check("相关详情标记为 is-related",
+              page.locator(".dedup-header.is-related").count() > 0)
+        check("标题显示「疑似相关」而非百分比",
+              "疑似相关" in (page.locator(".dedup-header .score").text_content() or ""))
+        check("相关详情给出「不建议删除」说明",
+              page.locator(".related-note").count() > 0)
+        body_buttons = page.locator(".resolve-actions .btn")
+        labels = [body_buttons.nth(i).text_content() or "" for i in range(body_buttons.count())]
+        check(f"相关详情不提供「保留 A/B」（实际 {labels}）",
+              not any(("保留 A" in t or "保留 B" in t) for t in labels))
+        check("相关详情提供「暂时忽略」", any("忽略" in t for t in labels))
+        check("人脸线索单独分节展示", page.locator(".face-hint-note").count() > 0)
+        check("人脸线索行使用 face 标签", page.locator(".tag.face").count() > 0)
+
+        # 重复详情：仍提供保留 A/B
+        page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
+        page.wait_for_load_state("networkidle")
+        dup_badge = page.locator(".card")
+        dup_badge.first.wait_for(state="attached", timeout=5000)
+        page.locator(".card").first.click()
+        page.locator(".dedup-header").wait_for(state="attached", timeout=5000)
+        dlabels = []
+        dbuttons = page.locator(".resolve-actions .btn")
+        for i in range(dbuttons.count()):
+            dlabels.append(dbuttons.nth(i).text_content() or "")
+        check(f"重复详情提供「保留 A/B」（实际 {dlabels}）",
+              any("保留 A" in t for t in dlabels) and any("保留 B" in t for t in dlabels))
+    finally:
+        import shutil
+        with DatabaseManager.session() as session:
+            for rid in (seeded["dup_id"], seeded["rel_id"]):
+                dr = q.get_dedup_by_id(session, rid)
+                if dr is not None:
+                    session.delete(dr)
+            q.delete_resource_unit(session, seeded["extra_uid"])
+        shutil.rmtree(seeded["extra_paths"][0].parent.parent, ignore_errors=True)
+
+
+def test_dedup_run_from_web(page):
+    """Web 端「一键查重」：触发 API（index_first）并按阶段显示进度。"""
+    section("Web 测试 14: 一键查重触发")
+    import requests
+
+    dialogs: list = []
+    on_dialog = _attach_dialog_auto_accept(page, dialogs)
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        run_btn = page.locator(".dedup-run-btn")
+        run_btn.wait_for(state="attached", timeout=5000)
+        check("一键查重按钮存在", run_btn.count() > 0)
+        check("按钮文案为「开始查重」",
+              "开始查重" in (run_btn.text_content() or ""))
+
+        run_btn.click()
+        check("触发前弹出确认框", any("查重" in m for m in dialogs))
+
+        # 轮询页面状态文本直到完成（索引 + 比对）
+        finished = False
+        for _ in range(120):
+            sub = page.locator(".dedup-run-text .run-sub").text_content() or ""
+            if "完成" in sub and "疑似相关" in sub:
+                finished = True
+                break
+            page.wait_for_timeout(500)
+        check("Web 端查重任务完成", finished)
+
+        # 服务端确实落库了分级结果
+        counts = requests.get(f"http://127.0.0.1:{_PORT}/api/dedup/counts", timeout=5).json()
+        check(f"服务端存在分级计数（{counts}）",
+              isinstance(counts.get("duplicate"), int)
+              and counts.get("total", 0) >= 1)
+        check("列表已刷新（有徽标或空态）",
+              page.locator(".lvl-badge").count() > 0
+              or page.locator(".empty-state").count() > 0)
+    finally:
+        page.remove_listener("dialog", on_dialog)
+
+
 def test_responsive_layout(page):
     """验证响应式布局。"""
     section("Web 测试 9: 响应式布局")
@@ -913,6 +1309,25 @@ def main():
 
             # 服务器地址尾斜杠规范化
             test_server_url_normalization(page)
+
+            # 文件管理（多选删除 / 删除文件夹）——会真实删除测试库中的临时单元
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_load_state("networkidle")
+            test_file_management_delete(page)
+
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_load_state("networkidle")
+            test_unit_delete_from_card_menu(page)
+
+            # 查重分级语义（疑似重复 / 疑似相关）
+            page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
+            page.wait_for_load_state("networkidle")
+            test_dedup_level_semantics(page)
+
+            # 一键查重（索引 + 比对，含进度展示）
+            page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
+            page.wait_for_load_state("networkidle")
+            test_dedup_run_from_web(page)
 
             # 取消访问密码不锁死（会临时改动服务端 web_pin，放在最后）
             test_cancel_pin_does_not_lock_out(page)

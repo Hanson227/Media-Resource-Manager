@@ -6,13 +6,14 @@
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import func
 
-from app.api.schemas import UnitItem, UnitListResponse
+from app.api.schemas import StatusResponse, UnitItem, UnitListResponse
 from app.db.engine import DatabaseManager
 from app.db import queries as q
 from app.db.models import MediaFile
+from app.services.file_ops import MODE_PATTERN, MODE_TRASH, apply_mode
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,43 @@ def unstar_unit(unit_id: int):
                 raise HTTPException(status_code=404, detail=f"单元不存在: {unit_id}")
             q.set_unit_starred(session, unit_id, False)
         return {"success": True, "starred": False}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
+
+
+@router.delete("/{unit_id}", response_model=StatusResponse)
+def delete_unit(
+    unit_id: int,
+    mode: str = Query(MODE_TRASH, pattern=MODE_PATTERN,
+                      description="trash=整个文件夹移至回收站（默认）；record=仅移除媒体库记录"),
+):
+    """删除资源单元（文件夹）。
+
+    默认与桌面端「删除文件夹」一致：把**整个文件夹**移至回收站，再删除
+    数据库记录（media_files / face_vectors / video_frames 级联删除）。
+    mode=record 时只删库记录，磁盘文件夹保留。
+    """
+    try:
+        with DatabaseManager.session() as session:
+            u = q.get_unit_by_id(session, unit_id)
+            if not u:
+                raise HTTPException(status_code=404, detail=f"单元不存在: {unit_id}")
+            unit_name = u.name
+            unit_path = u.path
+
+        ok, reason = apply_mode(unit_path, mode)
+        if not ok:
+            raise HTTPException(status_code=409, detail=reason)
+
+        with DatabaseManager.session() as session:
+            q.delete_resource_unit(session, unit_id)
+
+        return StatusResponse(
+            success=True, message=f"已删除文件夹: {unit_name}（{reason}）"
+        )
     except HTTPException:
         raise
     except Exception as e:

@@ -142,6 +142,57 @@ class MessageCenter:
             logger.error(f"创建查重提醒失败: {e}")
             return None
 
+    @staticmethod
+    def create_related_digest(
+        pairs: list[tuple],
+        top_n: int = 8,
+    ) -> Optional[Message]:
+        """创建一条"疑似相关"汇总提醒。
+
+        参数:
+            pairs: [(unit_a_name, unit_b_name, evidence, similarity, types), ...]。
+            top_n: 正文里列出证据最强的多少对。
+
+        说明:
+            实测本库 166 个单元会产生 200+ 对疑似相关（同演员/同场景），
+            逐条发消息会把消息中心刷屏，因此合并成一条摘要。
+            逐条明细已落库到 dedup_results（match_level='related'），
+            需要时可按需查询。
+        """
+        if not pairs:
+            return None
+        ordered = sorted(pairs, key=lambda p: -p[2])
+        lines = []
+        for name_a, name_b, evidence, similarity, types in ordered[:top_n]:
+            lines.append(f"• {name_a} ⟷ {name_b}（{evidence} 处线索: {types}）")
+        more = len(ordered) - top_n
+        if more > 0:
+            lines.append(f"…另有 {more} 对，详见查重结果")
+
+        title = f"发现 {len(ordered)} 对疑似相关单元（不建议删除）"
+        body = (
+            "这些单元有同演员 / 同场景 / 部分文件重叠的迹象。"
+            "它们**不是**重复，仅供你了解，不建议删除：\n" + "\n".join(lines)
+        )
+        action_data = json.dumps({
+            "action": "view_related",
+            "level": "related",
+            "count": len(ordered),
+        }, ensure_ascii=False)
+
+        try:
+            with DatabaseManager.session() as session:
+                return create_message(
+                    session,
+                    msg_type="dedup_alert",
+                    title=title,
+                    body=body,
+                    action_data=action_data,
+                )
+        except Exception as e:
+            logger.error(f"创建疑似相关提醒失败: {e}")
+            return None
+
     # ============================================================
     # 消息查询
     # ============================================================

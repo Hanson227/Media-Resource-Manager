@@ -97,15 +97,33 @@ class DedupCompareDialog(QDialog):
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
 
-        # 杰卡德得分
-        jaccard_label = QLabel(
-            f"杰卡德相似度: {self._result.jaccard_similarity * 100:.1f}%"
-        )
+        # 杰卡德得分 / 命中等级
+        # "疑似相关"不是重复：不推"保留/删除"，只给"知道了/不再提醒"。
+        is_related = getattr(self._result, "level", "duplicate") == "related"
+        if is_related:
+            head_text = (
+                f"疑似相关（非重复）· 杰卡德 {self._result.jaccard_similarity * 100:.1f}%"
+            )
+            head_color = "#f9e2af"
+        else:
+            head_text = f"杰卡德相似度: {self._result.jaccard_similarity * 100:.1f}%"
+            head_color = RED
+        jaccard_label = QLabel(head_text)
         jaccard_label.setStyleSheet(
-            f"font-size: 16px; font-weight: bold; color: {RED}; padding: 8px;"
+            f"font-size: 16px; font-weight: bold; color: {head_color}; padding: 8px;"
         )
         jaccard_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         center_layout.addWidget(jaccard_label)
+
+        if is_related:
+            note = QLabel(
+                "这两个单元有同演员 / 同场景 / 部分文件重叠的迹象，"
+                "但未达到「重复」标准，仅供了解，不建议删除。"
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet(f"color: {SUBTEXT_0}; padding: 2px 8px;")
+            note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            center_layout.addWidget(note)
 
         # 匹配统计
         stats = []
@@ -115,6 +133,22 @@ class DedupCompareDialog(QDialog):
         stats_label.setStyleSheet(f"color: {SUBTEXT_0}; padding: 4px;")
         stats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         center_layout.addWidget(stats_label)
+
+        # 人脸相似提示（不计入杰卡德）
+        # 人脸向量只能说明"是同一个人"，不能说明"是同一份文件"：演员池小的
+        # 内容库用它会让人把同一演员的不同作品误判为重复。故仅作线索展示。
+        face_hints = getattr(self._result, "face_hints", ()) or ()
+        if face_hints:
+            hint_label = QLabel(
+                f"另有 {len(face_hints)} 对文件人脸相似（疑似同一人），"
+                f"未计入上述重复判定"
+            )
+            hint_label.setStyleSheet(f"color: {SUBTEXT_0}; padding: 2px;")
+            hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hint_label.setToolTip(
+                "人脸相似只说明是同一个人，不能说明是同一份文件，请人工判断"
+            )
+            center_layout.addWidget(hint_label)
 
         # 匹配文件表格
         table = QTableWidget()
@@ -135,17 +169,20 @@ class DedupCompareDialog(QDialog):
         # 操作按钮
         btn_layout = QVBoxLayout()
 
-        keep_a_btn = QPushButton(f"保留单元 A 的全部文件 ({self._result.unit_a_name})")
-        keep_a_btn.clicked.connect(
-            lambda: self.keep_a_requested.emit(self._result.unit_a_id, self._result.unit_b_id)
-        )
-        btn_layout.addWidget(keep_a_btn)
+        # "疑似相关"不提供"保留 A / 保留 B"：那等于暗示要删掉另一侧。
+        # 用户对这类命中只想知情，因此只给"不再提醒 / 暂时忽略"。
+        if not is_related:
+            keep_a_btn = QPushButton(f"保留单元 A 的全部文件 ({self._result.unit_a_name})")
+            keep_a_btn.clicked.connect(
+                lambda: self.keep_a_requested.emit(self._result.unit_a_id, self._result.unit_b_id)
+            )
+            btn_layout.addWidget(keep_a_btn)
 
-        keep_b_btn = QPushButton(f"保留单元 B 的全部文件 ({self._result.unit_b_name})")
-        keep_b_btn.clicked.connect(
-            lambda: self.keep_b_requested.emit(self._result.unit_a_id, self._result.unit_b_id)
-        )
-        btn_layout.addWidget(keep_b_btn)
+            keep_b_btn = QPushButton(f"保留单元 B 的全部文件 ({self._result.unit_b_name})")
+            keep_b_btn.clicked.connect(
+                lambda: self.keep_b_requested.emit(self._result.unit_a_id, self._result.unit_b_id)
+            )
+            btn_layout.addWidget(keep_b_btn)
 
         whitelist_btn = QPushButton("加入白名单（不再提醒）")
         whitelist_btn.clicked.connect(

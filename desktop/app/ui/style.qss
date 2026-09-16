@@ -358,6 +358,15 @@ QPushButton#breadcrumb:hover {
     color: #a6adc8;
 }
 
+/* ---- 状态栏取消按钮 ----
+   必须覆盖上面通用 QPushButton 的 padding: 7px 16px 与 12px 字号：
+   状态栏高度有限，按钮被限高后通用内边距会把"取消"两个字上下压扁。 */
+QPushButton#statusBarCancel {
+    padding: 1px 8px;
+    font-size: 11px;
+    border-radius: 4px;
+}
+
 /* ---- 底部信息标签 ---- */
 QLabel#rightFooter {
     color: #a6adc8;
