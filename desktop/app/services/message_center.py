@@ -39,9 +39,13 @@ class MessageCenter:
     """消息中心 —— 提醒消息的创建和查询入口。
 
     用法:
-        with DatabaseManager.session() as session:
-            count = MessageCenter.get_unread_count(session)
-            messages = MessageCenter.get_unread(session)
+        MessageCenter.create_warning("标题", "正文")
+        count = MessageCenter.get_unread_count()
+        messages = MessageCenter.get_unread()      # list[dict]，不是 ORM 对象
+
+    注意：查询方法返回 **dict**（见 `_msg_to_dict`），界面请按键取值
+    （`msg["is_read"]`），不要再按 ORM 属性访问 —— 对话框曾因此抛
+    AttributeError 而打不开。
     """
 
     # ============================================================
@@ -172,7 +176,7 @@ class MessageCenter:
         title = f"发现 {len(ordered)} 对疑似相关单元（不建议删除）"
         body = (
             "这些单元有同演员 / 同场景 / 部分文件重叠的迹象。"
-            "它们**不是**重复，仅供你了解，不建议删除：\n" + "\n".join(lines)
+            "它们不是重复，仅供你了解，不建议删除：\n" + "\n".join(lines)
         )
         action_data = json.dumps({
             "action": "view_related",

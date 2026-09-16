@@ -7,6 +7,10 @@
 - 查看正文
 - 标记已读 / 全部已读
 - 忽略（删除）消息
+
+数据契约：`MessageCenter.get_unread()/get_all()` 返回的是 **dict**
+（service 层为了避免 detached session 问题统一转成了 dict），
+本对话框一律按 dict 取值，不要再按 ORM 属性访问。
 """
 
 import logging
@@ -20,10 +24,21 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QCheckBox, QGroupBox,
 )
 
-from app.db.models import Message
 from app.services.message_center import MessageCenter
 
 logger = logging.getLogger(__name__)
+
+
+def _fmt_time(value) -> str:
+    """把消息时间（ISO 字符串，可能是 None）格式化为可读文本。"""
+    if not value:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        return datetime.fromisoformat(str(value)).strftime('%Y-%m-%d %H:%M:%S')
+    except (TypeError, ValueError):
+        return str(value)
 
 
 class MessageCenterDialog(QDialog):
@@ -41,7 +56,7 @@ class MessageCenterDialog(QDialog):
         self.setWindowTitle("消息中心")
         self.resize(700, 500)
 
-        self._messages: list[Message] = []
+        self._messages: list[dict] = []
         self._setup_ui()
         self._load_messages()
 
@@ -106,16 +121,16 @@ class MessageCenterDialog(QDialog):
 
         self._msg_list.clear()
         for msg in self._messages:
-            prefix = "● " if not msg.is_read else "  "
-            text = f"{prefix}{msg.title}"
+            prefix = "● " if not msg["is_read"] else "  "
+            text = f"{prefix}{msg['title']}"
             item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, msg.id)
+            item.setData(Qt.ItemDataRole.UserRole, msg["id"])
 
-            if msg.msg_type == "dedup_alert":
+            if msg["msg_type"] == "dedup_alert":
                 item.setForeground(Qt.GlobalColor.red)
-            elif msg.msg_type == "warning":
+            elif msg["msg_type"] == "warning":
                 item.setForeground(Qt.GlobalColor.darkYellow)
-            elif msg.msg_type == "error":
+            elif msg["msg_type"] == "error":
                 item.setForeground(Qt.GlobalColor.red)
 
             self._msg_list.addItem(item)
@@ -134,21 +149,21 @@ class MessageCenterDialog(QDialog):
         msg = self._messages[row]
 
         html = f"""
-        <h3>{msg.title}</h3>
+        <h3>{msg['title']}</h3>
         <p style="color: #888; font-size: 11px;">
-            时间: {msg.created_at.strftime('%Y-%m-%d %H:%M:%S') if msg.created_at else ''}
-            &nbsp;|&nbsp; 类型: {msg.msg_type}
-            &nbsp;|&nbsp; {'未读' if not msg.is_read else '已读'}
+            时间: {_fmt_time(msg.get('created_at'))}
+            &nbsp;|&nbsp; 类型: {msg['msg_type']}
+            &nbsp;|&nbsp; {'未读' if not msg['is_read'] else '已读'}
         </p>
         <hr>
-        <p>{msg.body or '(无正文内容)'}</p>
+        <p>{(msg.get('body') or '(无正文内容)').replace(chr(10), '<br>')}</p>
         """
         self._detail_browser.setHtml(html)
 
         # 自动标记为已读
-        if not msg.is_read:
-            MessageCenter.mark_read(msg.id)
-            msg.is_read = True
+        if not msg["is_read"]:
+            MessageCenter.mark_read(msg["id"])
+            msg["is_read"] = True
 
     @Slot()
     def _mark_all_read(self) -> None:
@@ -165,6 +180,6 @@ class MessageCenterDialog(QDialog):
             return
 
         msg = self._messages[current_row]
-        if MessageCenter.dismiss(msg.id):
+        if MessageCenter.dismiss(msg["id"]):
             self._load_messages()
             self.messages_updated.emit()
