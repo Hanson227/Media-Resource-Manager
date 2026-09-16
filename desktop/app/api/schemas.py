@@ -10,6 +10,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.services.file_ops import MODE_PATTERN, MODE_TRASH
 from app.utils.constants import ResolutionStatus
 
 
@@ -51,6 +52,30 @@ class FileListResponse(BaseModel):
     total: int = 0
     page: int = 1
     per_page: int = 50
+
+
+class BatchDeleteRequest(BaseModel):
+    """批量删除请求。"""
+    file_ids: list[int] = Field(..., min_length=1, description="要删除的文件 ID 列表")
+    mode: str = Field(
+        default=MODE_TRASH,
+        pattern=MODE_PATTERN,
+        description="trash=移至回收站（默认，与桌面端一致）；record=仅移除媒体库记录",
+    )
+
+
+class BatchDeleteFailure(BaseModel):
+    """批量删除中单条失败的原因。"""
+    file_id: int
+    reason: str
+
+
+class BatchDeleteResponse(BaseModel):
+    """批量删除响应（部分成功也返回 200，逐条给出失败原因）。"""
+    success: bool = True
+    deleted: list[int] = []
+    failed: list[BatchDeleteFailure] = []
+    message: str = ""
 
 
 class FileDetailResponse(BaseModel):
@@ -113,6 +138,7 @@ class DedupResultItem(BaseModel):
     similarity_score: float
     match_count: int
     match_types: str = ""
+    match_level: str = "duplicate"
     is_resolved: bool = False
     resolution: str = "pending"
     created_at: Optional[datetime] = None

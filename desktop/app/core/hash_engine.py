@@ -10,6 +10,7 @@
 
 import logging
 import struct
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -17,7 +18,13 @@ from typing import Callable, Optional, Sequence
 import numpy as np
 from PIL import Image
 
-from app.utils.constants import VIDEO_MIN_FRAME_BRIGHTNESS
+from app.utils.constants import (
+    FACE_DETECT_MAX_SIDE,
+    FACE_DETECT_MODEL,
+    FACE_RECOGNIZE_MODEL,
+    FACE_SIMILARITY_THRESHOLD,
+    VIDEO_MIN_FRAME_BRIGHTNESS,
+)
 from app.utils.image_helpers import imread_unicode, VideoCapture_unicode
 from app.utils.media_types import is_perceptual_image_extension, is_video_extension
 from app.registry.hash_registry import HashAlgorithmRegistry, create_default_registry
@@ -347,16 +354,32 @@ class HashEngine:
     # 人脸识别
     # ============================================================
 
-    # 模型加载状态（类级别缓存）
-    _face_detector: Optional[object] = None    # cv2.dnn.Net
-    _face_recognizer: Optional[object] = None  # cv2.dnn.Net
+    # 模型可用性结论（类级别缓存：只探测一次、只告警一次）
     _models_loaded: bool = False
     _models_path: Optional[str] = None
     _models_unavailable: bool = False          # 已确认不可用（缺模型/API 不兼容）→ 不再重试
 
+    # 检测器/特征器**不是线程安全的**：FaceDetectorYN.setInputSize 与 detect
+    # 共用内部缓冲，多线程并发调用会抛
+    # "Assertion failed: buf.shape() == m.shape()"（实测 24 次并发失败 21 次）。
+    # 因此按线程各持一套，类级别只缓存"是否可用"的结论。
+    _thread_local = threading.local()
+
+    @classmethod
+    def _get_face_nets(cls):
+        """返回当前线程的 (detector, recognizer)；本线程尚未创建时为 (None, None)。"""
+        return (getattr(cls._thread_local, "detector", None),
+                getattr(cls._thread_local, "recognizer", None))
+
+    @classmethod
+    def _set_face_nets(cls, detector, recognizer) -> None:
+        """为当前线程缓存检测器/特征器。"""
+        cls._thread_local.detector = detector
+        cls._thread_local.recognizer = recognizer
+
     @classmethod
     def _load_models(cls, model_dir: Path) -> bool:
-        """加载人脸检测和识别模型（类级别缓存，只加载一次）。
+        """加载人脸检测和识别模型（按线程缓存，只探测一次可用性）。
 
         参数:
             model_dir: 模型文件目录。
@@ -364,10 +387,13 @@ class HashEngine:
         返回:
             True 表示加载成功。
         """
-        if cls._models_loaded and cls._models_path == str(model_dir):
-            return True
         if cls._models_unavailable and cls._models_path == str(model_dir):
             return False  # 已确认不可用，避免逐文件重复告警
+
+        detector, recognizer = cls._get_face_nets()
+        if (detector is not None and recognizer is not None
+                and cls._models_path == str(model_dir)):
+            return True  # 本线程已就绪
 
         try:
             import cv2
@@ -377,53 +403,46 @@ class HashEngine:
             cls._models_path = str(model_dir)
             return False
 
-        # 人脸检测模型（Caffe SSD）
-        proto_path = model_dir / "deploy.prototxt"
-        weights_path = model_dir / "res10_300x300_ssd_iter_140000_fp16.caffemodel"
-        if not proto_path.exists() or not weights_path.exists():
-            logger.warning(f"人脸检测模型缺失: {model_dir}")
+        # 模型文件（OpenCV Zoo 的 ONNX 版：YuNet 负责检测，SFace 负责 128 维特征）
+        detect_path = model_dir / FACE_DETECT_MODEL
+        recognize_path = model_dir / FACE_RECOGNIZE_MODEL
+        missing = [p.name for p in (detect_path, recognize_path) if not p.exists()]
+        if missing:
+            logger.warning(f"人脸模型缺失 {missing}: {model_dir}")
             cls._models_unavailable = True
             cls._models_path = str(model_dir)
             return False
 
-        # OpenCV 5.x 移除了 Caffe/Torch 模型加载 API：必须显式检测，
-        # 否则 AttributeError 会逃出 detect_faces 的异常契约，
-        # 被 hash_worker 吞成“检测不到人脸”（功能静默失效）。
-        if not hasattr(cv2.dnn, "readNetFromCaffe"):
+        # 走 OpenCV 自带的 ONNX 推理接口，不再依赖 Caffe/Torch 加载器。
+        # 旧实现用 cv2.dnn.readNetFromCaffe + readNetFromTorch，这两个 API 已在
+        # OpenCV 5 移除，导致人脸链路在 5.x 上整体静默失效（见 CLAUDE.md）。
+        # FaceDetectorYN/FaceRecognizerSF 需要 OpenCV >= 4.5.4，4.x/5.x 都可运行。
+        if not (hasattr(cv2, "FaceDetectorYN") and hasattr(cv2, "FaceRecognizerSF")):
             logger.warning(
-                f"OpenCV {getattr(cv2, '__version__', '?')} 缺少 cv2.dnn.readNetFromCaffe"
-                "（Caffe 模型加载 API 已在 OpenCV 5 移除），人脸检测不可用；"
-                "请安装 opencv-python-headless<5"
+                f"OpenCV {getattr(cv2, '__version__', '?')} 缺少 "
+                "FaceDetectorYN/FaceRecognizerSF（需要 OpenCV >= 4.5.4），人脸检测不可用"
             )
             cls._models_unavailable = True
             cls._models_path = str(model_dir)
             return False
 
         try:
-            cls._face_detector = cv2.dnn.readNetFromCaffe(
-                str(proto_path), str(weights_path),
+            # 检测阈值放宽到 0.5，实例级阈值在 detect_faces 里再过滤：
+            # 模型按类/线程缓存，不应绑定某个实例的配置。
+            detector = cv2.FaceDetectorYN.create(
+                str(detect_path), "", (320, 320), 0.5, 0.3, 5000,
             )
-            logger.info(f"已加载人脸检测模型: {weights_path}")
-
-            # 人脸特征提取模型（OpenFace nn4.small2）
-            openface_path = model_dir / "nn4.small2.v1.t7"
-            if openface_path.exists() and hasattr(cv2.dnn, "readNetFromTorch"):
-                cls._face_recognizer = cv2.dnn.readNetFromTorch(str(openface_path))
-                logger.info(f"已加载人脸特征模型: {openface_path}")
-            else:
-                if openface_path.exists():
-                    logger.warning("OpenCV 缺少 readNetFromTorch，人脸特征提取不可用")
-                else:
-                    logger.warning("OpenFace 模型缺失，人脸特征提取不可用")
-                cls._face_recognizer = None
+            recognizer = cv2.FaceRecognizerSF.create(str(recognize_path), "")
         except Exception as e:
             logger.warning(f"人脸模型加载失败: {type(e).__name__}: {e}")
             cls._models_unavailable = True
             cls._models_path = str(model_dir)
             return False
 
+        cls._set_face_nets(detector, recognizer)
         cls._models_loaded = True
         cls._models_path = str(model_dir)
+        logger.info(f"已加载人脸模型: {detect_path.name} + {recognize_path.name}")
         return True
 
     def detect_faces(self, image_path: Path) -> list[FaceVector]:
@@ -450,59 +469,70 @@ class HashEngine:
 
         face_vectors: list[FaceVector] = []
         try:
-            # 读取图片（兼容中文路径）
+            # 读取图片（兼容中文路径）。YuNet 直接吃 BGR 原图，无需 blob 预处理。
             image = imread_unicode(image_path)
             if image is None:
                 return []
 
             h, w = image.shape[:2]
+            if h <= 0 or w <= 0:
+                return []
 
-            # 1. 人脸检测
-            blob = cv2.dnn.blobFromImage(
-                image, 1.0, (300, 300),
-                (104.0, 177.0, 123.0),  # 均值减法
-            )
-            self._face_detector.setInput(blob)
-            detections = self._face_detector.forward()
+            # 1. 人脸检测（YuNet 的输入尺寸随图片变化，每张图都要重设）
+            #    长边超过上限先等比缩小：输入尺寸直接决定推理耗时
+            #    （1280px 82ms → 640px 22ms），而缩小对检出率影响很小。
+            scale = min(1.0, FACE_DETECT_MAX_SIDE / max(h, w))
+            if scale < 1.0:
+                detect_img = cv2.resize(
+                    image,
+                    (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            else:
+                detect_img = image
+            dh, dw = detect_img.shape[:2]
+
+            detector, recognizer = self._get_face_nets()
+            if detector is None or recognizer is None:
+                return []
+            detector.setInputSize((dw, dh))
+            _, detections = detector.detect(detect_img)
+            if detections is None:
+                return []
 
             face_index = 0
-            for i in range(detections.shape[2]):
-                confidence = detections[0, 0, i, 2]
+            # 每行 15 列：[x, y, w, h, 5 个关键点(x,y), 置信度]
+            for det in detections:
+                confidence = float(det[-1])
                 if confidence < self._face_confidence:  # 过滤低置信度（阈值来自配置）
                     continue
 
-                # 边界框
-                box = detections[0, 0, i, 3:7] * [w, h, w, h]
-                x1, y1, x2, y2 = box.astype("int").tolist()
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(w, x2), min(h, y2)
+                if scale < 1.0:
+                    # 前 14 列是坐标（框 + 关键点），换算回原图坐标系
+                    det = det.copy()
+                    det[:14] /= scale
 
-                if x2 <= x1 or y2 <= y1:
+                x, y, bw, bh = (int(v) for v in det[:4])
+                if bw <= 0 or bh <= 0:
                     continue
 
-                # 2. 提取人脸区域并计算特征向量
-                face_roi = image[y1:y2, x1:x2]
-                if face_roi.size == 0:
+                # 2. 先按关键点对齐裁剪（SFace 要求 112x112 对齐人脸），再提特征
+                aligned = recognizer.alignCrop(image, det)
+                if aligned is None or aligned.size == 0:
                     continue
+                embedding = recognizer.feature(aligned)
 
-                if self._face_recognizer is None:
-                    logger.debug("人脸特征模型未加载，跳过特征提取")
+                vector_128 = tuple(float(v) for v in embedding.flatten()[:128])
+                if len(vector_128) != 128:  # 契约：DB 里按 128×float32 存储
+                    logger.warning(
+                        f"人脸特征维度异常（期望 128，实际 {len(vector_128)}）: {image_path}"
+                    )
                     continue
-
-                # OpenFace 需要 96x96 输入
-                face_blob = cv2.dnn.blobFromImage(
-                    face_roi, 1.0 / 255.0, (96, 96),
-                    (0, 0, 0), swapRB=True, crop=False,
-                )
-                self._face_recognizer.setInput(face_blob)
-                embedding = self._face_recognizer.forward()
-
-                vector_128 = tuple(embedding.flatten().tolist()[:128])
 
                 face_vectors.append(FaceVector(
                     face_index=face_index,
                     vector=vector_128,
-                    bbox=(x1, y1, x2 - x1, y2 - y1),
+                    bbox=(x, y, bw, bh),
                 ))
                 face_index += 1
 

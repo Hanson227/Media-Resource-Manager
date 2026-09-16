@@ -297,9 +297,16 @@ body {
 .feed-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: var(--space-6) var(--space-6) var(--space-3);
+  /* 窄屏（390px）放不下"计数 + 管理/大小/日期"一整行：允许换行，
+     否则右侧按钮会被挤成竖排、标题被压成两行（实测截图确认过） */
+  flex-wrap: wrap; row-gap: var(--space-3);
 }
-.feed-header h2 { font-size: 16px; font-weight: 600; }
+.feed-header h2 { font-size: 16px; font-weight: 600; flex: 1 1 auto; min-width: 0; }
 .feed-header .count { font-size: 12px; color: var(--text-secondary); }
+.feed-header-actions {
+  display: flex; align-items: center; gap: var(--space-3);
+  margin-left: auto; flex-wrap: nowrap;
+}
 .feed-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -352,6 +359,42 @@ body {
 .feed-item .file-info .meta {
   font-size: 10px; color: var(--text-tertiary); margin-top: 1px;
 }
+
+/* ========== 文件管理：多选删除 ========== */
+.feed-item.selected { background: var(--accent-dim); box-shadow: inset 0 0 0 2px var(--accent); }
+.feed-item .select-mark {
+  position: absolute; top: var(--space-2); right: var(--space-2);
+  font-size: 22px; color: rgba(255,255,255,.85); line-height: 1;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,.65));
+}
+.feed-item.selected .select-mark { color: var(--accent); }
+/* 多选操作栏：贴在底部标签栏之上（桌面端标签栏隐藏 → bottom 归零，见媒体查询） */
+.select-bar {
+  position: fixed; left: 0; right: 0;
+  bottom: calc(var(--tab-height) + var(--safe-bottom));
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: var(--space-3) var(--space-6);
+  background: var(--bg-elevated);
+  border-top: 1px solid var(--border);
+  z-index: 90;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.select-bar-btn {
+  display: flex; align-items: center; gap: var(--space-2);
+  background: none; border: none; cursor: pointer;
+  color: var(--text-secondary); font-size: 12px; font-weight: 600;
+  padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm);
+}
+.select-bar-btn .mdi { font-size: 18px; }
+.select-bar-btn:hover { background: var(--bg-card); }
+.select-bar-btn.danger { color: var(--red); }
+.select-bar-btn:disabled { opacity: .4; cursor: not-allowed; }
+.select-bar-count {
+  flex: 1; text-align: center; font-size: 12px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.select-bar-spacer { height: 56px; }
 
 /* ========== Empty State ========== */
 .empty-state {
@@ -701,6 +744,12 @@ body {
   background: var(--bg-card); border-radius: var(--radius-md);
 }
 .dedup-header .score { font-size: 32px; font-weight: 800; color: var(--accent); }
+.dedup-header .score.related { font-size: 24px; color: var(--amber); }
+.dedup-header.is-related { border: 1px solid rgba(245, 158, 11, 0.35); }
+.dedup-header .related-note {
+  font-size: 12px; color: var(--text-secondary); line-height: 1.6;
+  margin-top: var(--space-4); text-align: left;
+}
 .dedup-header .units { font-size: 13px; color: var(--text-secondary); margin: var(--space-2) 0; }
 .dedup-header .match-info { font-size: 11px; color: var(--text-tertiary); }
 .dedup-header .resolve-actions { display: flex; gap: var(--space-3); margin-top: var(--space-6); }
@@ -720,6 +769,64 @@ body {
 .tag.md5  { background: rgba(34, 197, 94, 0.15);  color: var(--green); }
 .tag.phash{ background: rgba(96, 165, 250, 0.15);  color: var(--blue); }
 .tag.dhash{ background: rgba(99, 102, 241, 0.15);  color: var(--accent); }
+/* 视频帧匹配证据最弱、人脸只是线索：各自独立配色，避免和整图 pHash 混为一谈 */
+.tag.video{ background: rgba(167, 139, 250, 0.15); color: #a78bfa; }
+.tag.face { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
+
+.section-title { font-size: 13px; padding: var(--space-3) var(--space-2); color: var(--text-secondary); }
+.hint-pair { opacity: .92; }
+.face-hint-note {
+  font-size: 11px; color: var(--text-tertiary);
+  padding: var(--space-3) var(--space-6); line-height: 1.6;
+}
+
+/* ========== Dedup: 触发查重 / 等级分组 ========== */
+.dedup-run {
+  display: flex; align-items: center; gap: var(--space-4);
+  background: var(--bg-card); border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-6); margin-bottom: var(--space-4);
+}
+.dedup-run-text { flex: 1; min-width: 0; }
+.dedup-run-text .run-title { font-size: 13px; font-weight: 600; }
+.dedup-run-text .run-sub {
+  font-size: 11px; color: var(--text-tertiary); margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dedup-run-btn {
+  width: auto; flex-shrink: 0;
+  padding: var(--space-3) var(--space-6); font-size: 12px;
+}
+.run-progress {
+  height: 3px; background: var(--border); border-radius: 2px;
+  overflow: hidden; margin: 0 0 var(--space-4);
+}
+.run-progress-bar {
+  height: 100%; background: var(--accent); transition: width .3s ease;
+}
+.dedup-tabs { display: flex; gap: var(--space-2); margin-bottom: var(--space-4); }
+.dedup-tab {
+  flex: 1; padding: var(--space-3); cursor: pointer;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary); font-size: 12px; font-weight: 600;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.dedup-tab.active {
+  background: var(--accent-dim); border-color: var(--accent); color: var(--text-primary);
+}
+.dedup-tab .tab-count { margin-left: var(--space-2); font-size: 10px; color: var(--text-tertiary); }
+.lvl-badge {
+  display: inline-block; padding: 1px 6px; border-radius: 3px;
+  font-size: 10px; font-weight: 600; margin-right: var(--space-2);
+}
+.lvl-badge.duplicate { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+.lvl-badge.related   { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
+/* "疑似相关"不是重复：用琥珀色左边框与重复区分，避免被当成待删项 */
+.card.card-related { border-left: 3px solid var(--amber); }
+.more-btn { margin-top: var(--space-3); }
+.card-meta { text-align: right; flex-shrink: 0; }
+.card-meta .count { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.card-meta .label { font-size: 10px; color: var(--text-tertiary); }
 
 /* ========== Loading ========== */
 .loading-dots {
@@ -836,6 +943,8 @@ body {
 
   /* Sidebar replaces bottom tabs */
   .bottom-tabs { display: none; }
+  /* 标签栏已隐藏 → 多选操作栏贴底 */
+  .select-bar { bottom: 0; }
 
   .page {
     padding: var(--space-6) var(--space-8);

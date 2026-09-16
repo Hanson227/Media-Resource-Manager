@@ -185,18 +185,40 @@ class CleanupService:
             return False
 
     @staticmethod
+    def _thumbnail_paths(file_id: int, cache_dir: Path) -> list:
+        """缩略图本体及其 `.meta` sidecar —— 两者必须同生同灭。
+
+        sidecar 记录源路径/mtime/size，是判断"缓存属于哪个文件"的依据
+        （见 ThumbnailGenerator.is_cache_valid），只删图会留下永远没人回收的碎 meta。
+        """
+        return [cache_dir / f"{file_id}_thumb.jpg{suffix}" for suffix in ("", ".meta")]
+
+    @staticmethod
+    def _cache_entry_id(name: str) -> Optional[int]:
+        """从缓存文件名解析 file_id，兼容 `12_thumb.jpg` 与 `12_thumb.jpg.meta`。
+
+        无法识别的名字返回 None（调用方据此跳过无关文件）。
+        """
+        base = name[: -len(".meta")] if name.endswith(".meta") else name
+        suffix = "_thumb.jpg"
+        if not base.endswith(suffix):
+            return None
+        id_str = base[: -len(suffix)]
+        return int(id_str) if id_str.isdigit() else None
+
+    @staticmethod
     def _remove_thumbnail(file_id: int, cache_dir=None) -> None:
-        """删除文件对应的缩略图缓存文件（目录来自配置，见 configure_thumbnail_cache_dir）。"""
+        """删除文件对应的缩略图缓存（含 .meta sidecar，目录来自配置）。"""
         if file_id is None:
             return
         cache_dir = _resolve_cache_dir(cache_dir)
-        thumb = cache_dir / f"{file_id}_thumb.jpg"
-        if thumb.exists():
-            try:
-                thumb.unlink()
-                logger.debug(f"已清理缩略图缓存: {thumb}")
-            except Exception as e:
-                logger.warning(f"缩略图清理失败 {thumb}: {e}")
+        for thumb in CleanupService._thumbnail_paths(file_id, cache_dir):
+            if thumb.exists():
+                try:
+                    thumb.unlink()
+                    logger.debug(f"已清理缩略图缓存: {thumb}")
+                except Exception as e:
+                    logger.warning(f"缩略图清理失败 {thumb}: {e}")
 
     @staticmethod
     def remove_unit_thumbnails(unit_id: int) -> int:
@@ -241,8 +263,12 @@ class CleanupService:
     def purge_orphaned_thumbnails(cache_dir: Path = None) -> int:
         """清理孤儿缩略图：缓存存在但 DB 中无对应文件的。
 
+        缩略图与 `.meta` sidecar 一起判定、一起删除：
+        - 只扫 `.jpg` 会让"图早已被删、meta 还留着"的历史残留永远清不掉；
+        - 只删 `.jpg` 会为每个被清理的 id 留下一个碎 meta。
+
         返回:
-            删除的孤儿文件数。
+            删除的缓存文件数（缩略图 + sidecar）。
         """
         if cache_dir is None:
             cache_dir = _resolve_cache_dir()
@@ -255,34 +281,62 @@ class CleanupService:
 
         count = 0
         try:
+            # 按 file_id 归组：`12_thumb.jpg` 与 `12_thumb.jpg.meta` 是同一份缓存
+            entries: dict[int, list] = {}
+            for f in cache_dir.iterdir():
+                if not f.is_file():
+                    continue
+                fid = CleanupService._cache_entry_id(f.name)
+                if fid is not None:
+                    entries.setdefault(fid, []).append(f)
+
+            if not entries:
+                return 0
+
             with DatabaseManager.session() as session:
-                cached_ids = set()
-                for f in cache_dir.iterdir():
-                    if f.suffix == ".jpg" and f.stem.endswith("_thumb"):
-                        id_str = f.stem.rsplit("_thumb", 1)[0]
-                        if id_str.isdigit():
-                            cached_ids.add(int(id_str))
-
-                if not cached_ids:
-                    return 0
-
                 # 查出所有缓存ID中哪些确实有对应的文件记录
                 existing = {
                     row[0] for row in session.execute(
-                        select(MediaFile.id).where(MediaFile.id.in_(cached_ids))
+                        select(MediaFile.id).where(MediaFile.id.in_(list(entries)))
                     ).all()
                 }
-                orphaned = cached_ids - existing
-                for fid in orphaned:
-                    (cache_dir / f"{fid}_thumb.jpg").unlink(missing_ok=True)
+            for fid in set(entries) - existing:
+                for path in entries[fid]:
+                    path.unlink(missing_ok=True)
                     count += 1
 
             if count > 0:
-                logger.info(f"已清理 {count} 个孤儿缩略图")
+                logger.info(f"已清理 {count} 个孤儿缩略图缓存文件")
             return count
         except Exception as e:
             logger.error(f"清理孤儿缩略图失败: {e}")
             return 0
+
+    @staticmethod
+    def clear_thumbnail_cache(cache_dir: Path = None) -> int:
+        """清空缩略图缓存目录（缩略图 + `.meta` sidecar），返回删除的文件数。
+
+        用于「工具 → 重置数据库」：重置后 file_id 从 1 重新分配，旧缓存既不会
+        再被命中（读取端会校验归属），也没有其它回收时机，留着只是占磁盘。
+        只删除本服务认得出来的缓存文件，目录中的无关内容原样保留。
+        """
+        if cache_dir is None:
+            cache_dir = _resolve_cache_dir()
+        if not cache_dir.is_dir():
+            return 0
+
+        count = 0
+        for f in cache_dir.iterdir():
+            if not f.is_file() or CleanupService._cache_entry_id(f.name) is None:
+                continue
+            try:
+                f.unlink()
+                count += 1
+            except Exception as e:
+                logger.warning(f"缩略图缓存清理失败 {f}: {e}")
+        if count > 0:
+            logger.info(f"已清空缩略图缓存: {count} 个文件")
+        return count
 
     @staticmethod
     def invalidate_thumbnail(file_id: int) -> None:

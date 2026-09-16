@@ -20,7 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 from app.utils.constants import (
-    MatchType, MediaType, MessageType, ResolutionStatus,
+    MatchLevel, MatchType, MediaType, MessageType, ResolutionStatus,
     ScanStatus, UnitStatus, WhitelistMatchType,
 )
 
@@ -286,6 +286,10 @@ class DedupResult(Base):
             f"resolution IN ({_enum_in(ResolutionStatus)})",
             name="ck_dedup_results_resolution",
         ),
+        CheckConstraint(
+            f"match_level IN ({_enum_in(MatchLevel)})",
+            name="ck_dedup_results_level",
+        ),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -309,6 +313,9 @@ class DedupResult(Base):
 
     match_types = Column(String(128), nullable=True)
     """逗号分隔的匹配类型，如 'md5,phash,face'。"""
+
+    match_level = Column(String(16), nullable=False, default=MatchLevel.DUPLICATE.value)
+    """命中等级：duplicate（建议处置）/ related（仅提醒）。"""
 
     is_resolved = Column(Boolean, nullable=False, default=False)
     """是否已处理。"""
@@ -359,7 +366,7 @@ class DedupFileMatch(Base):
     """相似度得分。"""
 
     match_type = Column(String(8), nullable=False)
-    """匹配类型：md5 / phash / dhash / face。"""
+    """匹配类型：md5 / phash / dhash / face / video。"""
 
     created_at = Column(DateTime, nullable=False, default=datetime.now)
 

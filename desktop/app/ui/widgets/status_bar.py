@@ -17,7 +17,7 @@ from datetime import datetime
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
-    QStatusBar, QLabel, QProgressBar, QHBoxLayout, QApplication,
+    QStatusBar, QLabel, QProgressBar, QHBoxLayout, QApplication, QPushButton,
 )
 
 from config import AppConfig
@@ -44,7 +44,12 @@ class MainStatusBar(QStatusBar):
     """主窗口状态栏。
 
     提供进度显示、状态文字更新、API 指示灯等功能。
+
+    信号:
+        cancel_requested: 用户点击「取消」按钮，请求停止当前后台任务。
     """
+
+    cancel_requested = Signal()
 
     def __init__(self, config: AppConfig, parent=None) -> None:
         """初始化状态栏。
@@ -56,6 +61,7 @@ class MainStatusBar(QStatusBar):
         self._config = config
         self._api_running: bool | None = None
         self._unread_count: int = 0
+        self._cancellable: bool = False
 
         # ==== 状态文字 ====
         self._status_label = QLabel("就绪")
@@ -70,6 +76,21 @@ class MainStatusBar(QStatusBar):
         self._progress_bar.setValue(0)
         self._progress_bar.hide()
         self.addWidget(self._progress_bar)
+
+        # ==== 取消按钮（仅长任务运行期间显示） ====
+        # 扫描/哈希/查重都跑在 QThread 里，没有取消入口时用户只能强杀进程
+        # （或关窗口，那会在 worker 仍写库时 dispose 数据库引擎）。
+        # objectName 关联 style.qss 里的紧凑样式：通用 QPushButton 规则是
+        # padding:7px 16px + 12px 字号，在限高的状态栏里会把文字压扁。
+        self._cancel_btn = QPushButton("取消")
+        self._cancel_btn.setObjectName("statusBarCancel")
+        self._cancel_btn.setFixedHeight(20)
+        self._cancel_btn.setMinimumWidth(48)
+        self._cancel_btn.setMaximumWidth(64)
+        self._cancel_btn.setToolTip("停止当前后台任务")
+        self._cancel_btn.clicked.connect(self._on_cancel_clicked)
+        self._cancel_btn.hide()
+        self.addWidget(self._cancel_btn)
 
         # ==== 上次扫描时间 ====
         self._last_scan_label = QLabel("尚未扫描")
@@ -140,6 +161,24 @@ class MainStatusBar(QStatusBar):
         """隐藏进度条。"""
         self._progress_bar.hide()
         self._progress_bar.setValue(0)
+        self.set_cancellable(False)
+
+    def _on_cancel_clicked(self) -> None:
+        """点击取消：立即禁用按钮，避免重复触发，然后发出请求。"""
+        self._cancel_btn.setEnabled(False)
+        self.set_status("正在停止当前任务...")
+        self.cancel_requested.emit()
+
+    @Slot(bool)
+    def set_cancellable(self, enabled: bool) -> None:
+        """显示或隐藏取消按钮。
+
+        参数:
+            enabled: True 表示当前任务可取消。
+        """
+        self._cancellable = enabled
+        self._cancel_btn.setEnabled(True)
+        self._cancel_btn.setVisible(enabled)
 
     @Slot(str)
     def set_scan_time(self, time_str: str) -> None:

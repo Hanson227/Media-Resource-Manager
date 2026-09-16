@@ -72,15 +72,20 @@ class DedupSettingsDialog(QDialog):
 
         self._face_check = QCheckBox("启用人脸识别查重")
         self._face_check.setChecked(config.face_detection_enabled)
-        self._face_check.setToolTip("需要下载预训练模型后才能使用")
+        self._face_check.setToolTip(
+            "人脸只作为对比弹窗里的线索，不计入重复判定；模型随程序内置"
+        )
         face_form.addRow(self._face_check)
 
+        # SFace 用余弦相似度：越大越像（旧 OpenFace 版是欧氏距离，越小越像）
         self._face_spin = QDoubleSpinBox()
         self._face_spin.setRange(0.0, 1.0)
-        self._face_spin.setSingleStep(0.05)
-        self._face_spin.setValue(config.face_distance_threshold)
-        self._face_spin.setToolTip("人脸欧氏距离 ≤ 此值视为同一人物")
-        face_form.addRow("人脸距离阈值:", self._face_spin)
+        self._face_spin.setSingleStep(0.01)
+        self._face_spin.setValue(config.face_similarity_threshold)
+        self._face_spin.setToolTip(
+            "人脸特征余弦相似度 ≥ 此值视为同一人物（SFace 官方推荐 0.363）"
+        )
+        face_form.addRow("人脸相似度阈值:", self._face_spin)
 
         layout.addWidget(face_group)
 

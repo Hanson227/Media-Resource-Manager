@@ -6,6 +6,11 @@
 """
 
 
+# CPython 3.10+ 提供 C 实现的 int.bit_count()，比 bin(x).count("1") 快数倍
+# （后者每次都要构造一个 64 字符的临时字符串）。汉明距离是查重的热点调用。
+_HAS_BIT_COUNT = hasattr(int, "bit_count")
+
+
 def hamming_distance(hex_a: str, hex_b: str) -> int:
     """计算两个十六进制哈希字符串之间的汉明距离。
 
@@ -18,9 +23,10 @@ def hamming_distance(hex_a: str, hex_b: str) -> int:
         与 registry/dedup 侧的约定一致，便于直接与阈值比较）。
     """
     try:
-        return bin(int(hex_a, 16) ^ int(hex_b, 16)).count("1")
+        diff = int(hex_a, 16) ^ int(hex_b, 16)
     except (ValueError, TypeError):
         return 999
+    return diff.bit_count() if _HAS_BIT_COUNT else bin(diff).count("1")
 
 
 def hamming_similarity(hex_a: str, hex_b: str, max_bits: int = 64) -> float:

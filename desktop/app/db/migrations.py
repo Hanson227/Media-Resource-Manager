@@ -15,11 +15,34 @@ from sqlalchemy.exc import OperationalError
 
 from app.db.engine import DatabaseManager
 from app.db.models import Base
+from app.utils.constants import MatchLevel, MatchType
 
 logger = logging.getLogger(__name__)
 
 # 当前数据库 Schema 版本号
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 6
+
+# v4→v5 重建 dedup_file_matches 用的建表语句。
+# SQLite 不支持就地修改 CHECK 约束，只能"新建表 → 拷数据 → 换名"重建；
+# 列定义、约束名、外键必须与 models.DedupFileMatch 的建表结果一致，
+# CHECK 列表由 MatchType 枚举动态生成，避免与代码漂移。
+_DEDUP_FILE_MATCHES_DDL = """
+CREATE TABLE {table} (
+    id INTEGER NOT NULL,
+    dedup_result_id INTEGER NOT NULL,
+    file_a_id INTEGER NOT NULL,
+    file_b_id INTEGER NOT NULL,
+    similarity_score FLOAT NOT NULL,
+    match_type VARCHAR(8) NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT uq_file_pair UNIQUE (dedup_result_id, file_a_id, file_b_id),
+    CONSTRAINT ck_dedup_file_matches_type CHECK (match_type IN ({types})),
+    FOREIGN KEY(dedup_result_id) REFERENCES dedup_results (id) ON DELETE CASCADE,
+    FOREIGN KEY(file_a_id) REFERENCES media_files (id) ON DELETE CASCADE,
+    FOREIGN KEY(file_b_id) REFERENCES media_files (id) ON DELETE CASCADE
+)
+"""
 
 
 def init_db(db_path: Optional[Path] = None) -> None:
@@ -94,6 +117,84 @@ def _backfill_content_modified_at(engine) -> None:
     logger.info(f"回填 content_modified_at 完成: {len(buckets)} 个单元")
 
 
+def _migrate_v4_to_v5(engine) -> None:
+    """v4→v5: dedup_file_matches.match_type 增加 'video' 取值。
+
+    视频帧级匹配此前复用 'phash' 落库（见 dedup_engine），导致界面无法区分
+    "整图感知哈希命中"与"视频帧命中"。扩展 CHECK 约束后两者可分开记录。
+
+    实现要点：SQLite 无法就地修改 CHECK 约束，按官方推荐走"重建表"——
+    用 raw_connection 拿到 DBAPI 连接，先关外键（PRAGMA 在事务内会被忽略，
+    必须赶在任何 DML 之前执行），拷数据、换名、重建索引。
+    幂等：约束里已含 'video' 时直接返回。
+    """
+    inspector = inspect(engine)
+    if "dedup_file_matches" not in inspector.get_table_names():
+        return
+
+    with engine.connect() as conn:
+        ddl = conn.execute(text(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='dedup_file_matches'"
+        )).scalar() or ""
+    if "'video'" in ddl:
+        return  # 已是新约束
+
+    types = ", ".join(f"'{e.value}'" for e in MatchType)
+    columns = ("id, dedup_result_id, file_a_id, file_b_id, "
+               "similarity_score, match_type, created_at")
+
+    raw = engine.raw_connection()
+    try:
+        cur = raw.cursor()
+        cur.execute("PRAGMA foreign_keys=OFF")
+        cur.execute(_DEDUP_FILE_MATCHES_DDL.format(table="_dfm_v5", types=types))
+        cur.execute(
+            f"INSERT INTO _dfm_v5 ({columns}) SELECT {columns} FROM dedup_file_matches"
+        )
+        cur.execute("DROP TABLE dedup_file_matches")
+        cur.execute("ALTER TABLE _dfm_v5 RENAME TO dedup_file_matches")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS ix_dedup_file_matches_result "
+            "ON dedup_file_matches (dedup_result_id)"
+        )
+        raw.commit()
+        cur.execute("PRAGMA foreign_keys=ON")
+    except Exception:
+        raw.rollback()
+        logger.error("迁移 v4→v5 失败，dedup_file_matches 保持原样")
+        raise
+    finally:
+        raw.close()
+    logger.info("迁移 v4→v5: dedup_file_matches.match_type 支持 'video'")
+
+
+def _migrate_v5_to_v6(engine) -> None:
+    """v5→v6: dedup_results 增加 match_level（duplicate / related）。
+
+    "疑似相关"（同演员/同场景/部分重叠）与"重复"共用同一张表与同一套处置语义
+    （ignore/whitelist 对两者都适用），因此只是加一列而不是新开表。
+    SQLite 的 ADD COLUMN 支持带 CHECK 约束，schema 与全新建库保持一致。
+    幂等：列已存在时直接返回。
+    """
+    inspector = inspect(engine)
+    if "dedup_results" not in inspector.get_table_names():
+        return
+    columns = [c["name"] for c in inspector.get_columns("dedup_results")]
+    if "match_level" in columns:
+        return
+
+    levels = ", ".join(f"'{e.value}'" for e in MatchLevel)
+    with engine.connect() as conn:
+        conn.execute(text(
+            f"ALTER TABLE dedup_results ADD COLUMN match_level VARCHAR(16) "
+            f"NOT NULL DEFAULT '{MatchLevel.DUPLICATE.value}' "
+            f"CHECK (match_level IN ({levels}))"
+        ))
+        conn.commit()
+    logger.info("迁移 v5→v6: dedup_results 增加 match_level 列")
+
+
 def migrate_db() -> None:
     """执行数据库迁移（当 Schema 版本变更时）。"""
     engine = DatabaseManager.get_engine()
@@ -164,6 +265,16 @@ def migrate_db() -> None:
         _backfill_content_modified_at(engine)
         _set_schema_version(engine, 4)
         current = 4
+
+    if current < 5:
+        _migrate_v4_to_v5(engine)
+        _set_schema_version(engine, 5)
+        current = 5
+
+    if current < 6:
+        _migrate_v5_to_v6(engine)
+        _set_schema_version(engine, 6)
+        current = 6
 
     logger.info(f"数据库迁移完成，当前版本: v{current}")
 

@@ -130,12 +130,23 @@ dedup_results {
   unit_a_id, unit_b_id,     // 比对的双方单元 ID
   unit_a_name, unit_b_name,
   similarity_score,          // 杰卡德指数 [0, 1]
-  match_count,               // 匹配的文件对数
-  match_types,               // 如 "md5,phash"
+  match_count,               // 匹配的文件对数（不含人脸线索）
+  match_types,               // 如 "md5,phash"；取值 md5 / phash / dhash / video / face
+  match_level,               // "duplicate" | "related" —— 命中等级，决定是否建议处置
   is_resolved,               // 是否已处理
-  resolution,                // "pending" | "keep_a" | "keep_b" | "whitelist"
+  resolution,                // "pending" | "keep_a" | "keep_b" | "merge" | "whitelist" | "ignore"
 }
 ```
+
+> ⚠️ **`match_level` 决定客户端的处置入口**：
+> - `duplicate`：杰卡德 ≥ 阈值，**建议保留一份**，可提供"保留 A / 保留 B"。
+> - `related`：未达阈值但证据足够（同演员 / 同场景 / 部分文件重叠），
+>   **仅提醒、不建议删除**。桌面端对这类结果不提供"保留 A/B"，客户端也应如此，
+>   否则等于暗示用户删掉另一侧。实测 166 个单元会产生 200+ 对 related，
+>   建议按 `level` 分开取，不要和 duplicate 混在一页里。
+>
+> 人脸匹配（`match_type=face`）不计入杰卡德：人脸向量回答的是"是不是同一个人"，
+> 不是"是不是同一个文件"，只作为线索返回（详见 3.3 详情接口的 `is_hint`）。
 
 ### 2.5 关系图
 
@@ -221,6 +232,27 @@ GET /api/units/{unit_id}/files
 }
 ```
 
+#### 删除资源单元（文件夹）
+
+```
+DELETE /api/units/{unit_id}?mode=trash
+```
+
+| 参数 | 类型 | 默认 | 说明 |
+|--------|------|--------|------|
+| `mode` | str | `trash` | `trash`=整个文件夹移至回收站 + 删库记录（与桌面端「删除文件夹」一致）；`record`=仅删除数据库记录，磁盘文件夹保留 |
+
+响应：
+
+```json
+{"success": true, "message": "已删除文件夹: 片段A（已移至回收站）"}
+```
+
+> 删除会级联清理该单元的 `media_files` / `face_vectors` / `video_frames` /
+> 关联的 `dedup_results`。`mode=trash` 且磁盘删除失败（如网络路径无法进回收站）
+> 时返回 `409`，**数据库记录保持不变** —— 不会出现"记录没了但文件还在"的孤儿状态。
+> 单元不存在返回 `404`。
+
 ### 3.2 媒体文件
 
 #### 文件列表
@@ -255,33 +287,81 @@ GET /api/files/{file_id}/thumbnail
 >
 > **手机端方案**：参见第 4 节"缩略图与媒体文件"。
 
-#### 删除文件记录
+#### 删除文件
 
 ```
-DELETE /api/files/{file_id}
+DELETE /api/files/{file_id}?mode=trash
 ```
+
+| 参数 | 类型 | 默认 | 说明 |
+|--------|------|--------|------|
+| `mode` | str | `trash` | `trash`=移至回收站 + 删库记录（与桌面端一致，**默认**）；`record`=仅移除媒体库记录，磁盘文件保留 |
 
 响应：
 
 ```json
-{"success": true, "message": "已删除: 照片01.jpg"}
+{"success": true, "message": "已删除: 照片01.jpg（已移至回收站）"}
 ```
+
+> 先移回收站、成功后才删数据库记录：磁盘删除失败时返回 `409` 且记录保留，
+> 避免用户再也看不到这个文件。顺带清理缩略图缓存并重算所属单元的
+> `file_count` / `total_size`。文件不存在返回 `404`。
+
+#### 批量删除文件
+
+```
+POST /api/files/batch-delete
+```
+
+请求体：
+
+```json
+{"file_ids": [101, 102, 103], "mode": "trash"}
+```
+
+响应（部分失败也返回 `200`，逐条给出原因）：
+
+```json
+{
+  "success": false,
+  "deleted": [101, 102],
+  "failed": [{"file_id": 103, "reason": "无法移至回收站: ..."}],
+  "message": "已删除 2 个文件，1 个失败"
+}
+```
+
+> `file_ids` 会自动去重；重复 ID 不会被记成"文件不存在"的失败项。
 
 ### 3.3 查重
 
 #### 查重结果列表
 
 ```
-GET /api/dedup/results?unresolved_only=true&page=1&per_page=20
+GET /api/dedup/results?unresolved_only=true&level=duplicate&page=1&per_page=20
 ```
 
 参数：
 
 | 参数 | 类型 | 默认 | 说明 |
-|--------|------|--------|--------|
+|--------|------|--------|------|
 | `unresolved_only` | bool | `true` | 仅显示未处理的 |
+| `level` | str | - | 按命中等级过滤：`duplicate` / `related`；省略则不过滤（related 数量可达 duplicate 的数十倍，建议显式传） |
 | `page` | int | 1 | 页码 |
-| `per_page` | int | 20 | 每页数量 |
+| `per_page` | int | 20 | 每页数量（<= 100） |
+
+#### 未处置结果分级计数
+
+```
+GET /api/dedup/counts
+```
+
+响应：
+
+```json
+{"duplicate": 3, "related": 234, "total": 237}
+```
+
+用于列表页分组标题 / 角标，避免拉全量再在客户端统计。
 
 #### 查重详情
 
@@ -298,11 +378,26 @@ GET /api/dedup/results/{result_id}
   "unit_b": { "id": 2, "name": "片段B" },
   "similarity_score": 1.0,
   "match_count": 2,
+  "match_level": "duplicate",
   "file_matches": [
-    { "file_a_id": 101, "file_b_id": 103, "match_type": "md5", "similarity_score": 1.0 }
+    {
+      "file_a_id": 101, "file_b_id": 103,
+      "file_a_name": "照片01.jpg", "file_b_name": "照片03.jpg",
+      "match_type": "md5", "similarity_score": 1.0,
+      "is_hint": false
+    },
+    {
+      "file_a_id": 102, "file_b_id": 104,
+      "file_a_name": "照片02.jpg", "file_b_name": "照片04.jpg",
+      "match_type": "face", "similarity_score": 0.71,
+      "is_hint": true
+    }
   ]
 }
 ```
+
+> `is_hint=true` 的条目是**线索而非重复证据**（人脸相似），不计入
+> `similarity_score` 与 `match_count`，客户端应单独展示并说明"未计入重复判定"。
 
 #### 处理查重结果
 
@@ -320,11 +415,14 @@ POST /api/dedup/results/{result_id}/resolve
 
 | 值 | 含义 |
 |-----|---------|
-| `keep_a` | 保留单元 A |
-| `keep_b` | 保留单元 B |
+| `keep_a` | 保留单元 A（仅 `duplicate` 适用） |
+| `keep_b` | 保留单元 B（仅 `duplicate` 适用） |
 | `merge` | 合并 |
 | `whitelist` | 加入白名单，不再提示（同时写入白名单表，重跑自动跳过） |
 | `ignore` | 暂时忽略 |
+
+> `match_level=related` 的记录**不要**提供"保留 A / 保留 B"入口：related 的语义是
+> "仅供参考、不建议删除"，给出保留按钮等于诱导用户删掉另一侧。
 
 #### 触发查重（异步）
 
@@ -335,8 +433,14 @@ POST /api/dedup/run
 请求体：
 
 ```json
-{"unit_ids": [1, 2, 3], "threshold": 0.80}
+{"unit_ids": [1, 2, 3], "threshold": 0.80, "index_first": true}
 ```
+
+| 字段 | 类型 | 默认 | 说明 |
+|--------|------|--------|------|
+| `unit_ids` | int[] | - | 参与比对的单元 ID，至少 2 个 |
+| `threshold` | float | 0.80 | 杰卡德阈值 |
+| `index_first` | bool | `false` | 先为**未索引**文件计算哈希（MD5/视频帧/人脸）再比对。桌面端「一键查重」即此行为；为 `false` 时未索引文件对查重完全不可见却会返回"完成"，第三方客户端建议传 `true` |
 
 立即返回 `202`：
 
@@ -353,16 +457,39 @@ GET /api/dedup/run/{task_id}
 ```json
 {
   "task_id": "dedup-1",
-  "status": "completed",           // queued | running | completed | failed
-  "progress": [12, 30],            // 比对对数进度（可选）
-  "result": { "total_compared": 4, "duplicates_found": 1,
-              "saved_count": 1, "skipped_pairs": 0, "elapsed_seconds": 2.1 },
+  "status": "running",              // queued | running | completed | failed
+  "phase": "indexing",              // indexing=正在补索引；comparing=正在比对；null=未开始/已结束
+  "progress": [12, 30],             // 当前阶段进度（索引=文件数，比对=单元对数）
+  "result": null,
+  "error": null
+}
+```
+
+完成后：
+
+```json
+{
+  "task_id": "dedup-1",
+  "status": "completed",
+  "phase": null,
+  "progress": null,
+  "result": {
+    "total_compared": 4,
+    "duplicates_found": 1,          // 命中"重复"的单元对
+    "related_found": 12,            // 命中"疑似相关"的单元对（仅提醒）
+    "saved_count": 1, "related_saved": 12,
+    "skipped_pairs": 0, "elapsed_seconds": 2.1,
+    "unindexed_before": 1362,       // 本次开始前待索引文件数
+    "indexed_count": 1362           // 本次实际索引的文件数
+  },
   "error": null
 }
 ```
 
 说明：查重与桌面端“一键查重”共用进程内互斥门（同时仅一个任务）；
 已处置/白名单的单元对在重跑时自动跳过，不再重复告警。
+`index_first=true` 时的索引与桌面端哈希线程共用 `services/index_service.py`，
+分批取未索引文件直到取空（`INDEX_BATCH_SIZE=1000`），不会出现"只算了 1000 个"的残缺结论。
 
 ### 3.4 消息
 
@@ -639,6 +766,8 @@ struct MediaApi {
 | **搜索** | API 不支持模糊搜索文件名 | 可在 APP 端拉取数据后本地过滤 |
 | **分页** | 部分端点有 hard limit（如 per_page <= 200） | 如有更大需求可回调参 |
 | **变更通知** | 无 WebSocket 推送 | APP 侧定时轮询 `/api/events/unread` |
+| **删除是破坏性操作** | `DELETE /api/files/{id}`、`/api/files/batch-delete`、`DELETE /api/units/{id}` 默认 `mode=trash`：文件进入**系统回收站**，可人工恢复；`mode=record` 才只删库记录 | 客户端务必二次确认；需要"只出库不删盘"时显式传 `mode=record` |
+| **查重结果分级** | 未处置结果分 `duplicate` / `related` 两级，related 数量可达成百上千 | 用 `level` 参数分别取，用 `/api/dedup/counts` 显示角标 |
 
 ### 推荐的 API 轮询策略
 

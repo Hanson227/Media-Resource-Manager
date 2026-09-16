@@ -58,6 +58,7 @@ class ScanWorker(QThread):
     unit_found = Signal(str, int)
     finished = Signal(object)
     error_occurred = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, config: AppConfig, root_path: Path,
                  parent: Optional[QThread] = None) -> None:
@@ -86,6 +87,10 @@ class ScanWorker(QThread):
             result = scanner.scan_root(self._root_path)
 
             if self._cancelled:
+                # 必须显式通知：取消路径不 emit finished，界面无法据此收起
+                # 进度条与取消按钮（也不会误触发队列里的下一次扫描）。
+                self.cancelled.emit()
+                logger.info(f"扫描已取消: {self._root_path}")
                 return
 
             # 写入数据库
