@@ -2236,6 +2236,76 @@ def test_message_center():
     check("全部已读成功", ok_all)
 
 
+def test_message_center_dialog_renders():
+    """测试 9.2: 消息中心对话框能渲染列表与详情。
+
+    回归（用户实测：查完重点开消息中心直接报错）：
+    `services/message_center.py` 的 get_unread/get_all 已统一返回 **dict**
+    （避免 detached session 问题），但对话框仍按 ORM 对象访问
+    `msg.is_read / msg.title / msg.created_at`，于是只要库里有消息就抛
+    `AttributeError: 'dict' object has no attribute 'is_read'`。
+    旧的 test_message_center 只测 service、从不构造对话框，因此漏网。
+    """
+    section("测试 9.2: 消息中心对话框渲染")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    # 造一条"疑似相关汇总"形态的消息（正是触发崩溃的那条）
+    created = MessageCenter.create_related_digest([
+        ("单元甲", "单元乙", 3, 0.42, "face,phash"),
+    ])
+    check("测试消息已创建", created is not None)
+    if created is None:
+        return
+
+    unread = MessageCenter.get_unread_count()
+    # 默认勾选"仅显示未读"，单页上限 50 —— 超出会让下面的查找变得不确定
+    check(f"未读消息在单页上限内（{unread} < 50）", unread < 50)
+
+    from app.ui.dialogs.message_center import MessageCenterDialog
+
+    dlg = None
+    try:
+        try:
+            dlg = MessageCenterDialog()
+        except Exception as e:
+            check(f"对话框构造成功（实际抛 {type(e).__name__}: {e}）", False)
+            return
+        check("对话框构造成功", dlg is not None)
+
+        # 全部按 dict 契约访问：列表项文本/ID 必须渲染出来
+        check(f"列表渲染出消息（{dlg._msg_list.count()} 条）", dlg._msg_list.count() >= 1)
+        row = -1
+        for i in range(dlg._msg_list.count()):
+            if dlg._msg_list.item(i).data(Qt.ItemDataRole.UserRole) == created.id:
+                row = i
+                break
+        check("新消息出现在列表中", row >= 0)
+        if row < 0:
+            return
+        check("列表项标题非空", bool((dlg._msg_list.item(row).text() or "").strip()))
+
+        # 选中 → 渲染详情（并自动标记已读）
+        dlg._msg_list.setCurrentRow(row)
+        detail = dlg._detail_browser.toHtml() or ""
+        check("详情渲染出消息标题", "疑似相关" in detail)
+        check("详情含消息类型", "dedup_alert" in detail)
+        check("详情含正文", "不建议删除" in detail)
+        check("详情标注已读状态", ("已读" in detail) or ("未读" in detail))
+        check("选中后已自动标记为已读", MessageCenter.get_unread_count() < unread)
+
+        # 忽略选中（同样走 dict 契约）
+        before = dlg._msg_list.count()
+        dlg._dismiss_selected()
+        check("忽略选中后列表刷新", dlg._msg_list.count() <= before)
+    finally:
+        if dlg is not None:
+            dlg.close()
+        MessageCenter.dismiss(created.id)
+
+
 def test_tags():
     """测试 9.5: 标签 CRUD。"""
     section("测试 9.5: 标签 CRUD")
@@ -4938,6 +5008,7 @@ def main():
         test_scan_worker_cancel_signal()
         test_dedup_compare_shows_face_hints()
         test_message_center()
+        test_message_center_dialog_renders()
         test_tags()
         test_api_app()
         test_unit_response_fields()
