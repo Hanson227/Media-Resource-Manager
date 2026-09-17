@@ -15,9 +15,13 @@ import sys
 import logging
 from pathlib import Path
 
-# 抑制 OpenCV/FFmpeg 的 h264 解码警告噪音
-os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
-os.environ["OPENCV_LOG_LEVEL"] = "OFF"
+# 抑制 OpenCV/FFmpeg 的解码日志噪音（损坏视频会逐帧刷红色 h264 告警，
+# 把真正的日志淹掉）。**不能**在这里直接写 os.environ —— 在 Windows 上它
+# 传不进 OpenCV 的 ffmpeg DLL，必须走 CRT 的 _putenv_s，
+# 细节见 app/utils/image_helpers.silence_ffmpeg_logs。
+from app.utils.image_helpers import silence_ffmpeg_logs  # noqa: E402
+
+silence_ffmpeg_logs()
 
 # ============================================================
 # 编码修复 —— 必须在所有其他导入之前执行

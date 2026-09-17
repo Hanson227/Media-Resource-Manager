@@ -1156,6 +1156,9 @@ def _seed_dedup_levels() -> tuple:
             match_types="md5", match_level="duplicate",
             evidence_kind="file",
         )
+        # 真实查重跑过之后（Web 测试 14）这几对单元已经有结果行和匹配行了：
+        # 先清掉旧匹配，否则 (result_id, file_a, file_b) 撞 UNIQUE 约束
+        q.delete_file_matches_for_result(session, dup.id)
         q.insert_file_match(session, dedup_result_id=dup.id,
                             file_a_id=files_a[0].id, file_b_id=files_b[0].id,
                             similarity_score=1.0, match_type="md5")
@@ -1168,6 +1171,7 @@ def _seed_dedup_levels() -> tuple:
             match_types="video", match_level="related",
             evidence_kind="file",
         )
+        q.delete_file_matches_for_result(session, rel.id)
         q.insert_file_match(session, dedup_result_id=rel.id,
                             file_a_id=files_a[0].id, file_b_id=extra_ids[0],
                             similarity_score=1.0, match_type="video")
@@ -1184,6 +1188,7 @@ def _seed_dedup_levels() -> tuple:
             match_types="", match_level="related",
             evidence_kind="face",
         )
+        q.delete_file_matches_for_result(session, face.id)
         q.insert_file_match(session, dedup_result_id=face.id,
                             file_a_id=files_a[1].id, file_b_id=face_ids[0],
                             similarity_score=0.58, match_type="face",
@@ -1308,8 +1313,11 @@ def test_dedup_level_semantics(page):
               not any(("保留 A" in t or "保留 B" in t) for t in flabels))
 
         # 重复详情：仍提供保留 A/B
+        # （页面现在会跨路由记住上次的 Tab，所以这里显式切回「疑似重复」）
         page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
         page.wait_for_load_state("networkidle")
+        page.locator(".dedup-tab", has_text="疑似重复").first.click()
+        page.wait_for_timeout(600)
         _expand_first_group(page)
         dup_card = page.locator(".card").first
         dup_card.wait_for(state="attached", timeout=5000)
@@ -1567,12 +1575,185 @@ def test_dedup_run_from_web(page):
         check(f"服务端存在分级计数（{counts}）",
               isinstance(counts.get("duplicate"), int)
               and counts.get("total", 0) >= 1)
+        # 摘要先于列表刷新渲染：给它时间把 /groups 拉回来再断言
+        page.wait_for_timeout(1000)
         check("列表已刷新（有分组 / 徽标 / 空态）",
               page.locator(".dedup-group").count() > 0
               or page.locator(".lvl-badge").count() > 0
               or page.locator(".empty-state").count() > 0)
     finally:
         page.remove_listener("dialog", on_dialog)
+
+
+def _inject_running_dedup_task(task_id: str, progress=(3, 10),
+                               phase: str = "comparing") -> dict:
+    """在测试服务器的任务表里放一个"正在跑"的查重任务。
+
+    真跑一次查重只要几秒（测试库很小），来不及验证"切走再回来还在跑"；
+    所以直接构造运行中的任务状态，不启动真实管线。
+    """
+    from app.api.routes import dedup as dedup_routes
+
+    entry = {
+        "task_id": task_id, "kind": "dedup", "status": "running",
+        "phase": phase, "progress": list(progress),
+        "created_at": time.time(), "started_at": time.time(),
+        "finished_at": None, "result": None, "error": None,
+    }
+    with dedup_routes._tasks_lock:
+        dedup_routes._dedup_tasks[task_id] = entry
+    return entry
+
+
+def _finish_dedup_task(task_id: str, result: dict | None = None) -> None:
+    """把注入的任务改成已完成（模拟"用户在别的页面时任务跑完了"）。"""
+    from app.api.routes import dedup as dedup_routes
+
+    with dedup_routes._tasks_lock:
+        entry = dedup_routes._dedup_tasks.get(task_id)
+        if entry is not None:
+            entry.update(status="completed", phase=None, progress=None,
+                         finished_at=time.time(),
+                         result=result or {"duplicates_found": 0, "related_found": 0,
+                                           "face_only_found": 0, "elapsed_seconds": 1})
+
+
+def _drop_dedup_task(task_id: str) -> None:
+    from app.api.routes import dedup as dedup_routes
+
+    with dedup_routes._tasks_lock:
+        dedup_routes._dedup_tasks.pop(task_id, None)
+
+
+def _progress_width(page) -> str:
+    """进度条的宽度（如 '30%'）—— 直接反映 runProgress 的比例。"""
+    return page.evaluate(
+        "() => { const e = document.querySelector('.run-progress-bar');"
+        " return e ? e.style.width : ''; }")
+
+
+def _goto_tab(page, label: str) -> bool:
+    """离开当前页：桌面视口点侧边栏，手机视口点底部 Tab。"""
+    for sel in (".sidebar-item", ".tab-item"):
+        item = page.locator(sel, has_text=label)
+        if item.count() and item.first.is_visible():
+            item.first.click()
+            return True
+    return False
+
+
+def test_dedup_progress_survives_navigation(page):
+    """Web 测试 15: 查重进度跨页面切换存活。
+
+    实测报障："点了开始查重后切到单元页，回到查重页进度条消失了，
+    但电脑风扇还在转" —— 服务端任务是后台线程，页面组件却随路由卸载，
+    运行态存在组件 data 里就跟着一起没了（用户只能靠风扇判断在不在跑）。
+    """
+    section("Web 测试 15: 查重进度跨页面切换存活")
+    task_id = "dedup-slow-test"
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
+        # ① 服务端已有在跑的任务 → 整页刷新后进入也应自动接上进度
+        _inject_running_dedup_task(task_id, progress=(3, 10))
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(1600)
+        check("刷新进入时显示进度条", page.locator(".run-progress-bar").count() > 0)
+        w1 = _progress_width(page)
+        check(f"进度条宽度对应 3/10（实际 {w1!r}）", w1.startswith("30"))
+        check("按钮显示「查重中…」",
+              "查重中" in (page.locator(".dedup-run-btn").text_content() or ""))
+        check("副标题显示「正在比对 3 / 10」",
+              "正在比对 3 / 10"
+              in (page.locator(".dedup-run-text .run-sub").text_content() or ""))
+
+        # ② 切到单元页再回来：服务端仍在跑，进度条不能消失也不会卡在旧进度
+        _goto_tab(page, "单元")
+        page.wait_for_timeout(400)
+        _inject_running_dedup_task(task_id, progress=(7, 10))   # 期间服务端在推进
+        _goto_tab(page, "查重")
+        page.wait_for_timeout(1600)
+        check("切走再回来进度条仍在", page.locator(".run-progress-bar").count() > 0)
+        w2 = _progress_width(page)
+        check(f"进度条跟进到 7/10（实际 {w2!r}）", w2.startswith("70"))
+        check("回来仍显示「查重中…」",
+              "查重中" in (page.locator(".dedup-run-btn").text_content() or ""))
+
+        # ③ 任务在别的页面时跑完 → 回来必须看到完成摘要并刷新列表
+        _goto_tab(page, "单元")
+        page.wait_for_timeout(300)
+        _finish_dedup_task(task_id)
+        _goto_tab(page, "查重")
+        page.wait_for_timeout(1800)
+        sub = page.locator(".dedup-run-text .run-sub").text_content() or ""
+        check(f"后台完成后回来显示完成摘要（实际 {sub!r}）", "完成" in sub)
+        check("完成后按钮回到「开始查重」",
+              "开始查重" in (page.locator(".dedup-run-btn").text_content() or ""))
+        check("完成后进度条消失", page.locator(".run-progress-bar").count() == 0)
+    finally:
+        _drop_dedup_task(task_id)
+
+
+def test_dedup_state_restored_after_detail(page):
+    """Web 测试 16: 看完详情返回，保持原 Tab 与展开的分组。
+
+    实测报障："在疑似相关页面点进去看详情，返回就跳回了疑似重复且收起的页面"。
+    根因同测试 15：Tab / 展开状态存在组件 data 里，路由返回时组件重建即丢失。
+    """
+    section("Web 测试 16: 详情返回保持 Tab 与展开状态")
+    seeded = _seed_dedup_levels()
+    if seeded is None:
+        check("查重状态恢复测试: 缺少 片段A/片段B，跳过", True)
+        return
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        page.locator(".dedup-tabs").wait_for(state="attached", timeout=5000)
+
+        page.locator(".dedup-tab", has_text="疑似相关").first.click()
+        page.wait_for_timeout(700)
+        check("已切到「疑似相关」",
+              "疑似相关" in (page.locator(".dedup-tab.active").text_content() or ""))
+        _expand_first_group(page)
+        check("分组已展开（子卡片可见）",
+              page.locator(".group-children .card").count() > 0)
+        group_name = page.locator(".dedup-group").first.locator(
+            ".group-name").text_content() or ""
+        check("取到分组名作为锚点", bool(group_name.strip()))
+
+        page.locator(".group-children .card").first.click()
+        page.locator(".dedup-header").wait_for(state="attached", timeout=5000)
+        check("进入查重详情页", page.locator(".dedup-header").count() > 0)
+
+        page.go_back()          # 浏览器返回（Web 端详情页只有浏览器返回这一条路）
+        page.wait_for_timeout(1500)
+        active = page.locator(".dedup-tab.active").text_content() or ""
+        check(f"返回后仍停在「疑似相关」（实际 {active!r}）", "疑似相关" in active)
+        check("返回后没有跳回「疑似重复」", "疑似重复" not in active)
+        check("返回后原分组仍展开",
+              page.locator(".dedup-group").first.locator(
+                  ".group-children").count() > 0)
+        check("返回后子卡片重新加载出来",
+              page.locator(".group-children .card").count() > 0)
+        check("返回后分组名与进入前一致（同一分组）",
+              group_name.strip() in (
+                  page.locator(".dedup-group").first.locator(
+                      ".group-name").text_content() or ""))
+    finally:
+        import shutil
+        from app.db import queries as q
+
+        with DatabaseManager.session() as session:
+            for rid in (seeded["dup_id"], seeded["rel_id"], seeded["face_id"]):
+                dr = q.get_dedup_by_id(session, rid)
+                if dr is not None:
+                    session.delete(dr)
+        with DatabaseManager.session() as session:
+            q.delete_resource_unit(session, seeded["extra_uid"])
+            q.delete_resource_unit(session, seeded["face_uid"])
+        shutil.rmtree(seeded["extra_paths"][0].parent.parent, ignore_errors=True)
+        shutil.rmtree(seeded["face_paths"][0].parent.parent, ignore_errors=True)
 
 
 def test_responsive_layout(page):
@@ -1715,6 +1896,12 @@ def main():
             page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
             page.wait_for_load_state("networkidle")
             test_dedup_run_from_web(page)
+
+            # 查重运行态 / Tab / 展开状态跨路由存活（切页、刷新、看详情返回）
+            page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
+            page.wait_for_load_state("networkidle")
+            test_dedup_progress_survives_navigation(page)
+            test_dedup_state_restored_after_detail(page)
 
             # 取消访问密码不锁死（会临时改动服务端 web_pin，放在最后）
             test_cancel_pin_does_not_lock_out(page)

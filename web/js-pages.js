@@ -1577,6 +1577,26 @@ const PreviewPage = {
 };
 
 /* ========== Dedup Page ========== */
+/* ========== 查重页跨路由状态（模块级） ==========
+   查重 / 人脸重扫是**服务端后台任务**，而页面组件会随路由切换被卸载重建：
+   运行态、进度、当前 Tab、已展开的分组只要放在组件 data 里，切走再回来就全丢 ——
+   实测报障：① 点了开始查重后切到单元页，回来进度条消失（只剩风扇在转）；
+   ② 在「疑似相关」点进详情返回，跳回「疑似重复」且分组收起。
+   与 _unitsScrollTop / _fileScrollTop 同一思路：状态放模块级，mount 时恢复。 */
+let _dedupLevel = 'duplicate';              // 上次停留的 Tab
+let _dedupExpanded = {};                    // { level: { anchor_unit_id: true } }
+let _dedupScrollTop = {};                   // { level: 像素值 }
+let _dedupRun = {                           // 服务端任务在本页的镜像
+  taskId: null, phase: '', progress: null,
+  running: false, scanning: false, scanProgress: null, summary: '',
+};
+
+function _dedupExpandedMap(level) {
+  if (!_dedupExpanded[level]) _dedupExpanded[level] = {};
+  return _dedupExpanded[level];
+}
+
+/* ========== 查重页 ========== */
 const DedupPage = {
   template: `
     <div class="page">
@@ -1853,6 +1873,7 @@ const DedupPage = {
     setLevel(key) {
       if (this.level === key) return;
       this.level = key;
+      _dedupLevel = key;          // 跨路由记住：看完详情返回还停在同一个 Tab
       this.reset();
       this.load(true);
     },
@@ -1862,6 +1883,25 @@ const DedupPage = {
       this.expanded = {};
       this.page = 1;
       this.total = 0;
+    },
+    /** 恢复上次所在 Tab 的展开分组（子项要重新拉：组件重建后缓存已没了） */
+    async restoreExpanded() {
+      const saved = _dedupExpandedMap(this.level);
+      const anchors = Object.keys(saved).filter(id => saved[id]);
+      if (anchors.length === 0) return;
+      this.expanded = { ...saved };
+      for (const id of anchors) {
+        if (this.groups.some(g => String(g.anchor_unit_id) === String(id))) {
+          await this.loadChildren(id);
+        }
+      }
+    },
+    /** 恢复列表滚动位置（分组是异步展开的，交给重试逻辑慢慢校准） */
+    restoreScroll() {
+      const target = _dedupScrollTop[this.level] || 0;
+      if (!target) return;
+      _dedupScrollTop[this.level] = 0;    // 用完即清：从 Tab 重新进来时回到顶部
+      _restoreDedupScroll(target);
     },
     async loadCounts() {
       try {
@@ -1901,12 +1941,19 @@ const DedupPage = {
     },
     async toggleGroup(g) {
       const id = g.anchor_unit_id;
+      const saved = _dedupExpandedMap(this.level);
       if (this.expanded[id]) {
         this.expanded[id] = false;
+        saved[id] = false;
         return;
       }
       this.expanded[id] = true;
-      if (this.children[id]) return;             // 已缓存，直接展开
+      saved[id] = true;
+      await this.loadChildren(id);
+    },
+    /** 拉一个分组的子项（已加载过就直接用缓存；空结果也算已加载） */
+    async loadChildren(id) {
+      if (Array.isArray(this.children[id])) return;
       this.children[id] = null;                  // null = 加载中（模板判空）
       const p = this.queryParams();
       try {
@@ -1920,8 +1967,10 @@ const DedupPage = {
       }
     },
     toggleAll() {
+      const saved = _dedupExpandedMap(this.level);
       if (this.allExpanded) {
         this.expanded = {};
+        Object.keys(saved).forEach(k => { saved[k] = false; });
         return;
       }
       this.groups.forEach(g => this.toggleGroup(g));
@@ -1967,6 +2016,8 @@ const DedupPage = {
       this.runPhase = 'queued';
       this.runProgress = null;
       this.runSummary = '';
+      _dedupRun.taskId = null;    // 还没拿到 task_id：别让 mount 误接手上一个任务
+      this.syncRunState();
       try {
         const res = await api(this.serverUrl, '/api/dedup/run', {
           method: 'POST',
@@ -1990,37 +2041,86 @@ const DedupPage = {
         localStorage.setItem('dsh_dedup_refine_faces', this.refineFaces ? '1' : '0');
       } catch (e) { /* 忽略 */ }
     },
+    /* ---- 运行态跨路由镜像 ----
+       任务在服务端跑，进度却由页面轮询得到：把这份状态同步到模块级，
+       切走再回来（组件重建）才知道"还在跑、跑到哪了"。 */
+    syncRunState() {
+      _dedupRun.phase = this.runPhase;
+      _dedupRun.progress = this.runProgress;
+      _dedupRun.running = this.running;
+      _dedupRun.scanning = this.scanning;
+      _dedupRun.scanProgress = this.scanProgress;
+      _dedupRun.summary = this.runSummary;
+    },
+    /** 把模块级运行态搬回组件 data，并按需重启轮询 */
+    applyRunState() {
+      this.running = !!_dedupRun.running;
+      this.scanning = !!_dedupRun.scanning;
+      this.runPhase = _dedupRun.phase || '';
+      this.runProgress = _dedupRun.progress || null;
+      this.scanProgress = _dedupRun.scanProgress || null;
+      this.runSummary = _dedupRun.summary || '';
+      const id = _dedupRun.taskId;
+      if (!id) return;
+      if (this.running) this.pollTask(id);
+      else if (this.scanning) this.pollFaceScan(id);
+    },
+    /** mount 时接手仍在跑的任务：先看本会话的记忆，再看服务端（整页刷新/换设备） */
+    async adoptRunState() {
+      if (_dedupRun.taskId && (_dedupRun.running || _dedupRun.scanning)) {
+        this.applyRunState();
+        return;
+      }
+      try {
+        const t = await api(this.serverUrl, '/api/dedup/active-task');
+        if (!t || !t.task_id) return;
+        const isFace = t.kind === 'face';
+        _dedupRun.taskId = t.task_id;
+        _dedupRun.running = !isFace;
+        _dedupRun.scanning = isFace;
+        _dedupRun.phase = t.phase || '';
+        _dedupRun.progress = isFace ? null : (t.progress || null);
+        _dedupRun.scanProgress = isFace ? (t.progress || null) : null;
+        this.applyRunState();
+      } catch (e) { /* 旧版服务端没有该端点：忽略即可 */ }
+    },
     pollTask(taskId) {
       if (this._timer) clearInterval(this._timer);
-      this._timer = setInterval(async () => {
+      _dedupRun.taskId = taskId;
+      const tick = async () => {
         let t;
         try {
           t = await api(this.serverUrl, '/api/dedup/run/' + taskId);
         } catch (e) {
-          this.stopPolling();
-          alert('查重状态查询失败：' + e.message);
+          // 服务端重启后任务表丢了（404）→ 停止轮询；网络抖动留给下一轮
+          if (/不存在|404/.test(e.message || '')) this.stopPolling();
           return;
         }
         this.runPhase = t.phase || t.status;
         this.runProgress = t.progress || null;
+        this.syncRunState();
         if (t.status === 'completed') {
           this.stopPolling();
           const r = t.result || {};
           this.runSummary = '完成：重复 ' + (r.duplicates_found || 0) + ' 组 · 疑似相关 '
             + (r.related_found || 0) + ' 对 · 同演员 ' + (r.face_only_found || 0)
             + ' 对（耗时 ' + (r.elapsed_seconds || 0) + 's）';
+          this.syncRunState();
           await this.refresh();
         } else if (t.status === 'failed') {
           this.stopPolling();
           alert('查重失败：' + (t.error || '未知错误'));
         }
-      }, 1000);
+      };
+      tick();                                   // 立刻拉一次：回到页面就能看到进度
+      this._timer = setInterval(tick, 1000);
     },
     stopPolling() {
       if (this._timer) { clearInterval(this._timer); this._timer = null; }
       this.running = false;
       this.runProgress = null;
       this.runPhase = '';
+      this.syncRunState();
     },
     async startFaceScan(scope) {
       if (this.scanning) return;
@@ -2029,6 +2129,8 @@ const DedupPage = {
         + '完成后会自动重新查重一次（预计 ' + this.estMinutes(n) + ' 分钟）。')) return;
       this.scanning = true;
       this.scanProgress = null;
+      _dedupRun.taskId = null;
+      this.syncRunState();
       try {
         const res = await api(this.serverUrl, '/api/dedup/face-scan', {
           method: 'POST',
@@ -2043,16 +2145,17 @@ const DedupPage = {
     },
     pollFaceScan(taskId) {
       if (this._scanTimer) clearInterval(this._scanTimer);
-      this._scanTimer = setInterval(async () => {
+      _dedupRun.taskId = taskId;
+      const tick = async () => {
         let t;
         try {
           t = await api(this.serverUrl, '/api/dedup/run/' + taskId);
         } catch (e) {
-          this.stopScanPolling();
-          alert('重扫状态查询失败：' + e.message);
+          if (/不存在|404/.test(e.message || '')) this.stopScanPolling();
           return;
         }
         this.scanProgress = t.progress || null;
+        this.syncRunState();
         if (t.status === 'completed') {
           this.stopScanPolling();
           const r = t.result || {};
@@ -2060,27 +2163,41 @@ const DedupPage = {
             + (r.faces || 0) + ' 条人脸向量'
             + (r.dedup ? '，重复 ' + r.dedup.duplicates_found + ' 组 / 疑似相关 '
                 + r.dedup.related_found + ' 对 / 同演员 ' + r.dedup.face_only_found + ' 对' : '');
+          this.syncRunState();
           await this.refresh();
         } else if (t.status === 'failed') {
           this.stopScanPolling();
           alert('人脸重扫失败：' + (t.error || '未知错误'));
         }
-      }, 1000);
+      };
+      tick();
+      this._scanTimer = setInterval(tick, 1000);
     },
     stopScanPolling() {
       if (this._scanTimer) { clearInterval(this._scanTimer); this._scanTimer = null; }
       this.scanning = false;
       this.scanProgress = null;
+      this.syncRunState();
     },
   },
   async mounted() {
     this.$emit('loading', true);
     this.readStoredThreshold();
+    // 恢复上次的 Tab + 接上仍在跑的任务 —— 必须在首次 load 之前，
+    // 否则先按「疑似重复」拉一遍列表，返回详情的用户会看到闪回
+    this.level = _dedupLevel || 'duplicate';
+    await this.adoptRunState();
     await this.loadCounts();
     await this.loadFaceStatus();
     await this.load(true);
+    await this.restoreExpanded();
+    this.restoreScroll();
+    this.$emit('loading', false);
   },
   beforeUnmount() {
+    const main = document.querySelector('.app-main');
+    if (main) _dedupScrollTop[this.level] = main.scrollTop;
+    // 只停本地轮询：任务在服务端继续跑，_dedupRun 保留运行态供返回时接手
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
     if (this._scanTimer) { clearInterval(this._scanTimer); this._scanTimer = null; }
   }
@@ -2544,5 +2661,21 @@ function _restoreFileScroll() {
     _fileScrollTop = 0;
   }
   _fileScrollAnchor = null;
+}
+
+/* 恢复查重列表滚动位置：分组子项是异步加载的，展开后高度会变，故多次微调 */
+function _restoreDedupScroll(target) {
+  const main = document.querySelector('.app-main');
+  if (!main || !target) return;
+  main.scrollTop = target;
+  let retries = 0;
+  const adjust = () => {
+    if (main.scrollTop < target && retries < 8) {
+      main.scrollTop = target;
+      retries++;
+      requestAnimationFrame(adjust);
+    }
+  };
+  requestAnimationFrame(adjust);
 }
 
