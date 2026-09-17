@@ -60,7 +60,8 @@ class BatchDeleteRequest(BaseModel):
     mode: str = Field(
         default=MODE_TRASH,
         pattern=MODE_PATTERN,
-        description="trash=移至回收站（默认，与桌面端一致）；record=仅移除媒体库记录",
+        description="trash=移至回收站（默认，与桌面端一致）；record=仅移除媒体库记录；"
+                    "delete=永久删除磁盘文件（不可恢复，仅在回收站不可用时由用户明确选择）",
     )
 
 
@@ -137,8 +138,20 @@ class DedupResultItem(BaseModel):
     unit_b_name: str
     similarity_score: float
     match_count: int
+    """计入判定的文件对数（不含人脸线索）。"""
     match_types: str = ""
     match_level: str = "duplicate"
+    evidence_kind: str = "file"
+    """证据来源：file（有文件重叠）/ face（只有人脸线索）。"""
+    face_hint_count: int = 0
+    """人脸线索条数（match_count 已不含人脸，故单独给出）。"""
+    total_files_a: int = 0
+    total_files_b: int = 0
+    overlap_ratio: float = 0.0
+    """包含度 = match_count / min(|A|, |B|)，用于展示"29/33 个文件重叠"。"""
+    stale: bool = False
+    """是否是旧规则（升级前）算出来的结论：True 时客户端应提示"需要重新查重"，
+    且不要展示 match_count/overlap（旧口径的数字没有意义）。"""
     is_resolved: bool = False
     resolution: str = "pending"
     created_at: Optional[datetime] = None
@@ -148,6 +161,39 @@ class DedupListResponse(BaseModel):
     """查重结果列表。"""
     results: list[DedupResultItem] = []
     total: int = 0
+
+
+class DedupGroupItem(BaseModel):
+    """查重结果的"左侧单元"分组（列表页二级分组的父级）。"""
+    anchor_unit_id: int
+    anchor_unit_name: str = ""
+    anchor_cover_file_id: Optional[int] = None
+    pair_count: int = 0
+    max_similarity: float = 0.0
+    match_types: str = ""
+    match_level: str = "related"
+    evidence_kind: str = "file"
+    stale: bool = False
+    """组内是否含旧规则算出的结论（升级后未重跑查重）。"""
+
+
+class DedupGroupListResponse(BaseModel):
+    """查重结果分组列表。"""
+    groups: list[DedupGroupItem] = []
+    total: int = 0
+
+
+class DedupFaceScanRequest(BaseModel):
+    """人脸精查 / 补扫请求体。"""
+    scope: str = Field(
+        default="candidates",
+        pattern="^(candidates|all)$",
+        description="candidates=只重扫上一轮出现人脸线索的候选视频；all=全部未按新策略扫描的视频",
+    )
+    run_dedup: bool = Field(
+        default=True,
+        description="重扫完成后是否自动重跑一次查重比对（否则结果仍是旧的）",
+    )
 
 
 class DedupResolveRequest(BaseModel):

@@ -25,6 +25,7 @@ from sqlalchemy.exc import OperationalError
 
 from app.core.hash_engine import HashEngine
 from app.utils.image_helpers import VideoCapture_unicode
+from app.utils.constants import FACE_SCAN_VERSION, FACE_VIDEO_MAX_FRAMES
 from app.db.engine import DatabaseManager
 from app.db import queries as q
 
@@ -51,69 +52,32 @@ class IndexRunResult:
     """是否被取消。"""
 
 
-def _detect_faces_for_file(engine: HashEngine, file_path: Path, media_type: str):
-    """对文件执行人脸检测。图片直接检测，视频先抽帧。
+def _detect_faces_for_file(engine: HashEngine, file_path: Path, media_type: str,
+                           config=None):
+    """对文件执行人脸检测。图片直接检测（全图），视频按定间隔多帧检测。
 
     参数:
         engine: 哈希引擎。
         file_path: 文件路径。
         media_type: 'image' 或 'video'。
+        config: 应用配置（读视频抽帧间隔与抽帧上限）；None 时取默认值。
 
     返回:
         FaceVector 列表。
+
+    说明:
+        视频原先只取"中间那一帧"：抽到哪一帧取决于片长、正脸不在中点就整片漏检
+        （实测 1142 个视频只有 198 个检出人脸），而且结果不可复现。
+        现改为等间隔、均匀铺满全片、最多 face_video_max_frames 帧。
     """
     if media_type == "image":
         return engine.detect_faces(file_path)
 
-    # 视频：提取中间帧进行人脸检测
-    try:
-        import cv2
-    except ImportError:
-        return []
-
-    cap = None
-    tmp_path = None
-    try:
-        cap = VideoCapture_unicode(file_path)
-        if not cap.isOpened():
-            return []
-
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames <= 0:
-            return []
-
-        # 取中间帧
-        mid = total_frames // 2
-        cap.set(cv2.CAP_PROP_POS_FRAMES, mid)
-        ret, frame = cap.read()
-
-        if not ret or frame is None:
-            # 回退到首帧
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ret, frame = cap.read()
-
-        if not ret or frame is None:
-            return []
-
-        # 保存为临时图片文件
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        pil_img = PILImage.fromarray(rgb)
-        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jpg", prefix="vface_")
-        os.close(tmp_fd)  # 立即关闭 FD，PIL 会用自己打开的 FD 写入
-        pil_img.save(tmp_path, format="JPEG", quality=85)
-
-        return engine.detect_faces(Path(tmp_path))
-
-    except Exception:
-        return []
-    finally:
-        if cap is not None:
-            cap.release()
-        if tmp_path:
-            try:
-                Path(tmp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+    interval = int(getattr(config, "video_frame_interval_sec", 5) or 5)
+    max_frames = int(getattr(config, "face_video_max_frames",
+                             FACE_VIDEO_MAX_FRAMES) or FACE_VIDEO_MAX_FRAMES)
+    return engine.extract_video_faces(
+        file_path, interval_sec=interval, max_frames=max_frames)
 
 
 def _retry_db(func, max_retries=3):
@@ -146,6 +110,147 @@ def _mark_hashed(fid: int) -> None:
     """标记文件为已处理（写入空哈希），避免重复检出。"""
     with DatabaseManager.session() as session:
         q.update_file_hash(session, fid, md5_hash="", phash="", dhash="")
+
+
+@dataclass(frozen=True)
+class FaceRescanResult:
+    """一次人脸重扫（精查 / 补扫）的结果。"""
+
+    scanned: int
+    """实际重扫的视频数。"""
+
+    faces: int
+    """写回的人脸向量总数。"""
+
+    total: int
+    """开始时的待扫数量。"""
+
+    scope: str = "candidates"
+    """'candidates'（只精查出现线索的候选）或 'all'（全部过期视频）。"""
+
+    cancelled: bool = False
+
+
+def _rescan_faces_for_file(engine: HashEngine, fid: int, fpath: Path, config) -> int:
+    """重扫单个视频的人脸：清空旧向量 → 定间隔多帧检测 → 写回并打版本号。
+
+    返回写入的向量条数。
+
+    顺序很重要：**先删后写**，否则新旧向量会叠加（旧的单帧向量留着，
+    证据数凭空翻倍）；版本号在写入成功后设置，中途失败的文件保持旧版本，
+    下次补扫会重新处理（幂等）。
+    """
+    interval = int(getattr(config, "video_frame_interval_sec", 5) or 5)
+    max_frames = int(getattr(config, "face_video_max_frames",
+                             FACE_VIDEO_MAX_FRAMES) or FACE_VIDEO_MAX_FRAMES)
+    faces = engine.extract_video_faces(
+        fpath, interval_sec=interval, max_frames=max_frames)
+    with DatabaseManager.session() as session:
+        q.delete_face_vectors_for_file(session, fid)
+        for fv in faces:
+            q.insert_face_vector(
+                session, fid,
+                vector_data=fv.vector_bytes,
+                face_index=fv.face_index,
+                bbox=fv.bbox,
+                source_ms=fv.source_ms,
+            )
+        q.set_face_scan_version(session, fid, FACE_SCAN_VERSION)
+    return len(faces)
+
+
+def run_face_rescan_pipeline(
+    config,
+    *,
+    scope: str = "candidates",
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
+) -> FaceRescanResult:
+    """按新版抽帧策略重扫视频人脸（精查候选 / 补扫全部）。
+
+    参数:
+        config: AppConfig（人脸与抽帧相关字段）。
+        scope: 'candidates' = 只重扫上一轮出现过人脸线索的候选视频（快，约 2~3 分钟）；
+               'all' = 重扫全部抽帧策略过期的视频（慢，本库约十几分钟）。
+        progress_callback: (已完成, 总数) 进度回调。
+        cancelled: 取消探测。
+
+    返回:
+        FaceRescanResult。
+
+    说明:
+        只处理视频：图片的人脸检测是全图检测，不受抽帧策略影响
+        （迁移时已把图片的 face_scan_version 置为最新）。
+    """
+    is_cancelled = cancelled or (lambda: False)
+    if not getattr(config, "face_detection_enabled", False):
+        logger.info("人脸识别未启用，跳过人脸重扫")
+        return FaceRescanResult(scanned=0, faces=0, total=0, scope=scope)
+
+    with DatabaseManager.session() as session:
+        if scope == "all":
+            total = q.count_videos_needing_face_scan(session, FACE_SCAN_VERSION)
+        else:
+            total = q.count_candidate_videos_for_face_rescan(
+                session, FACE_SCAN_VERSION)
+    if total == 0:
+        logger.info(f"人脸重扫: 无需处理（scope={scope}）")
+        return FaceRescanResult(scanned=0, faces=0, total=0, scope=scope)
+
+    logger.info(f"开始人脸重扫: {total} 个视频（scope={scope}）")
+    engine = build_hash_engine(config)
+    scanned = 0
+    faces_total = 0
+    seen: set[int] = set()
+
+    # 分批取到取空：精查/补扫都可能比单批上限多（与 run_index_pipeline 同理）
+    while not is_cancelled():
+        with DatabaseManager.session() as session:
+            if scope == "all":
+                batch = q.get_videos_needing_face_scan(
+                    session, FACE_SCAN_VERSION, limit=INDEX_BATCH_SIZE)
+            else:
+                batch = q.get_candidate_videos_for_face_rescan(
+                    session, FACE_SCAN_VERSION, limit=INDEX_BATCH_SIZE)
+        batch = [f for f in batch if f.id not in seen]
+        if not batch:
+            break
+
+        for f in batch:
+            if is_cancelled():
+                break
+            seen.add(f.id)
+            fpath = Path(f.path)
+            if not fpath.is_file():
+                # 文件不在了：直接打版本号，避免每次补扫都重试同一个幽灵文件
+                try:
+                    _retry_db(lambda fid=f.id: _mark_face_scan_version(fid))
+                except Exception:
+                    pass
+                scanned += 1
+                if progress_callback:
+                    progress_callback(min(scanned, total), total)
+                continue
+            try:
+                n = _retry_db(lambda fid=f.id, p=fpath: _rescan_faces_for_file(
+                    engine, fid, p, config))
+                faces_total += n
+            except Exception as e:
+                logger.warning(f"人脸重扫失败 [{fpath.name}]: {type(e).__name__}: {e}")
+            scanned += 1
+            if progress_callback:
+                progress_callback(min(scanned, total), total)
+
+    was_cancelled = is_cancelled()
+    logger.info(f"人脸重扫完成: {scanned}/{total} 个视频，共 {faces_total} 条人脸向量")
+    return FaceRescanResult(scanned=scanned, faces=faces_total, total=total,
+                            scope=scope, cancelled=was_cancelled)
+
+
+def _mark_face_scan_version(fid: int) -> None:
+    """只更新抽帧版本号（文件不存在时的收尾，避免反复重试）。"""
+    with DatabaseManager.session() as session:
+        q.set_face_scan_version(session, fid, FACE_SCAN_VERSION)
 
 
 def build_hash_engine(config) -> HashEngine:
@@ -250,19 +355,24 @@ def run_index_pipeline(
                     fid, update_data, result.video_frame_hashes
                 ))
 
-                # 人脸检测：图片直接检测，视频先抽中间帧再检测
+                # 人脸检测：图片全图检测，视频定间隔多帧检测
                 if config.face_detection_enabled:
                     try:
-                        face_vectors = _detect_faces_for_file(engine, fpath, ftype)
+                        face_vectors = _detect_faces_for_file(
+                            engine, fpath, ftype, config)
+                        with DatabaseManager.session() as session:
+                            for fv in face_vectors:
+                                q.insert_face_vector(
+                                    session, fid,
+                                    vector_data=fv.vector_bytes,
+                                    face_index=fv.face_index,
+                                    bbox=fv.bbox,
+                                    source_ms=fv.source_ms,
+                                )
+                            # 无论是否检出人脸都要打版本号：视频里没有人脸也是
+                            # 一次有效扫描，否则补扫任务会把它们反复扫一遍。
+                            q.set_face_scan_version(session, fid, FACE_SCAN_VERSION)
                         if face_vectors:
-                            with DatabaseManager.session() as session:
-                                for fv in face_vectors:
-                                    q.insert_face_vector(
-                                        session, fid,
-                                        vector_data=fv.vector_bytes,
-                                        face_index=fv.face_index,
-                                        bbox=fv.bbox,
-                                    )
                             logger.debug(
                                 f"人脸检测: {fpath.name} → {len(face_vectors)} 张人脸"
                             )

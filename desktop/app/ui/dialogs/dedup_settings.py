@@ -17,10 +17,11 @@ class DedupSettingsDialog(QDialog):
     """查重设置对话框。
 
     信号:
-        settings_changed: 用户确认修改后发出 (new_jaccard, new_phash, new_dhash, new_face, face_enabled)
+        settings_changed: 用户确认修改后发出
+            (new_jaccard, new_phash, new_dhash, new_face, face_enabled, face_video_max_frames)
     """
 
-    settings_changed = Signal(float, int, int, float, bool)
+    settings_changed = Signal(float, int, int, float, bool, int)
 
     def __init__(self, config: AppConfig, parent=None) -> None:
         """初始化查重设置对话框。
@@ -87,6 +88,17 @@ class DedupSettingsDialog(QDialog):
         )
         face_form.addRow("人脸相似度阈值:", self._face_spin)
 
+        # 视频人脸抽帧上限：直接决定"同演员"线索的召回与耗时
+        # （等间隔均匀铺满全片，长视频自动放大间距，不会只扫开头）
+        self._face_frames_spin = QSpinBox()
+        self._face_frames_spin.setRange(1, 60)
+        self._face_frames_spin.setValue(getattr(config, "face_video_max_frames", 10))
+        self._face_frames_spin.setToolTip(
+            "每个视频最多做几次人脸检测（等间隔铺满全片，单帧约 82ms）。\n"
+            "调大更准但更慢；图片不受影响（全图检测只做一次）。"
+        )
+        face_form.addRow("视频抽帧上限:", self._face_frames_spin)
+
         layout.addWidget(face_group)
 
         # ==== 提示 ====
@@ -116,5 +128,6 @@ class DedupSettingsDialog(QDialog):
             self._dhash_spin.value(),
             self._face_spin.value(),
             self._face_check.isChecked(),
+            self._face_frames_spin.value(),
         )
         self.accept()

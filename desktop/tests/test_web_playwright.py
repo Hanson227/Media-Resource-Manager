@@ -958,7 +958,24 @@ def test_file_management_delete(page):
         page.wait_for_timeout(1200)
 
         check("弹出删除确认框", any("回收站" in m for m in dialogs))
-        check("删除后退出选择模式", page.locator(".select-bar").count() == 0)
+
+        # 回收站可用 → 直接删掉；不可用（网络盘 / 沙箱）→ 必须给出明确的补救选择，
+        # 而不是"报个错就完"（用户报的"web 端删不了"就是卡在这里）
+        fallback = page.locator(".sheet-panel", has_text="回收站不可用")
+        if fallback.count() > 0:
+            check("回收站不可用时弹出补救弹层",
+                  "回收站不可用" in (fallback.first.text_content() or ""))
+            check("补救弹层提供「永久删除」",
+                  page.locator(".sheet-item", has_text="永久删除").count() > 0)
+            check("补救弹层提供「仅从媒体库移除」",
+                  page.locator(".sheet-item", has_text="仅从媒体库移除").count() > 0)
+            page.locator(".sheet-cancel").first.click()
+            page.wait_for_timeout(300)
+            check("失败时保留选中状态以便重试（不静默清空）",
+                  page.locator(".select-bar").count() > 0)
+        else:
+            check(f"回收站可用 → 正常删除（剩余 {page.locator('.feed-item').count()}）", True)
+            check("删除后退出选择模式", page.locator(".select-bar").count() == 0)
 
         # UI 与数据库一致（回收站不可用时服务端会保留记录并回报失败）
         with DatabaseManager.session() as session:
@@ -985,6 +1002,81 @@ def test_file_management_delete(page):
     finally:
         page.remove_listener("dialog", on_dialog)
         page.remove_listener("pageerror", on_error)
+        import shutil
+        with DatabaseManager.session() as session:
+            q.delete_resource_unit(session, unit_id)
+        shutil.rmtree(paths[0].parent.parent, ignore_errors=True)
+
+
+def test_file_delete_trash_fallback(page):
+    """Web 删除：回收站不可用（网络盘 / exFAT）时必须给出"永久删除 / 仅移除记录"。
+
+    用户报"web 端删不了"的根因：媒体库在 G: 这类可移动/网络盘上，该卷没有回收站，
+    send2trash 必然失败；而 Web 只有"移至回收站"一条路，API 只回 409，
+    于是永远删不掉。修复后失败要弹出选择，且**永久删除只能由用户主动点**。
+    """
+    section("Web 测试 11c: 回收站不可用时的删除出路")
+    from app.db import queries as q
+    import send2trash
+
+    unit_id, file_ids, paths = _seed_temp_unit("Web永久删除", ["p1.jpg", "p2.jpg"])
+    orig = send2trash.send2trash
+
+    def _boom(path):
+        raise OSError("[WinError 50] 不支持该请求（该卷没有回收站）")
+
+    dialogs: list = []
+    on_dialog = _attach_dialog_auto_accept(page, dialogs)
+    try:
+        send2trash.send2trash = _boom
+        page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        page.locator(".unit-card", has_text="Web永久删除").first.click()
+        page.locator(".feed-item").first.wait_for(state="attached", timeout=5000)
+        check("文件列表已渲染 2 个文件", page.locator(".feed-item").count() == 2)
+
+        # 前置：服务端此刻确实删不了（否则这个测试没有意义）
+        import requests
+        probe = requests.delete(f"http://127.0.0.1:{_PORT}/api/files/{file_ids[0]}",
+                                timeout=5)
+        check(f"前置：回收站不可用时 trash 返回 409（实际 {probe.status_code}）",
+              probe.status_code == 409)
+        check("前置：失败时磁盘文件必须保留", paths[0].exists())
+
+        # 走 UI：多选管理 → 全选 → 删除 → 接受确认框 → 应弹出补救弹层
+        page.locator(".feed-item .card-more").first.click()
+        page.locator(".sheet-item", has_text="多选管理").first.click()
+        page.wait_for_timeout(250)
+        page.locator(".select-bar-btn", has_text="全选").first.click()
+        page.wait_for_timeout(150)
+        page.locator(".select-bar-btn", has_text="删除").first.click()
+        page.wait_for_timeout(1200)
+
+        sheet = page.locator(".sheet-panel")
+        sheet.wait_for(state="visible", timeout=3000)
+        sheet_text = sheet.first.text_content() or ""
+        check("弹出补救弹层而不是只报错", "回收站不可用" in sheet_text)
+        check("提供「永久删除（不可恢复）」",
+              page.locator(".sheet-item", has_text="永久删除").count() > 0)
+        check("提供「仅从媒体库移除」",
+              page.locator(".sheet-item", has_text="仅从媒体库移除").count() > 0)
+        check("弹层中未删除前磁盘文件仍在", all(p.exists() for p in paths))
+
+        # 选「永久删除」→ 磁盘与列表都清干净
+        page.locator(".sheet-item", has_text="永久删除").first.click()
+        page.wait_for_timeout(1800)
+        check("永久删除后磁盘文件消失", all(not p.exists() for p in paths))
+        with DatabaseManager.session() as session:
+            left = q.get_files_by_unit(session, unit_id)
+            unit = q.get_unit_by_id(session, unit_id)
+        check("永久删除后数据库记录清空", len(left) == 0)
+        check(f"页面文件数与库一致（UI {page.locator('.feed-item').count()} / DB {len(left)}）",
+              page.locator(".feed-item").count() == len(left))
+        check("单元统计同步为 0", unit.file_count == 0)
+    finally:
+        send2trash.send2trash = orig
+        page.remove_listener("dialog", on_dialog)
         import shutil
         with DatabaseManager.session() as session:
             q.delete_resource_unit(session, unit_id)
@@ -1036,10 +1128,16 @@ def test_unit_delete_from_card_menu(page):
 
 
 def _seed_dedup_levels() -> tuple:
-    """造一组 duplicate + 一组 related 查重结果（含人脸线索行）。"""
+    """造三类查重结果：疑似重复 / 疑似相关（有文件重叠）/ 同演员（只有人脸线索）。
+
+    三分法是本轮的核心改动：旧实现把"有文件重叠的相关"和"只有人脸线索的同演员"
+    混在一起，实测 380 条里 373 条是后者（杰卡德恒为 0，界面一片 0%），
+    真正的 7 条重叠被淹没。
+    """
     from app.db import queries as q
 
     extra_uid, extra_ids, extra_paths = _seed_temp_unit("查重相关单元", ["r1.jpg"])
+    face_uid, face_ids, face_paths = _seed_temp_unit("同演员单元", ["f1.jpg"])
     with DatabaseManager.session() as session:
         units = {u.name: u for u in q.get_all_active_units(session)}
         ua = units.get("片段A")
@@ -1056,26 +1154,67 @@ def _seed_dedup_levels() -> tuple:
             similarity_score=0.95, match_count=1,
             total_files_a=len(files_a), total_files_b=len(files_b),
             match_types="md5", match_level="duplicate",
+            evidence_kind="file",
         )
         q.insert_file_match(session, dedup_result_id=dup.id,
                             file_a_id=files_a[0].id, file_b_id=files_b[0].id,
                             similarity_score=1.0, match_type="md5")
 
+        # 有文件重叠的"疑似相关"：1 条视频帧匹配 + 1 条人脸线索（多帧吻合）
         rel = q.upsert_dedup_result(
             session, unit_a_id=ua.id, unit_b_id=extra_uid,
-            similarity_score=0.08, match_count=1,
+            similarity_score=0.12, match_count=1,
             total_files_a=len(files_a), total_files_b=1,
-            match_types="face", match_level="related",
+            match_types="video", match_level="related",
+            evidence_kind="file",
         )
         q.insert_file_match(session, dedup_result_id=rel.id,
                             file_a_id=files_a[0].id, file_b_id=extra_ids[0],
-                            similarity_score=0.72, match_type="face")
-        return {"dup_id": dup.id, "rel_id": rel.id,
-                "extra_uid": extra_uid, "extra_paths": extra_paths}
+                            similarity_score=1.0, match_type="video")
+        q.insert_file_match(session, dedup_result_id=rel.id,
+                            file_a_id=files_a[-1].id, file_b_id=extra_ids[0],
+                            similarity_score=0.66, match_type="face",
+                            frame_support=3)
+
+        # 只有人脸线索的"同演员"：零文件重叠
+        face = q.upsert_dedup_result(
+            session, unit_a_id=ua.id, unit_b_id=face_uid,
+            similarity_score=0.0, match_count=0,
+            total_files_a=len(files_a), total_files_b=1,
+            match_types="", match_level="related",
+            evidence_kind="face",
+        )
+        q.insert_file_match(session, dedup_result_id=face.id,
+                            file_a_id=files_a[1].id, file_b_id=face_ids[0],
+                            similarity_score=0.58, match_type="face",
+                            frame_support=2)
+        q.insert_file_match(session, dedup_result_id=face.id,
+                            file_a_id=files_a[0].id, file_b_id=face_ids[0],
+                            similarity_score=0.51, match_type="face",
+                            frame_support=1)
+        return {"dup_id": dup.id, "rel_id": rel.id, "face_id": face.id,
+                "extra_uid": extra_uid, "extra_paths": extra_paths,
+                "face_uid": face_uid, "face_paths": face_paths}
+
+
+def _expand_first_group(page, timeout: int = 8000) -> bool:
+    """展开第一个分组（列表改成二级分组后，卡片在组内而不是直接可见）。
+
+    分组是异步拉的（先 /groups 再 /results），因此必须等组头出现再点 ——
+    列表还没渲染时直接点会"点了空气"，后续找 .card 必然超时。
+    """
+    head = page.locator(".dedup-group-head").first
+    try:
+        head.wait_for(state="attached", timeout=timeout)
+    except Exception:
+        return False
+    head.click()
+    page.wait_for_timeout(700)
+    return True
 
 
 def test_dedup_level_semantics(page):
-    """Web 查重：区分「疑似重复」与「疑似相关」，related 不给删除入口。
+    """Web 查重：三类分开取（疑似重复 / 疑似相关 / 同演员），相关不给删除入口。
 
     桌面端对 related 只提供"白名单/暂时忽略"（不给保留 A/B），因为 related
     的语义是"仅供了解、不建议删除"。Web 端必须一致，否则等于诱导用户删文件。
@@ -1095,25 +1234,34 @@ def test_dedup_level_semantics(page):
         page.locator(".dedup-tabs").wait_for(state="attached", timeout=5000)
 
         tabs = page.locator(".dedup-tab")
-        check("分级 Tab 存在（疑似重复/疑似相关）", tabs.count() == 2)
+        check("分级 Tab 存在三个（疑似重复/疑似相关/同演员）", tabs.count() == 3)
         check("默认选中「疑似重复」",
               "疑似重复" in (page.locator(".dedup-tab.active").text_content() or ""))
-        check("重复列表出现等级徽标",
-              page.locator(".lvl-badge.duplicate").count() > 0)
-        check("重复卡片显示相似度百分比",
-              "%" in (page.locator(".card-meta .count").first.text_content() or ""))
+        check("疑似相关 Tab 角标来自 counts.related 而不是全部 related",
+              "疑似相关" in (tabs.nth(1).text_content() or ""))
+        check("同演员 Tab 存在", "同演员" in (tabs.nth(2).text_content() or ""))
 
-        # 切到「疑似相关」
+        # 重复 Tab：分组 → 展开 → 卡片
+        check("重复列表按来源单元分组", page.locator(".dedup-group").count() > 0)
+        _expand_first_group(page)
+        check("展开分组后出现重复卡片", page.locator(".card").count() > 0)
+        check("重复卡片带「整单元重复」徽标",
+              page.locator(".lvl-badge.duplicate").count() > 0)
+
+        # 切到「疑似相关」：只有文件重叠的那条
         page.locator(".dedup-tab", has_text="疑似相关").first.click()
         page.wait_for_timeout(600)
+        _expand_first_group(page)
         related_cards = page.locator(".card.card-related")
         check("疑似相关列表出现卡片", related_cards.count() > 0)
-        check("相关卡片带「疑似相关」徽标",
+        check("相关卡片带徽标（部分重叠）",
               page.locator(".lvl-badge.related").count() > 0)
         check("相关卡片文案声明不建议删除",
               "不建议删除" in (related_cards.first.text_content() or ""))
+        check("相关卡片用「N/M 个文件重叠」表达，不再显示 0%",
+              "文件重叠" in (related_cards.first.text_content() or ""))
 
-        # 相关详情：无保留 A/B，有忽略；人脸线索单独成段
+        # 相关详情：无保留 A/B，有忽略；人脸线索默认折叠
         related_cards.first.click()
         page.locator(".dedup-header").wait_for(state="attached", timeout=5000)
         check("相关详情标记为 is-related",
@@ -1127,15 +1275,45 @@ def test_dedup_level_semantics(page):
         check(f"相关详情不提供「保留 A/B」（实际 {labels}）",
               not any(("保留 A" in t or "保留 B" in t) for t in labels))
         check("相关详情提供「暂时忽略」", any("忽略" in t for t in labels))
-        check("人脸线索单独分节展示", page.locator(".face-hint-note").count() > 0)
+        check("人脸线索默认折叠（标题可点）",
+              page.locator(".section-title.face-toggle").count() > 0
+              and page.locator(".hint-card").count() == 0)
+        page.locator(".section-title.face-toggle").first.click()
+        page.wait_for_timeout(300)
+        check("展开后出现同演员线索卡片",
+              page.locator(".hint-card").count() > 0)
         check("人脸线索行使用 face 标签", page.locator(".tag.face").count() > 0)
+        check("人脸线索显示多帧吻合（3 帧）",
+              "多帧吻合" in (page.locator(".hint-card .pair-score").first.text_content() or ""))
+
+        # 「同演员」Tab：只有人脸线索那条，且不给保留 A/B
+        page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
+        page.wait_for_load_state("networkidle")
+        page.locator(".dedup-tab", has_text="同演员").first.click()
+        page.wait_for_timeout(600)
+        _expand_first_group(page)
+        face_cards = page.locator(".card")
+        check("同演员 Tab 出现卡片", face_cards.count() > 0)
+        check("同演员卡片带 face 徽标",
+              page.locator(".lvl-badge.face").count() > 0)
+        check("同演员卡片说明无文件重叠",
+              "无文件重叠" in (face_cards.first.text_content() or ""))
+        face_cards.first.click()
+        page.locator(".dedup-header").wait_for(state="attached", timeout=5000)
+        flabels = []
+        fbuttons = page.locator(".resolve-actions .btn")
+        for i in range(fbuttons.count()):
+            flabels.append(fbuttons.nth(i).text_content() or "")
+        check(f"同演员详情不提供「保留 A/B」（实际 {flabels}）",
+              not any(("保留 A" in t or "保留 B" in t) for t in flabels))
 
         # 重复详情：仍提供保留 A/B
         page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
         page.wait_for_load_state("networkidle")
-        dup_badge = page.locator(".card")
-        dup_badge.first.wait_for(state="attached", timeout=5000)
-        page.locator(".card").first.click()
+        _expand_first_group(page)
+        dup_card = page.locator(".card").first
+        dup_card.wait_for(state="attached", timeout=5000)
+        dup_card.click()
         page.locator(".dedup-header").wait_for(state="attached", timeout=5000)
         dlabels = []
         dbuttons = page.locator(".resolve-actions .btn")
@@ -1143,15 +1321,215 @@ def test_dedup_level_semantics(page):
             dlabels.append(dbuttons.nth(i).text_content() or "")
         check(f"重复详情提供「保留 A/B」（实际 {dlabels}）",
               any("保留 A" in t for t in dlabels) and any("保留 B" in t for t in dlabels))
+
+        # 分组子项与分组接口一致：展开后卡片数 = 该组对数
+        with DatabaseManager.session() as session:
+            rows, total = q.get_dedup_results_page(
+                session, level="duplicate", evidence="file", per_page=100)
+            check("后端 duplicate 结果数与界面一致",
+                  total >= 1 and any(r.id == seeded["dup_id"] for r in rows))
     finally:
         import shutil
         with DatabaseManager.session() as session:
-            for rid in (seeded["dup_id"], seeded["rel_id"]):
+            for rid in (seeded["dup_id"], seeded["rel_id"], seeded["face_id"]):
                 dr = q.get_dedup_by_id(session, rid)
                 if dr is not None:
                     session.delete(dr)
             q.delete_resource_unit(session, seeded["extra_uid"])
+            q.delete_resource_unit(session, seeded["face_uid"])
         shutil.rmtree(seeded["extra_paths"][0].parent.parent, ignore_errors=True)
+        shutil.rmtree(seeded["face_paths"][0].parent.parent, ignore_errors=True)
+
+
+def test_dedup_grouped_list(page):
+    """Web 查重列表：按左侧单元折叠成二级分组（380 条 → 几十个文件夹）。
+
+    用户诉求：卡片左边相同、右边不同的一大堆，能不能归成一个二级文件夹。
+    分组键就是卡片左侧那个单元（后端按 unit_a_id 分组，与界面一致）。
+    """
+    section("Web 测试 13b: 查重二级分组")
+    from app.db import queries as q
+
+    seeded = _seed_dedup_levels()
+    if seeded is None:
+        check("分组测试: 缺少 片段A/片段B，跳过", True)
+        return
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        page.locator(".dedup-group").first.wait_for(state="attached", timeout=5000)
+
+        groups = page.locator(".dedup-group")
+        check("列表呈现分组而不是平铺卡片", groups.count() > 0)
+        check("分组里的卡片默认收起（不直接铺满屏幕）",
+              page.locator(".group-children").count() == 0)
+        head_text = page.locator(".dedup-group-head").first.text_content() or ""
+        check("组头显示来源单元名", "片段A" in head_text)
+        check("组头显示对数", "对" in head_text)
+        check("组头带封面缩略图",
+              page.locator(".dedup-group-head .group-cover").count() > 0)
+
+        # 展开 → 出现子卡片；再点击 → 收起
+        page.locator(".dedup-group-head").first.click()
+        page.wait_for_timeout(500)
+        card_count = page.locator(".group-children .card").count()
+        check("展开后出现组内卡片", card_count > 0)
+        page.locator(".dedup-group-head").first.click()
+        page.wait_for_timeout(300)
+        check("再次点击收起", page.locator(".group-children").count() == 0)
+
+        # 展开当前 Tab 下所有分组：组内卡片数应等于后端返回的该 Tab 结果数
+        with DatabaseManager.session() as session:
+            _, total_dup = q.get_dedup_results_page(
+                session, level="duplicate", evidence="file", per_page=1)
+        page.locator("button", has_text="全部展开").first.click()
+        page.wait_for_timeout(800)
+        check(f"全部展开后组内卡片数 = 后端结果数（{total_dup}）",
+              page.locator(".group-children .card").count() == total_dup)
+
+        # 切 Tab 会重置分组（避免把上一档的展开状态带过去）
+        page.locator(".dedup-tab", has_text="同演员").first.click()
+        page.wait_for_timeout(600)
+        check("切换 Tab 后分组回到收起状态",
+              page.locator(".group-children").count() == 0)
+        check("同演员 Tab 也有分组", page.locator(".dedup-group").count() > 0)
+    finally:
+        import shutil
+        with DatabaseManager.session() as session:
+            for rid in (seeded["dup_id"], seeded["rel_id"], seeded["face_id"]):
+                dr = q.get_dedup_by_id(session, rid)
+                if dr is not None:
+                    session.delete(dr)
+            q.delete_resource_unit(session, seeded["extra_uid"])
+            q.delete_resource_unit(session, seeded["face_uid"])
+        shutil.rmtree(seeded["extra_paths"][0].parent.parent, ignore_errors=True)
+        shutil.rmtree(seeded["face_paths"][0].parent.parent, ignore_errors=True)
+
+
+def test_dedup_detail_thumbnails(page):
+    """Web 查重详情：每条匹配给出左右缩略图对比（点图进预览页）。
+
+    只列文件名时用户无法判断"这两张是不是同一张"，必须真的把图渲染出来。
+    这里断言图片真的加载成功（naturalWidth > 0），而不是 404 后的占位。
+    """
+    section("Web 测试 13c: 查重详情缩略图对比")
+    from app.db import queries as q
+
+    seeded = _seed_dedup_levels()
+    if seeded is None:
+        check("缩略图测试: 缺少 片段A/片段B，跳过", True)
+        return
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/dedup/{seeded['rel_id']}")
+        page.locator(".dedup-header").wait_for(state="attached", timeout=5000)
+        page.locator(".match-grid").first.wait_for(state="attached", timeout=5000)
+
+        cards = page.locator(".match-grid .match-card")
+        check("匹配项渲染成对比卡片", cards.count() > 0)
+        thumbs = page.locator(".match-grid .match-card .thumb-pair img.thumb")
+        check("每对匹配有左右两张缩略图（≥2）", thumbs.count() >= 2)
+        src0 = thumbs.first.get_attribute("src") or ""
+        check("缩略图走 /api/files/{id}/thumbnail",
+              "/thumbnail" in src0 and "/api/files/" in src0)
+        check("缩略图带 lazy 加载属性",
+              thumbs.first.get_attribute("loading") == "lazy")
+
+        # 真加载：等图片解码完成后检查 naturalWidth（404/403 会得到 0）
+        page.wait_for_timeout(1500)
+        loaded = page.evaluate(
+            "Array.from(document.querySelectorAll('.match-grid .match-card "
+            ".thumb-pair img.thumb')).filter(i => i.naturalWidth > 0).length")
+        check(f"缩略图真的加载成功（实际 {loaded} 张）", loaded >= 2)
+        check("没有出现占位图标（说明图片请求成功）",
+              page.locator(".thumb-empty").count() == 0)
+
+        # 点缩略图 → 进入预览页
+        thumbs.first.click()
+        page.wait_for_timeout(800)
+        check("点击缩略图进入预览页", "/preview/" in page.url)
+
+        # 子集重复的说明块存在（用 pair 数据造一条）
+        page.goto(f"http://127.0.0.1:{_PORT}/#/dedup/{seeded['rel_id']}")
+        page.locator(".dedup-header").wait_for(state="attached", timeout=5000)
+        check("相关详情显示「文件重叠 N/M」",
+              "文件重叠" in (page.locator(".dedup-header .match-info").text_content() or ""))
+        check("同演员线索段默认折叠（未展开时不渲染卡片）",
+              page.locator(".hint-card").count() == 0)
+    finally:
+        import shutil
+        with DatabaseManager.session() as session:
+            for rid in (seeded["dup_id"], seeded["rel_id"], seeded["face_id"]):
+                dr = q.get_dedup_by_id(session, rid)
+                if dr is not None:
+                    session.delete(dr)
+            q.delete_resource_unit(session, seeded["extra_uid"])
+            q.delete_resource_unit(session, seeded["face_uid"])
+        shutil.rmtree(seeded["extra_paths"][0].parent.parent, ignore_errors=True)
+        shutil.rmtree(seeded["face_paths"][0].parent.parent, ignore_errors=True)
+
+
+def test_dedup_stale_banner(page):
+    """Web 查重：旧规则的结论必须被明确标出，而不是把旧数字当结论渲染。
+
+    用户实测踩到：升级后只做了分类搬迁、没重算，界面把旧规则的 match_count=46
+    配 33 个文件的单元渲染成"46/33 个文件重叠"，还显示"疑似重复 0" ——
+    看上去像界面坏掉/递归了。
+    """
+    section("Web 测试 13d: 旧规则结果提示")
+    from app.db import queries as q
+    from app.db.models import DedupResult
+
+    seeded = _seed_dedup_levels()
+    if seeded is None:
+        check("旧规则提示测试: 缺少 片段A/片段B，跳过", True)
+        return
+    try:
+        # 把其中一条改成"升级前算出来的"（computed_version=0）
+        with DatabaseManager.session() as session:
+            session.query(DedupResult).filter(
+                DedupResult.id == seeded["rel_id"]).update(
+                {"computed_version": 0}, synchronize_session=False)
+
+        page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        page.locator(".stale-hint").wait_for(state="attached", timeout=8000)
+
+        text = page.locator(".stale-hint").text_content() or ""
+        check("提示条说明是旧规则算的", "旧规则" in text)
+        check("提示条显示待重算条数", "1" in text)
+        check("提示条提供「立即重算」入口",
+              page.locator(".stale-btn").count() > 0)
+
+        # 切到含旧结论的那一档，展开分组看卡片标记
+        page.locator(".dedup-tab", has_text="疑似相关").first.click()
+        page.wait_for_timeout(600)
+        _expand_first_group(page)
+        check("旧规则卡片显示「待重算」而不是荒谬比例",
+              "待重算" in (page.locator(".card-meta .count").first.text_content() or ""))
+        check("旧规则卡片带专用徽标",
+              page.locator(".lvl-badge.stale").count() > 0)
+        check("组头提示组内含旧规则结果",
+              "旧规则" in (page.locator(".dedup-group-head").first.text_content() or ""))
+
+        # 详情页同样要提示，而不是展示旧数字
+        page.goto(f"http://127.0.0.1:{_PORT}/#/dedup/{seeded['rel_id']}")
+        page.locator(".dedup-header").wait_for(state="attached", timeout=5000)
+        check("详情页标记为旧规则", "旧规则" in (page.locator(".dedup-header .score").text_content() or ""))
+        check("详情页有旧规则说明块",
+              page.locator(".stale-note").count() > 0)
+    finally:
+        import shutil
+        with DatabaseManager.session() as session:
+            for rid in (seeded["dup_id"], seeded["rel_id"], seeded["face_id"]):
+                dr = q.get_dedup_by_id(session, rid)
+                if dr is not None:
+                    session.delete(dr)
+            q.delete_resource_unit(session, seeded["extra_uid"])
+            q.delete_resource_unit(session, seeded["face_uid"])
+        shutil.rmtree(seeded["extra_paths"][0].parent.parent, ignore_errors=True)
+        shutil.rmtree(seeded["face_paths"][0].parent.parent, ignore_errors=True)
 
 
 def test_dedup_run_from_web(page):
@@ -1189,8 +1567,9 @@ def test_dedup_run_from_web(page):
         check(f"服务端存在分级计数（{counts}）",
               isinstance(counts.get("duplicate"), int)
               and counts.get("total", 0) >= 1)
-        check("列表已刷新（有徽标或空态）",
-              page.locator(".lvl-badge").count() > 0
+        check("列表已刷新（有分组 / 徽标 / 空态）",
+              page.locator(".dedup-group").count() > 0
+              or page.locator(".lvl-badge").count() > 0
               or page.locator(".empty-state").count() > 0)
     finally:
         page.remove_listener("dialog", on_dialog)
@@ -1315,6 +1694,11 @@ def main():
             page.wait_for_load_state("networkidle")
             test_file_management_delete(page)
 
+            # 回收站不可用时的删除出路（模拟网络盘 / 无回收站分区）
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_load_state("networkidle")
+            test_file_delete_trash_fallback(page)
+
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
             page.wait_for_load_state("networkidle")
             test_unit_delete_from_card_menu(page)
@@ -1323,6 +1707,9 @@ def main():
             page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")
             page.wait_for_load_state("networkidle")
             test_dedup_level_semantics(page)
+            test_dedup_grouped_list(page)
+            test_dedup_detail_thumbnails(page)
+            test_dedup_stale_banner(page)
 
             # 一键查重（索引 + 比对，含进度展示）
             page.goto(f"http://127.0.0.1:{_PORT}/#/dedup")

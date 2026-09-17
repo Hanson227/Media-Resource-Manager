@@ -20,9 +20,11 @@ from PIL import Image
 
 from app.utils.constants import (
     FACE_DETECT_MAX_SIDE,
+    FACE_DETECT_MAX_SIDE_VIDEO,
     FACE_DETECT_MODEL,
     FACE_RECOGNIZE_MODEL,
     FACE_SIMILARITY_THRESHOLD,
+    FACE_VIDEO_MAX_FRAMES,
     VIDEO_MIN_FRAME_BRIGHTNESS,
 )
 from app.utils.image_helpers import imread_unicode, VideoCapture_unicode
@@ -31,6 +33,45 @@ from app.registry.hash_registry import HashAlgorithmRegistry, create_default_reg
 from app.core.exceptions import HashComputationError, FaceDetectionError
 
 logger = logging.getLogger(__name__)
+
+
+def plan_video_face_timestamps(duration_ms: int, min_interval_sec: int = 5,
+                               max_frames: int = FACE_VIDEO_MAX_FRAMES
+                               ) -> list[int]:
+    """规划视频人脸检测要取哪几帧（纯函数，便于单测）。
+
+    策略：**等间隔、均匀铺满全片、最多 max_frames 帧**。
+
+    旧实现只取"中间那一帧"（失败才回退首帧）：抽到的是哪一帧取决于片长，
+    同一部片子重扫结果可能不同，且正脸只要不在中点就整片漏检 ——
+    实测 1142 个视频里只有 198 个（17%）检出人脸。
+
+    参数:
+        duration_ms: 视频时长（毫秒）；非正数时返回空列表。
+        min_interval_sec: 相邻两帧的最小间隔（秒）；片子短则按这个间隔取。
+        max_frames: 最多取多少帧（长视频自动放大间隔，而不是只扫开头）。
+
+    返回:
+        时间戳（毫秒）升序列表；空视频返回 []。
+    """
+    if duration_ms <= 0 or max_frames <= 0:
+        return []
+
+    interval_ms = max(1, int(min_interval_sec)) * 1000
+    duration_ms = int(duration_ms)
+
+    # 先按最小间隔铺，再按上限压缩；两种约束取"帧数更少"的那个
+    by_interval = duration_ms // interval_ms + 1
+    count = max(1, min(int(max_frames), by_interval))
+
+    if count == 1:
+        # 极短视频：取中点仍是 "均匀铺满" 的退化情形
+        return [duration_ms // 2]
+
+    # 均匀分布：起点 0、终点 duration_ms-1，中间等分（避免落在片尾黑屏之后）
+    step = (duration_ms - 1) / (count - 1)
+    stamps = sorted({int(round(i * step)) for i in range(count)})
+    return [min(s, duration_ms - 1) for s in stamps]
 
 
 # ============================================================
@@ -78,6 +119,13 @@ class FaceVector:
 
     bbox: tuple = (0, 0, 0, 0)
     """边界框 (x, y, w, h)。"""
+
+    source_ms: Optional[int] = None
+    """该人脸取自视频的第几毫秒；图片为 None。
+
+    同一文件的视频多帧会产出多行：face_index 跨帧递增、source_ms 记录位置。
+    它也是"这一对文件在多少帧里都吻合"（frame_support）的判定依据。
+    """
 
     @property
     def vector_bytes(self) -> bytes:
@@ -446,9 +494,7 @@ class HashEngine:
         return True
 
     def detect_faces(self, image_path: Path) -> list[FaceVector]:
-        """检测图片中的人脸，返回特征向量列表。
-
-        使用 Caffe SSD 检测人脸 + OpenFace nn4 提取 128 维特征。
+        """检测图片中的人脸，返回特征向量列表（读盘 + 委托数组版实现）。
 
         参数:
             image_path: 图片文件路径。
@@ -467,21 +513,56 @@ class HashEngine:
         if not self._load_models(model_dir):
             return []
 
-        face_vectors: list[FaceVector] = []
         try:
             # 读取图片（兼容中文路径）。YuNet 直接吃 BGR 原图，无需 blob 预处理。
             image = imread_unicode(image_path)
             if image is None:
                 return []
+            return self.detect_faces_array(image, source=image_path)
+        except FaceDetectionError:
+            raise
+        except Exception as e:
+            logger.error(f"人脸检测失败: {image_path} - {e}")
+            raise FaceDetectionError(str(image_path), str(e))
 
+    def detect_faces_array(self, image, *, source=None,
+                           max_detect_side: int = FACE_DETECT_MAX_SIDE,
+                           source_ms: Optional[int] = None,
+                           start_index: int = 0) -> list[FaceVector]:
+        """检测 BGR 图像数组里的人脸（图片与视频帧共用同一套逻辑）。
+
+        参数:
+            image: OpenCV BGR ndarray。
+            source: 出错时用于日志的文件路径（可选）。
+            max_detect_side: 送进 YuNet 的图像长边上限。检测在上限尺度上进行，
+                检出框会按比例映射回原图、再从**原图**裁剪对齐 ——
+                因此降低上限只省检测耗时，不影响特征质量。
+            source_ms: 视频帧时间位置，会写进 FaceVector（图片为 None）。
+            start_index: 人脸序号起始值（视频多帧需要跨帧连续编号）。
+
+        返回:
+            FaceVector 列表（可能为空）。
+
+        异常:
+            FaceDetectionError: 推理过程出错。
+        """
+        cv2 = self._cv
+        if not self._face_enabled or cv2 is None or image is None:
+            return []
+        if not self._load_models(self._model_dir):
+            return []
+
+        label = str(source) if source else "<array>"
+        face_vectors: list[FaceVector] = []
+        try:
             h, w = image.shape[:2]
             if h <= 0 or w <= 0:
                 return []
 
-            # 1. 人脸检测（YuNet 的输入尺寸随图片变化，每张图都要重设）
+            # 1. 人脸检测（YuNet 的输入尺寸随图像变化，每张都要重设）
             #    长边超过上限先等比缩小：输入尺寸直接决定推理耗时
-            #    （1280px 82ms → 640px 22ms），而缩小对检出率影响很小。
-            scale = min(1.0, FACE_DETECT_MAX_SIDE / max(h, w))
+            #    （1280px 82ms → 640px 22ms）。
+            scale = min(1.0, max_detect_side / max(h, w))
             if scale < 1.0:
                 detect_img = cv2.resize(
                     image,
@@ -500,7 +581,7 @@ class HashEngine:
             if detections is None:
                 return []
 
-            face_index = 0
+            face_index = start_index
             # 每行 15 列：[x, y, w, h, 5 个关键点(x,y), 置信度]
             for det in detections:
                 confidence = float(det[-1])
@@ -525,7 +606,7 @@ class HashEngine:
                 vector_128 = tuple(float(v) for v in embedding.flatten()[:128])
                 if len(vector_128) != 128:  # 契约：DB 里按 128×float32 存储
                     logger.warning(
-                        f"人脸特征维度异常（期望 128，实际 {len(vector_128)}）: {image_path}"
+                        f"人脸特征维度异常（期望 128，实际 {len(vector_128)}）: {label}"
                     )
                     continue
 
@@ -533,17 +614,100 @@ class HashEngine:
                     face_index=face_index,
                     vector=vector_128,
                     bbox=(x, y, bw, bh),
+                    source_ms=source_ms,
                 ))
                 face_index += 1
 
             if face_vectors:
-                logger.debug(f"检测到 {len(face_vectors)} 张人脸: {image_path.name}")
+                logger.debug(f"检测到 {len(face_vectors)} 张人脸: {label}")
 
         except Exception as e:
-            logger.error(f"人脸检测失败: {image_path} - {e}")
-            raise FaceDetectionError(str(image_path), str(e))
+            logger.error(f"人脸检测失败: {label} - {e}")
+            raise FaceDetectionError(label, str(e))
 
         return face_vectors
+
+    def extract_video_faces(self, video_path: Path,
+                            interval_sec: int = 5,
+                            max_frames: int = FACE_VIDEO_MAX_FRAMES
+                            ) -> list[FaceVector]:
+        """视频人脸检测：按 plan_video_face_timestamps 定间隔多帧分别检测。
+
+        与旧实现的区别（旧实现只取中间一帧）：
+        - 覆盖全片，正脸不在中点也能检出；
+        - 时间戳固定，同一视频重扫结果一致；
+        - 每条向量带 source_ms，可用于"多帧吻合"的可信度判定。
+
+        参数:
+            video_path: 视频文件路径。
+            interval_sec: 相邻帧最小间隔（秒）。
+            max_frames: 最多检测多少帧（长视频自动放大间距）。
+
+        返回:
+            FaceVector 列表（face_index 跨帧连续递增；可能为空）。
+        """
+        cv2 = self._cv
+        if not self._face_enabled or cv2 is None:
+            return []
+        if not self._load_models(self._model_dir):
+            return []
+
+        cap = None
+        faces: list[FaceVector] = []
+        try:
+            cap = VideoCapture_unicode(video_path)
+            if not cap.isOpened():
+                return []
+
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if fps <= 0 or total_frames <= 0:
+                return []
+
+            duration_ms = int((total_frames / fps) * 1000)
+            stamps = plan_video_face_timestamps(duration_ms, interval_sec, max_frames)
+            next_index = 0
+            for ts_ms in stamps:
+                if self._cancelled:
+                    break
+                cap.set(cv2.CAP_PROP_POS_MSEC, ts_ms)
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    # 末帧时间戳常落在最后一帧 PTS 之后（总时长按帧数×帧率算，
+                    # 末帧实际位置要比它早一帧），回退一点点重试；
+                    # 与 extract_video_frames 的"向前微调"是同一类兜底。
+                    cap.set(cv2.CAP_PROP_POS_MSEC, max(0, ts_ms - 300))
+                    ret, frame = cap.read()
+                if not ret or frame is None:
+                    continue
+                # 跳过黑帧（与 pHash 抽帧同一判据）
+                if float(np.mean(frame)) < VIDEO_MIN_FRAME_BRIGHTNESS:
+                    continue
+                try:
+                    frame_faces = self.detect_faces_array(
+                        frame, source=video_path, source_ms=ts_ms,
+                        start_index=next_index,
+                        max_detect_side=FACE_DETECT_MAX_SIDE_VIDEO,
+                    )
+                except FaceDetectionError as e:
+                    # 单帧失败不影响整片：视频抽帧本来就有解码失败的可能
+                    logger.debug(f"视频帧人脸检测跳过 {video_path}@{ts_ms}ms: {e}")
+                    continue
+                if frame_faces:
+                    faces.extend(frame_faces)
+                    next_index += len(frame_faces)
+
+            if faces:
+                logger.debug(
+                    f"视频人脸: {video_path.name} → {len(faces)} 张脸 / {len(stamps)} 帧"
+                )
+            return faces
+        except Exception as e:
+            logger.error(f"视频人脸检测失败: {video_path} - {e}")
+            return []
+        finally:
+            if cap is not None:
+                cap.release()
 
     # ============================================================
     # 内部辅助方法

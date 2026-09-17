@@ -774,11 +774,64 @@ body {
 .tag.face { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
 
 .section-title { font-size: 13px; padding: var(--space-3) var(--space-2); color: var(--text-secondary); }
+.section-title.face-toggle {
+  display: flex; align-items: center; gap: var(--space-2);
+  cursor: pointer; user-select: none;
+}
 .hint-pair { opacity: .92; }
 .face-hint-note {
   font-size: 11px; color: var(--text-tertiary);
   padding: var(--space-3) var(--space-6); line-height: 1.6;
 }
+
+/* ========== Dedup 详情：缩略图对比 ========== */
+/* 只看文件名无法判断"这两张是不是同一张"，因此每条匹配都给左右两张缩略图 */
+.subset-note {
+  font-size: 12px; color: var(--amber); line-height: 1.7;
+  margin-top: var(--space-4); text-align: left;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: var(--radius-sm); padding: var(--space-3);
+}
+.match-grid {
+  display: grid; gap: var(--space-3);
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+}
+.match-card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: var(--space-3);
+  min-width: 0;
+}
+.match-card.hint-card { border-left: 3px solid var(--amber); }
+.thumb-pair { display: flex; align-items: center; gap: var(--space-2); }
+.thumb {
+  width: 100%; min-width: 0; height: 96px; object-fit: cover;
+  border-radius: var(--radius-sm); background: var(--border);
+  cursor: pointer; display: block;
+}
+.thumb-empty {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-tertiary); font-size: 22px; cursor: default;
+}
+.pair-arrow { color: var(--text-tertiary); font-size: 14px; flex-shrink: 0; }
+.pair-names {
+  display: flex; align-items: center; gap: var(--space-2);
+  margin-top: var(--space-2); font-size: 11px; color: var(--text-secondary);
+}
+.pair-names .fname {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pair-arrow-text { flex-shrink: 0; color: var(--text-tertiary); }
+.pair-meta {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-2); margin-top: var(--space-2); font-size: 11px;
+  color: var(--text-tertiary);
+}
+.pair-meta .tag {
+  padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600;
+}
+.pair-score { white-space: nowrap; }
 
 /* ========== Dedup: 触发查重 / 等级分组 ========== */
 .dedup-run {
@@ -821,12 +874,111 @@ body {
 }
 .lvl-badge.duplicate { background: rgba(239, 68, 68, 0.15); color: var(--red); }
 .lvl-badge.related   { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
+.lvl-badge.face      { background: rgba(167, 139, 250, 0.15); color: #a78bfa; }
 /* "疑似相关"不是重复：用琥珀色左边框与重复区分，避免被当成待删项 */
 .card.card-related { border-left: 3px solid var(--amber); }
 .more-btn { margin-top: var(--space-3); }
 .card-meta { text-align: right; flex-shrink: 0; }
 .card-meta .count { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.card-meta .count.is-related { color: var(--amber); font-size: 14px; }
+.card-meta .count.is-subset  { color: var(--amber); font-size: 14px; }
+.card-meta .count.is-duplicate { color: var(--red); }
 .card-meta .label { font-size: 10px; color: var(--text-tertiary); }
+
+/* ========== Dedup: 运行参数 / 人脸补扫提示 ========== */
+.dedup-opts {
+  display: flex; flex-wrap: wrap; gap: var(--space-4);
+  padding: 0 var(--space-2) var(--space-4);
+  font-size: 12px; color: var(--text-secondary);
+}
+.dedup-opt { display: flex; align-items: center; gap: var(--space-2); }
+.dedup-opt select {
+  background: var(--bg-card); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 2px 6px; font-size: 12px;
+}
+.dedup-opt-check { cursor: pointer; }
+.face-scan-hint {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3);
+  background: rgba(96, 165, 250, 0.08);
+  border: 1px solid rgba(96, 165, 250, 0.25);
+  border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4); font-size: 12px; color: var(--text-secondary);
+}
+.face-scan-hint > .mdi { color: var(--blue); font-size: 18px; }
+.face-scan-text { flex: 1; min-width: 160px; line-height: 1.5; }
+.face-scan-btn { width: auto; flex-shrink: 0; font-size: 12px; padding: var(--space-2) var(--space-4); }
+
+/* ========== Dedup: 二级分组（按左侧单元折叠） ========== */
+/* 视觉上必须是"文件夹 + 列表项"，不能是"盒子套盒子" ——
+   组与子项都用卡片样式时，用户会以为界面在递归（实测被反馈过）。 */
+.dedup-group { margin-bottom: var(--space-4); }
+.dedup-group-head {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--space-2); cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  transition: background .15s;
+}
+.dedup-group-head:hover { background: var(--bg-hover, rgba(255, 255, 255, 0.03)); }
+.group-cover {
+  width: 40px; height: 40px; border-radius: var(--radius-sm);
+  object-fit: cover; flex-shrink: 0; background: var(--border);
+}
+.group-cover-empty {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-tertiary); font-size: 20px;
+}
+.group-body { flex: 1; min-width: 0; }
+.group-name {
+  font-size: 14px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.group-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 1px; }
+.group-stale { color: var(--amber); }
+.group-chevron { color: var(--text-tertiary); flex-shrink: 0; }
+/* 子项缩进 + 左侧竖线：层级靠缩进表达，不再靠"卡片里的卡片" */
+.group-children {
+  padding: var(--space-3) 0 var(--space-1) var(--space-4);
+  border-left: 2px solid var(--border);
+  margin-left: var(--space-4);
+}
+.card.card-child {
+  margin-bottom: var(--space-2); padding: var(--space-3) var(--space-4);
+  background: transparent; border: 1px solid var(--border);
+}
+.card.card-child:hover { background: var(--bg-card); }
+.card.card-child:last-child { margin-bottom: 0; }
+
+/* 旧规则算出的结果：一眼看出"这不是现在的结论" */
+.stale-hint {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3);
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4); font-size: 12px; color: var(--text-secondary);
+}
+.stale-hint > .mdi { color: var(--amber); font-size: 18px; }
+.stale-text { flex: 1; min-width: 160px; line-height: 1.5; }
+.stale-btn { width: auto; flex-shrink: 0; font-size: 12px; padding: var(--space-2) var(--space-4); }
+.lvl-badge.stale { background: rgba(148, 163, 184, 0.18); color: var(--text-secondary); }
+.card.card-stale { opacity: .75; }
+.card-meta .count.is-stale { color: var(--text-tertiary); font-size: 13px; }
+.stale-note {
+  font-size: 12px; color: var(--text-secondary); line-height: 1.7;
+  margin-top: var(--space-4); text-align: left;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: var(--space-3);
+}
+.stale-note > .mdi { color: var(--amber); margin-right: 4px; }
+
+/* 窄屏：缩略图对比改单列，避免两张图挤成一条线 */
+@media (max-width: 480px) {
+  .match-grid { grid-template-columns: 1fr; }
+  .thumb { height: 120px; }
+  .dedup-group-head { padding: var(--space-3) var(--space-1); }
+  .group-children { margin-left: var(--space-2); padding-left: var(--space-3); }
+}
 
 /* ========== Loading ========== */
 .loading-dots {

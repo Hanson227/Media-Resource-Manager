@@ -13,7 +13,7 @@ import json
 import warnings
 
 # 仅依赖无第三方依赖的常量模块，保持 config 可在早期安全导入
-from app.utils.constants import FACE_SIMILARITY_THRESHOLD
+from app.utils.constants import FACE_SIMILARITY_THRESHOLD, FACE_VIDEO_MAX_FRAMES
 
 # 敏感字段不写入 config.json（后者在版本库中被跟踪，明文 PIN 会被提交）。
 # 改为存放在 config.json 同级的 data/.web_pin —— data/ 已被 .gitignore 忽略。
@@ -115,6 +115,14 @@ class AppConfig:
 
     face_confidence_threshold: float = 0.7
     """人脸检测置信度阈值。"""
+
+    face_video_max_frames: int = FACE_VIDEO_MAX_FRAMES
+    """单个视频做多少次人脸检测（默认 10）。
+
+    视频人脸改用"等间隔均匀铺满全片"后，这个值直接决定准确率与耗时：
+    YuNet 单帧约 82ms（长边 1280），10 帧 ≈ 0.8s/视频。
+    调大更准（长视频覆盖更密），调小更快。图片不受影响（全图检测只做一次）。
+    """
 
     # ========== 缩略图 ==========
     thumbnail_max_size: int = 256

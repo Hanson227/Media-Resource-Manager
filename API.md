@@ -240,7 +240,7 @@ DELETE /api/units/{unit_id}?mode=trash
 
 | 参数 | 类型 | 默认 | 说明 |
 |--------|------|--------|------|
-| `mode` | str | `trash` | `trash`=整个文件夹移至回收站 + 删库记录（与桌面端「删除文件夹」一致）；`record`=仅删除数据库记录，磁盘文件夹保留 |
+| `mode` | str | `trash` | `trash`=整个文件夹移至回收站 + 删库记录（与桌面端「删除文件夹」一致）；`record`=仅删除数据库记录，磁盘文件夹保留；`delete`=**永久删除**整个文件夹（不可恢复，仅在回收站不可用时由用户明确选择） |
 
 响应：
 
@@ -249,9 +249,9 @@ DELETE /api/units/{unit_id}?mode=trash
 ```
 
 > 删除会级联清理该单元的 `media_files` / `face_vectors` / `video_frames` /
-> 关联的 `dedup_results`。`mode=trash` 且磁盘删除失败（如网络路径无法进回收站）
-> 时返回 `409`，**数据库记录保持不变** —— 不会出现"记录没了但文件还在"的孤儿状态。
-> 单元不存在返回 `404`。
+> 关联的 `dedup_results`。磁盘删除失败（如网络路径无法进回收站、或**磁盘未连接**）
+> 时返回 `409`，**数据库记录保持不变** —— 不会出现"记录没了但文件还在"的孤儿状态，
+> 也不会出现"文件其实还在、重扫又回来"的假删除。单元不存在返回 `404`。
 
 ### 3.2 媒体文件
 
@@ -295,7 +295,7 @@ DELETE /api/files/{file_id}?mode=trash
 
 | 参数 | 类型 | 默认 | 说明 |
 |--------|------|--------|------|
-| `mode` | str | `trash` | `trash`=移至回收站 + 删库记录（与桌面端一致，**默认**）；`record`=仅移除媒体库记录，磁盘文件保留 |
+| `mode` | str | `trash` | `trash`=移至回收站 + 删库记录（与桌面端一致，**默认**）；`record`=仅移除媒体库记录，磁盘文件保留；`delete`=**永久删除**磁盘文件（不可恢复，仅在回收站不可用时由用户明确选择） |
 
 响应：
 
@@ -306,6 +306,16 @@ DELETE /api/files/{file_id}?mode=trash
 > 先移回收站、成功后才删数据库记录：磁盘删除失败时返回 `409` 且记录保留，
 > 避免用户再也看不到这个文件。顺带清理缩略图缓存并重算所属单元的
 > `file_count` / `total_size`。文件不存在返回 `404`。
+>
+> **磁盘未连接时也返回 409**（`detail` 含"未连接"）：库在可移动盘/网络盘上时，
+> 盘没插会让 `Path.exists()` 为 False —— 若按"文件已不存在"处理，库记录会被删掉，
+> 而磁盘文件其实还在，一重扫（重新插盘后）文件又全回来，用户看到的就是"删不掉"。
+> 客户端据此提示"请先连接磁盘"，而不是弹出永久删除选项（盘都没连，永久删除也做不到）。
+>
+> **`mode=delete` 何时用**：网络盘 / exFAT 等没有 `$RECYCLE.BIN` 的卷上
+> `send2trash` 必然失败（`mode=trash` 恒回 409）。此时应由客户端**询问用户**后
+> 显式传 `mode=delete`（永久删除）或 `mode=record`（只出库）。
+> 服务端**绝不**在 trash 失败时自动降级为永久删除 —— 那等于无声销毁数据。
 
 #### 批量删除文件
 
@@ -331,6 +341,8 @@ POST /api/files/batch-delete
 ```
 
 > `file_ids` 会自动去重；重复 ID 不会被记成"文件不存在"的失败项。
+> 磁盘删除失败时**成功项照常落库**，失败项记录保留 —— 客户端可以对
+> `failed` 里的 ID 再询问一次"永久删除 / 仅移除记录"。
 
 ### 3.3 查重
 
@@ -345,9 +357,35 @@ GET /api/dedup/results?unresolved_only=true&level=duplicate&page=1&per_page=20
 | 参数 | 类型 | 默认 | 说明 |
 |--------|------|--------|------|
 | `unresolved_only` | bool | `true` | 仅显示未处理的 |
-| `level` | str | - | 按命中等级过滤：`duplicate` / `related`；省略则不过滤（related 数量可达 duplicate 的数十倍，建议显式传） |
+| `level` | str | - | 按命中等级过滤：`duplicate` / `related` |
+| `evidence` | str | - | 按证据来源过滤：`file`=有文件重叠（真正的疑似相关）；`face`=只有人脸线索（同演员，杰卡德恒为 0）。省略则两类混在一起 |
+| `unit_a_id` | int | - | 只看以该单元为左侧（较小 ID）的结果，用于展开某个分组 |
 | `page` | int | 1 | 页码 |
 | `per_page` | int | 20 | 每页数量（<= 100） |
+
+列表项关键字段（列表页展示分档与"重叠 N/M"用的就是这些）：
+
+```json
+{
+  "id": 250, "unit_a_id": 124, "unit_b_id": 161,
+  "unit_a_name": "抖音颜值小姐姐", "unit_b_name": "清纯女大減爸爸",
+  "similarity_score": 0.6444, "overlap_ratio": 0.8788,
+  "match_count": 29, "face_hint_count": 9,
+  "total_files_a": 33, "total_files_b": 41,
+  "match_types": "md5", "match_level": "duplicate", "evidence_kind": "file",
+  "stale": false
+}
+```
+
+> - `match_count` **只统计计入判定的文件对**（不含人脸线索），人脸线索条数看
+>   `face_hint_count`。历史版本把两者相加存进 `match_count`，导致"46 处线索"
+>   与"匹配 46 个文件"对不上（实际入库 38 条）。
+> - `overlap_ratio` = `match_count / min(total_files_a, total_files_b)`：杰卡德
+>   只能表达"两个目录几乎一样"，表达不了"一边是另一边的子集"。只认杰卡德时
+>   包含度 0.88 的真重复会被降级成"疑似相关"。
+> - `stale=true` 表示这条是升级前的旧规则结论（或 `match_count` 超过了文件数，
+>   即旧口径残留）：**不要展示比例/重叠数**，提示用户重新查重。`/groups` 的
+>   每个分组也带 `stale`。
 
 #### 未处置结果分级计数
 
@@ -358,10 +396,67 @@ GET /api/dedup/counts
 响应：
 
 ```json
-{"duplicate": 3, "related": 234, "total": 237}
+{"duplicate": 2, "related": 4, "face_only": 57, "total": 63,
+ "stale": 380, "result_version": 2}
 ```
 
-用于列表页分组标题 / 角标，避免拉全量再在客户端统计。
+| 键 | 含义 |
+|-----|------|
+| `duplicate` | 建议处置的重复（含"子集重复"） |
+| `related` | 有文件重叠的疑似相关 |
+| `face_only` | 只有人脸线索的同演员（杰卡德恒为 0） |
+| `stale` | **旧规则算出的结论**条数（升级后还没重跑查重） |
+| `result_version` | 当前分级算法版本（与列表项的 `computed_version` 对应） |
+| `total` | 前三者之和 |
+
+> `stale > 0` 时客户端**必须**显式提示"需要重新查重"：升级只做分类搬迁，
+> 重算需要跑一次比对。实测踩到：旧行 `match_count=46` 配 33 个文件的单元，
+> 界面把它渲染成"46/33 个文件重叠"，用户以为界面递归/坏掉了。
+
+#### 按来源单元分组（列表页二级分组的父级）
+
+```
+GET /api/dedup/groups?unresolved_only=true&level=related&evidence=file&page=1&per_page=50
+```
+
+```json
+{
+  "groups": [
+    {"anchor_unit_id": 124, "anchor_unit_name": "抖音颜值小姐姐",
+     "anchor_cover_file_id": 101, "pair_count": 19,
+     "max_similarity": 0.6444, "match_types": "md5",
+     "match_level": "duplicate", "evidence_kind": "file"}
+  ],
+  "total": 52
+}
+```
+
+> 分组键是**存储时较小的 unit_id**，也就是卡片左侧那个单元 ——
+> 用户看到的"左边相同、右边不同"直接折叠成一组。展开某组时用
+> `GET /api/dedup/results?...&unit_a_id=<anchor>` 取子项。
+
+#### 人脸重扫状态 / 触发（精查候选 · 补扫全部）
+
+视频人脸从"只取中间一帧"改为**定间隔多帧**（`config.face_video_max_frames`，默认 10 帧、
+均匀铺满全片）后，旧库里的人脸向量需要用新策略重扫才有准确线索。
+
+```
+GET /api/dedup/face-scan/status
+→ {"videos_total": 1142, "videos_pending": 977, "candidates": 0,
+   "faces_total": 977, "scan_version": 1}
+
+POST /api/dedup/face-scan
+{"scope": "candidates", "run_dedup": true}
+→ 202 {"status": "accepted", "task_id": "face-1"}
+```
+
+| 字段 | 说明 |
+|--------|------|
+| `scope` | `candidates`=只重扫上一轮出现过人脸线索的视频（实测 165 个，约 2~3 分钟）；`all`=全部抽帧策略过期的视频（约十几分钟） |
+| `run_dedup` | 重扫后是否自动重跑一次查重（`false` 时结果仍是旧的） |
+
+进度与结果同样用 `GET /api/dedup/run/{task_id}` 轮询（`phase=faces`），完成后
+`result` 为 `{"scope": "...", "scanned": N, "faces": M, "dedup": {...}}`。
 
 #### 查重详情
 
@@ -377,20 +472,25 @@ GET /api/dedup/results/{result_id}
   "unit_a": { "id": 1, "name": "片段A" },
   "unit_b": { "id": 2, "name": "片段B" },
   "similarity_score": 1.0,
+  "overlap_ratio": 1.0,
   "match_count": 2,
+  "face_hint_count": 1,
+  "total_files_a": 2,
+  "total_files_b": 3,
   "match_level": "duplicate",
+  "evidence_kind": "file",
   "file_matches": [
     {
       "file_a_id": 101, "file_b_id": 103,
       "file_a_name": "照片01.jpg", "file_b_name": "照片03.jpg",
       "match_type": "md5", "similarity_score": 1.0,
-      "is_hint": false
+      "is_hint": false, "frame_support": 1
     },
     {
       "file_a_id": 102, "file_b_id": 104,
       "file_a_name": "照片02.jpg", "file_b_name": "照片04.jpg",
       "match_type": "face", "similarity_score": 0.71,
-      "is_hint": true
+      "is_hint": true, "frame_support": 3
     }
   ]
 }
@@ -398,6 +498,10 @@ GET /api/dedup/results/{result_id}
 
 > `is_hint=true` 的条目是**线索而非重复证据**（人脸相似），不计入
 > `similarity_score` 与 `match_count`，客户端应单独展示并说明"未计入重复判定"。
+> `frame_support` 是支持这条人脸线索的**帧数**：视频改多帧抽帧后，同一文件对在
+> 多个时间点都被判为同一张脸时该值 >1，比单帧偶然相似可信。
+> 缩略图用 `GET /api/files/{file_id}/thumbnail`（`<img>` 无法带 Authorization 头，
+> 用 `?token=` 回退）。
 
 #### 处理查重结果
 
@@ -433,7 +537,8 @@ POST /api/dedup/run
 请求体：
 
 ```json
-{"unit_ids": [1, 2, 3], "threshold": 0.80, "index_first": true}
+{"unit_ids": [1, 2, 3], "threshold": 0.80, "index_first": true,
+ "face_similarity_threshold": 0.45, "refine_faces": true}
 ```
 
 | 字段 | 类型 | 默认 | 说明 |
@@ -441,6 +546,8 @@ POST /api/dedup/run
 | `unit_ids` | int[] | - | 参与比对的单元 ID，至少 2 个 |
 | `threshold` | float | 0.80 | 杰卡德阈值 |
 | `index_first` | bool | `false` | 先为**未索引**文件计算哈希（MD5/视频帧/人脸）再比对。桌面端「一键查重」即此行为；为 `false` 时未索引文件对查重完全不可见却会返回"完成"，第三方客户端建议传 `true` |
+| `face_similarity_threshold` | float | - | 本次查重的人脸相似度阈值（覆盖 config.json）。不影响抽帧，只影响「同演员线索」的松紧：0.363=官方最宽松，0.45=推荐，0.50/0.60=更严 |
+| `refine_faces` | bool | `false` | 比对后对"上一轮出现过人脸线索的视频"做多帧精查，然后**重新比对一次**（约 2~3 分钟，候选重扫过之后会瞬间跳过） |
 
 立即返回 `202`：
 
@@ -458,8 +565,8 @@ GET /api/dedup/run/{task_id}
 {
   "task_id": "dedup-1",
   "status": "running",              // queued | running | completed | failed
-  "phase": "indexing",              // indexing=正在补索引；comparing=正在比对；null=未开始/已结束
-  "progress": [12, 30],             // 当前阶段进度（索引=文件数，比对=单元对数）
+  "phase": "indexing",              // indexing=补索引；comparing=比对；faces=人脸精查；null=未开始/已结束
+  "progress": [12, 30],             // 当前阶段进度（索引/人脸=文件数，比对=单元对数）
   "result": null,
   "error": null
 }
@@ -475,12 +582,15 @@ GET /api/dedup/run/{task_id}
   "progress": null,
   "result": {
     "total_compared": 4,
-    "duplicates_found": 1,          // 命中"重复"的单元对
-    "related_found": 12,            // 命中"疑似相关"的单元对（仅提醒）
-    "saved_count": 1, "related_saved": 12,
+    "duplicates_found": 1,          // 命中"重复"的单元对（含子集重复）
+    "related_found": 12,            // 有文件重叠的"疑似相关"（仅提醒）
+    "face_only_found": 373,         // 只有人脸线索的"同演员"（杰卡德恒为 0）
+    "saved_count": 1, "related_saved": 12, "face_only_saved": 373,
+    "pruned_stale": 2,              // 本轮范围内未再命中、被清理掉的旧结果行数
     "skipped_pairs": 0, "elapsed_seconds": 2.1,
     "unindexed_before": 1362,       // 本次开始前待索引文件数
-    "indexed_count": 1362           // 本次实际索引的文件数
+    "indexed_count": 1362,          // 本次实际索引的文件数
+    "face_similarity_threshold": 0.45
   },
   "error": null
 }
@@ -490,6 +600,10 @@ GET /api/dedup/run/{task_id}
 已处置/白名单的单元对在重跑时自动跳过，不再重复告警。
 `index_first=true` 时的索引与桌面端哈希线程共用 `services/index_service.py`，
 分批取未索引文件直到取空（`INDEX_BATCH_SIZE=1000`），不会出现"只算了 1000 个"的残缺结论。
+每次落库后会清理**本轮比对范围内、未被处置、且本次未再命中**的旧结果行
+（`pruned_stale`）—— 否则分类规则/阈值一变，旧的 380 条 related 会永远留在列表里。
+被清理结果的 `dedup_result_id` 若还挂在旧消息的 `action_data` 上，客户端应容忍
+"查重结果不存在"的空态。
 
 ### 3.4 消息
 
@@ -767,7 +881,10 @@ struct MediaApi {
 | **分页** | 部分端点有 hard limit（如 per_page <= 200） | 如有更大需求可回调参 |
 | **变更通知** | 无 WebSocket 推送 | APP 侧定时轮询 `/api/events/unread` |
 | **删除是破坏性操作** | `DELETE /api/files/{id}`、`/api/files/batch-delete`、`DELETE /api/units/{id}` 默认 `mode=trash`：文件进入**系统回收站**，可人工恢复；`mode=record` 才只删库记录 | 客户端务必二次确认；需要"只出库不删盘"时显式传 `mode=record` |
-| **查重结果分级** | 未处置结果分 `duplicate` / `related` 两级，related 数量可达成百上千 | 用 `level` 参数分别取，用 `/api/dedup/counts` 显示角标 |
+| **查重结果分级** | 未处置结果分 `duplicate` / `related` 两级，`related` 又分 `evidence=file`（有文件重叠）与 `evidence=face`（只有人脸线索，杰卡德恒为 0） | 用 `level` + `evidence` 分别取，用 `/api/dedup/counts` 的 `duplicate/related/face_only` 显示三个角标；不要只按 `level` 取，否则 0% 的同演员线索会淹没真正重叠的几条 |
+| **查重结果分组** | 同一左侧单元可能有几十条结果 | `GET /api/dedup/groups` 按来源单元折叠，展开时用 `unit_a_id` 取子项（`pair_count` 之和等于对应 `total`） |
+| **升级后的旧结论** | 分级规则变化不会自动重算已有结果；`computed_version` 落后的行（或 `match_count` 超过单元文件数的旧口径残留）都是旧结论 | 看 `counts.stale` 与列表项 `stale`，**提示用户重跑查重**而不是渲染旧数字；`stale` 行不要展示重叠比例 |
+| **人脸线索的准确率** | 视频人脸是"定间隔多帧"抽出来的，旧库数据是"只取中间一帧"扫的，`source_ms` 为空 | `GET /api/dedup/face-scan/status` 看 `videos_pending`，用 `POST /api/dedup/face-scan` 重扫（`candidates` 快、`all` 全），完成后结果才有"多帧吻合"证据 |
 
 ### 推荐的 API 轮询策略
 

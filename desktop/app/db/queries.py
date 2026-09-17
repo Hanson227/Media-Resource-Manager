@@ -18,7 +18,8 @@ from app.db.models import (
     Whitelist, ScanSession, FileTag, FileTagMapping,
 )
 from app.utils.constants import (
-    MatchLevel, MessageType, ResolutionStatus, UnitStatus, WhitelistMatchType,
+    DEDUP_RESULT_VERSION, EvidenceKind, MatchLevel, MatchType, MessageType,
+    ResolutionStatus, UnitStatus, WhitelistMatchType,
 )
 
 
@@ -407,19 +408,22 @@ def get_file_count_by_unit_ids(session: Session, unit_ids: list[int]) -> dict[in
 # ============================================================
 
 def insert_face_vector(session: Session, file_id: int, vector_data: bytes,
-                       face_index: int = 0, bbox: Optional[tuple] = None) -> FaceVector:
+                       face_index: int = 0, bbox: Optional[tuple] = None,
+                       source_ms: Optional[int] = None) -> FaceVector:
     """插入一条人脸向量记录。
 
     参数:
         file_id: 关联的媒体文件 ID。
         vector_data: 128 维 float32 字节数据。
-        face_index: 人脸序号。
+        face_index: 人脸序号（同一文件内递增；视频多帧会跨帧继续编号）。
         bbox: 边界框 (x, y, w, h)。
+        source_ms: 视频帧时间位置（毫秒）；图片传 None。
     """
     kwargs = {
         "file_id": file_id,
         "vector_data": vector_data,
         "face_index": face_index,
+        "source_ms": source_ms,
     }
     if bbox:
         kwargs.update({"bbox_x": bbox[0], "bbox_y": bbox[1],
@@ -432,13 +436,116 @@ def insert_face_vector(session: Session, file_id: int, vector_data: bytes,
 
 
 def get_face_vectors_by_file(session: Session, file_id: int) -> list[FaceVector]:
-    """获取指定文件的所有人脸向量。"""
-    return session.query(FaceVector).filter(FaceVector.file_id == file_id).all()
+    """获取指定文件的所有人脸向量（按人脸序号排序，保证结果稳定）。"""
+    return (
+        session.query(FaceVector)
+        .filter(FaceVector.file_id == file_id)
+        .order_by(FaceVector.face_index)
+        .all()
+    )
 
 
 def get_all_face_vectors(session: Session) -> list[FaceVector]:
     """获取数据库中所有人脸向量（用于全局人脸比对）。"""
     return session.query(FaceVector).all()
+
+
+def delete_face_vectors_for_file(session: Session, file_id: int) -> int:
+    """删除指定文件的全部人脸向量（重扫前清空，避免新旧向量叠加）。
+
+    返回:
+        被删除的行数。
+    """
+    n = (
+        session.query(FaceVector)
+        .filter(FaceVector.file_id == file_id)
+        .delete(synchronize_session=False)
+    )
+    session.flush()
+    return int(n or 0)
+
+
+def set_face_scan_version(session: Session, file_id: int, version: int) -> None:
+    """标记该文件的人脸是按哪版抽帧策略扫描的（见 FACE_SCAN_VERSION）。"""
+    session.query(MediaFile).filter(MediaFile.id == file_id).update(
+        {MediaFile.face_scan_version: version}, synchronize_session=False)
+    session.flush()
+
+
+def get_videos_needing_face_scan(session: Session, current_version: int,
+                                 limit: int = 1000) -> list[MediaFile]:
+    """取出人脸抽帧策略过期的视频（补扫任务的输入）。
+
+    只挑视频：图片的人脸检测是全图检测，不受"单帧/多帧"策略影响。
+    """
+    return (
+        session.query(MediaFile)
+        .filter(
+            MediaFile.media_type == "video",
+            MediaFile.face_scan_version < current_version,
+        )
+        .order_by(MediaFile.id)
+        .limit(limit)
+        .all()
+    )
+
+
+def count_videos_needing_face_scan(session: Session, current_version: int) -> int:
+    """待补扫视频数量（供界面显示预计工作量）。"""
+    return int(
+        session.query(func.count(MediaFile.id))
+        .filter(
+            MediaFile.media_type == "video",
+            MediaFile.face_scan_version < current_version,
+        )
+        .scalar() or 0
+    )
+
+
+def _face_match_file_ids_subquery(session: Session):
+    """出现在人脸匹配行里的文件 ID（两侧合并去重）。"""
+    a = session.query(DedupFileMatch.file_a_id).filter(
+        DedupFileMatch.match_type == MatchType.FACE.value)
+    b = session.query(DedupFileMatch.file_b_id).filter(
+        DedupFileMatch.match_type == MatchType.FACE.value)
+    return a.union(b).subquery()
+
+
+def get_candidate_videos_for_face_rescan(session: Session, current_version: int,
+                                         limit: int = 1000) -> list[MediaFile]:
+    """取出"上一轮出现过人脸线索"且抽帧策略过期的视频（精查候选）。
+
+    为什么按候选精查而不是每次全库重扫：实测本库 1142 个视频里只有 165 个
+    参与过人脸匹配 —— 对这 165 个做多帧精查约 2~3 分钟，全库则是十几分钟。
+    候选集之外的视频由显式的"补扫全部"动作处理（scope='all'）。
+    """
+    sub = _face_match_file_ids_subquery(session)
+    return (
+        session.query(MediaFile)
+        .filter(
+            MediaFile.media_type == "video",
+            MediaFile.face_scan_version < current_version,
+            MediaFile.id.in_(session.query(sub.c[0])),
+        )
+        .order_by(MediaFile.id)
+        .limit(limit)
+        .all()
+    )
+
+
+def count_candidate_videos_for_face_rescan(session: Session,
+                                           current_version: int) -> int:
+    """待精查的候选视频数量（按需精查的工作量）。"""
+    sub = _face_match_file_ids_subquery(session)
+    return int(
+        session.query(func.count(MediaFile.id))
+        .filter(
+            MediaFile.media_type == "video",
+            MediaFile.face_scan_version < current_version,
+            MediaFile.id.in_(session.query(sub.c[0])),
+        )
+        .scalar() or 0
+    )
 
 
 # ============================================================
@@ -506,7 +613,9 @@ def upsert_dedup_result(session: Session, unit_a_id: int, unit_b_id: int,
                         similarity_score: float, match_count: int,
                         total_files_a: int, total_files_b: int,
                         match_types: str,
-                        match_level: str = MatchLevel.DUPLICATE.value) -> DedupResult:
+                        match_level: str = MatchLevel.DUPLICATE.value,
+                        evidence_kind: str = EvidenceKind.FILE.value,
+                        computed_version: int = DEDUP_RESULT_VERSION) -> DedupResult:
     """插入或更新查重结果（按单元对去重）。
 
     注意：已处置（is_resolved=True）的记录不会被重置为 pending ——
@@ -528,6 +637,8 @@ def upsert_dedup_result(session: Session, unit_a_id: int, unit_b_id: int,
         existing.total_files_b = total_files_b
         existing.match_types = match_types
         existing.match_level = match_level
+        existing.evidence_kind = evidence_kind
+        existing.computed_version = computed_version
         if not existing.is_resolved:
             # 仅在用户尚未处置时保持 pending；已处置的保留原状态
             existing.is_resolved = False
@@ -545,6 +656,8 @@ def upsert_dedup_result(session: Session, unit_a_id: int, unit_b_id: int,
             total_files_b=total_files_b,
             match_types=match_types,
             match_level=match_level,
+            evidence_kind=evidence_kind,
+            computed_version=computed_version,
         )
         session.add(dr)
         session.flush()
@@ -666,7 +779,9 @@ def get_all_dedup_results(session: Session, limit: int = 200) -> list[DedupResul
 
 def get_dedup_results_page(session: Session, unresolved_only: bool = True,
                            page: int = 1, per_page: int = 20,
-                           level: Optional[str] = None
+                           level: Optional[str] = None,
+                           evidence: Optional[str] = None,
+                           unit_a_id: Optional[int] = None
                            ) -> tuple[list[DedupResult], int]:
     """分页查询查重结果（SQL LIMIT/OFFSET + 精确总数）。
 
@@ -676,6 +791,10 @@ def get_dedup_results_page(session: Session, unresolved_only: bool = True,
         level: 仅返回指定命中等级（duplicate / related）；None 表示不过滤。
             实测本库 166 个单元会产生 200+ 对"疑似相关"，不过滤时它们会和
             真正的重复混在一页里 —— 客户端按等级分开取才能各看各的。
+        evidence: 仅返回指定证据来源（file / face）；None 表示不过滤。
+            "疑似相关"里混着 7 条真实文件重叠与 373 条同演员线索，
+            只有分开取，"相关"列表才不是一片 0% 噪音。
+        unit_a_id: 仅返回以该单元为左侧（较小 ID）的结果，用于"按来源单元分组"展开。
 
     返回:
         (当前页结果列表, 满足条件的总条数)。
@@ -688,9 +807,13 @@ def get_dedup_results_page(session: Session, unresolved_only: bool = True,
         query = query.filter(DedupResult.is_resolved == False)  # noqa: E712
     if level:
         query = query.filter(DedupResult.match_level == level)
+    if evidence:
+        query = query.filter(DedupResult.evidence_kind == evidence)
+    if unit_a_id is not None:
+        query = query.filter(DedupResult.unit_a_id == unit_a_id)
     total = query.count()
     rows = (
-        query.order_by(DedupResult.similarity_score.desc())
+        query.order_by(DedupResult.similarity_score.desc(), DedupResult.id.asc())
         .offset(max(0, (page - 1) * per_page))
         .limit(per_page)
         .all()
@@ -699,18 +822,185 @@ def get_dedup_results_page(session: Session, unresolved_only: bool = True,
 
 
 def count_dedup_results_by_level(session: Session) -> dict[str, int]:
-    """按命中等级统计未处置的查重结果数量（供客户端分组显示）。"""
+    """按命中等级 / 证据来源统计未处置结果数量（供客户端分组显示）。
+
+    返回:
+        {"duplicate": N, "related": M, "face_only": K, "total": N+M+K}
+        - related：有文件级证据的"疑似相关"
+        - face_only：只有人脸线索的"同演员"（match_level 同样是 related，
+          因此早期只按 level 分栏的客户端会看到 380 条 0% 噪音）
+    """
+    counts = {"duplicate": 0, "related": 0, "face_only": 0}
     rows = (
-        session.query(DedupResult.match_level, func.count(DedupResult.id))
+        session.query(
+            DedupResult.match_level,
+            DedupResult.evidence_kind,
+            func.count(DedupResult.id),
+        )
         .filter(DedupResult.is_resolved == False)  # noqa: E712
-        .group_by(DedupResult.match_level)
+        .group_by(DedupResult.match_level, DedupResult.evidence_kind)
         .all()
     )
-    counts = {"duplicate": 0, "related": 0}
-    for level, n in rows:
-        counts[level or MatchLevel.DUPLICATE.value] = int(n)
-    counts["total"] = counts["duplicate"] + counts["related"]
+    for level, kind, n in rows:
+        if (level or MatchLevel.DUPLICATE.value) == MatchLevel.DUPLICATE.value:
+            counts["duplicate"] += int(n)
+        elif (kind or EvidenceKind.FILE.value) == EvidenceKind.FACE.value:
+            counts["face_only"] += int(n)
+        else:
+            counts["related"] += int(n)
+    counts["total"] = counts["duplicate"] + counts["related"] + counts["face_only"]
+    # 旧规则结论的数量（口径必须与列表项的 stale 标记完全一致，否则角标与卡片对不上）
+    counts["stale"] = int(
+        session.query(func.count(DedupResult.id))
+        .filter(
+            DedupResult.is_resolved == False,  # noqa: E712
+            or_(
+                DedupResult.computed_version < DEDUP_RESULT_VERSION,
+                DedupResult.match_count > func.min(DedupResult.total_files_a,
+                                                  DedupResult.total_files_b),
+            ),
+        )
+        .scalar() or 0
+    )
+    counts["result_version"] = DEDUP_RESULT_VERSION
     return counts
+
+
+def get_dedup_groups(session: Session, unresolved_only: bool = True,
+                     level: Optional[str] = None,
+                     evidence: Optional[str] = None,
+                     page: int = 1, per_page: int = 50
+                     ) -> tuple[list[dict], int]:
+    """按"左侧单元"分组统计查重结果（列表页二级分组的父级）。
+
+    分组键就是存储时的 unit_a_id（upsert 已保证小 ID 在前），
+    与卡片左侧显示的是同一个单元 —— 用户看到的"左边相同"就能折叠成一组。
+
+    返回:
+        (组列表, 组总数)。每项含 anchor_unit_id / pair_count / max_similarity /
+        match_types（组内出现过的匹配类型合并串）/ level / evidence_kind。
+    """
+    base = session.query(DedupResult)
+    if unresolved_only:
+        base = base.filter(DedupResult.is_resolved == False)  # noqa: E712
+    if level:
+        base = base.filter(DedupResult.match_level == level)
+    if evidence:
+        base = base.filter(DedupResult.evidence_kind == evidence)
+
+    grouped = (
+        base.with_entities(
+            DedupResult.unit_a_id.label("anchor_unit_id"),
+            DedupResult.match_level.label("level"),
+            DedupResult.evidence_kind.label("evidence_kind"),
+            func.count(DedupResult.id).label("pair_count"),
+            func.max(DedupResult.similarity_score).label("max_similarity"),
+            func.group_concat(DedupResult.match_types, ",").label("match_types"),
+            func.min(DedupResult.computed_version).label("min_version"),
+        )
+        .group_by(DedupResult.unit_a_id, DedupResult.match_level,
+                  DedupResult.evidence_kind)
+        .all()
+    )
+
+    # 同一单元可能同时出现在多个 (level, evidence) 组合里 → 合并成一条，
+    # 保留最强的一份（对数多者优先，其次最高分），避免同一个文件夹出现两行。
+    merged: dict[int, dict] = {}
+    for row in grouped:
+        anchor = row.anchor_unit_id
+        types = [t for t in (row.match_types or "").split(",") if t]
+        item = merged.get(anchor)
+        if item is None:
+            merged[anchor] = {
+                "anchor_unit_id": anchor,
+                "pair_count": int(row.pair_count or 0),
+                "max_similarity": float(row.max_similarity or 0.0),
+                # group_concat 会把同一类型重复拼进来（组内多条各自带 video）→ 去重保序
+                "match_types": _dedupe_types(types),
+                "level": row.level,
+                "evidence_kind": row.evidence_kind,
+                "stale": int(row.min_version or 0) < DEDUP_RESULT_VERSION,
+            }
+            continue
+        item["pair_count"] += int(row.pair_count or 0)
+        item["max_similarity"] = max(item["max_similarity"],
+                                     float(row.max_similarity or 0.0))
+        item["stale"] = item["stale"] or (
+            int(row.min_version or 0) < DEDUP_RESULT_VERSION)
+        known = [t for t in item["match_types"].split(",") if t]
+        item["match_types"] = _dedupe_types(known + types)
+
+    groups = sorted(
+        merged.values(),
+        key=lambda g: (-g["pair_count"], -g["max_similarity"], g["anchor_unit_id"]),
+    )
+    total = len(groups)
+    start = max(0, (page - 1) * per_page)
+    return groups[start:start + per_page], total
+
+
+def _dedupe_types(types: Sequence[str]) -> str:
+    """匹配类型去重保序（group_concat 会把同一类型重复拼进来）。"""
+    seen: list[str] = []
+    for t in types:
+        if t and t not in seen:
+            seen.append(t)
+    return ",".join(seen)
+
+
+def get_face_hint_counts(session: Session, result_ids: Sequence[int]) -> dict[int, int]:
+    """批量统计每条查重结果的人脸线索条数（避免逐条查询的 N+1）。
+
+    人脸线索不能再用 match_count 表达（新语义下它只统计计入判定的文件对），
+    因此界面上的"N 处人脸线索"必须来自 dedup_file_matches 的 face 行数。
+    """
+    if not result_ids:
+        return {}
+    rows = (
+        session.query(DedupFileMatch.dedup_result_id, func.count(DedupFileMatch.id))
+        .filter(
+            DedupFileMatch.dedup_result_id.in_(list(result_ids)),
+            DedupFileMatch.match_type == MatchType.FACE.value,
+        )
+        .group_by(DedupFileMatch.dedup_result_id)
+        .all()
+    )
+    return {int(rid): int(n) for rid, n in rows}
+
+
+def prune_stale_dedup_results(session: Session, unit_ids: Sequence[int],
+                              keep_pairs: set[tuple[int, int]]) -> int:
+    """清理本轮查重范围内"未再命中"的陈旧结果行。
+
+    为什么必须清理：分类规则/阈值一变，旧结果不会自己消失 ——
+    库里的 380 条 related 是旧规则产物，重跑后它们可能已不成立，
+    但 upsert 只更新"本轮仍命中"的单元对，剩下的会永远留在列表里。
+
+    安全边界（三者缺一不可）：
+    1. 只动 unit_a_id 与 unit_b_id **都**在本次参与比对的单元集合内的行；
+    2. 只删 is_resolved=False 的行 —— 用户的处置决定永久保留；
+    3. keep_pairs 里是本轮真正命中的单元对（小 ID 在前）。
+
+    返回:
+        被删除的结果行数（其文件匹配行由外键 CASCADE 一并删除）。
+    """
+    if not unit_ids:
+        return 0
+    ids = list(unit_ids)
+    rows = (
+        session.query(DedupResult)
+        .filter(
+            DedupResult.is_resolved == False,  # noqa: E712
+            DedupResult.unit_a_id.in_(ids),
+            DedupResult.unit_b_id.in_(ids),
+        )
+        .all()
+    )
+    stale = [dr for dr in rows if _pair_key(dr.unit_a_id, dr.unit_b_id) not in keep_pairs]
+    for dr in stale:
+        session.delete(dr)
+    session.flush()
+    return len(stale)
 
 
 def get_units_by_ids(session: Session, unit_ids: list[int]) -> list[ResourceUnit]:
@@ -738,14 +1028,19 @@ def get_dedup_by_id(session: Session, result_id: int) -> Optional[DedupResult]:
 
 def insert_file_match(session: Session, dedup_result_id: int, file_a_id: int,
                       file_b_id: int, similarity_score: float,
-                      match_type: str) -> DedupFileMatch:
-    """插入一条文件匹配记录。"""
+                      match_type: str, frame_support: int = 1) -> DedupFileMatch:
+    """插入一条文件匹配记录。
+
+    参数:
+        frame_support: 支持这条匹配的帧数（人脸线索专用，其它类型恒为 1）。
+    """
     dfm = DedupFileMatch(
         dedup_result_id=dedup_result_id,
         file_a_id=file_a_id,
         file_b_id=file_b_id,
         similarity_score=similarity_score,
         match_type=match_type,
+        frame_support=frame_support,
     )
     session.add(dfm)
     session.flush()

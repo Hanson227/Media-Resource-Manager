@@ -149,39 +149,67 @@ class MessageCenter:
     @staticmethod
     def create_related_digest(
         pairs: list[tuple],
+        face_pairs: Optional[list[tuple]] = None,
         top_n: int = 8,
     ) -> Optional[Message]:
-        """创建一条"疑似相关"汇总提醒。
+        """创建一条"疑似相关 / 同演员"汇总提醒。
 
         参数:
-            pairs: [(unit_a_name, unit_b_name, evidence, similarity, types), ...]。
+            pairs: [(unit_a_name, unit_b_name, file_match_count, similarity, types), ...]
+                —— 有**文件级证据**的疑似相关（部分重叠）。
+            face_pairs: [(unit_a_name, unit_b_name, hint_count), ...]
+                —— 只有人脸线索的同演员对（零文件重叠）。
             top_n: 正文里列出证据最强的多少对。
 
         说明:
-            实测本库 166 个单元会产生 200+ 对疑似相关（同演员/同场景），
-            逐条发消息会把消息中心刷屏，因此合并成一条摘要。
-            逐条明细已落库到 dedup_results（match_level='related'），
-            需要时可按需查询。
+            实测本库 166 个单元会产生 200+ 对疑似相关（同场景/部分重叠）
+            加 370+ 对同演员线索，逐条发消息会把消息中心刷屏，因此合并成一条摘要。
+            两者必须分开陈述：同演员线索的杰卡德恒为 0（人脸不计入判定），
+            混在一起用户会以为"这些也有文件重叠"。逐条明细都在 dedup_results。
         """
-        if not pairs:
+        face_pairs = face_pairs or []
+        if not pairs and not face_pairs:
             return None
+
         ordered = sorted(pairs, key=lambda p: -p[2])
         lines = []
         for name_a, name_b, evidence, similarity, types in ordered[:top_n]:
-            lines.append(f"• {name_a} ⟷ {name_b}（{evidence} 处线索: {types}）")
+            lines.append(
+                f"• {name_a} ⟷ {name_b}（{evidence} 个文件重叠，"
+                f"杰卡德 {similarity * 100:.1f}%: {types}）"
+            )
         more = len(ordered) - top_n
         if more > 0:
             lines.append(f"…另有 {more} 对，详见查重结果")
 
         title = f"发现 {len(ordered)} 对疑似相关单元（不建议删除）"
-        body = (
-            "这些单元有同演员 / 同场景 / 部分文件重叠的迹象。"
-            "它们不是重复，仅供你了解，不建议删除：\n" + "\n".join(lines)
-        )
+        if face_pairs:
+            title += f"，另有 {len(face_pairs)} 对同演员线索"
+
+        body_parts = []
+        if ordered:
+            body_parts.append(
+                "这些单元有同场景 / 部分文件重叠的迹象。"
+                "它们不是重复，仅供你了解，不建议删除：\n" + "\n".join(lines)
+            )
+        if face_pairs:
+            body_parts.append(
+                f"另有 {len(face_pairs)} 对只在人脸维度相似（同一演员的不同作品，"
+                f"0 个文件重叠）。它们不是重复，已单独归入查重页的「同演员」，"
+                f"不计入查重结论。"
+            )
+        strongest = sorted(face_pairs, key=lambda p: -p[2])[:3]
+        if strongest:
+            body_parts.append("人脸线索最强的几对：\n" + "\n".join(
+                f"• {a} ⟷ {b}（{n} 处人脸线索）" for a, b, n in strongest
+            ))
+        body = "\n\n".join(body_parts)
+
         action_data = json.dumps({
             "action": "view_related",
             "level": "related",
             "count": len(ordered),
+            "face_only_count": len(face_pairs),
         }, ensure_ascii=False)
 
         try:

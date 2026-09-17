@@ -18,6 +18,7 @@ from app.core.dedup_engine import DedupEngine, DedupSession, UnitComparisonResul
 from app.db.engine import DatabaseManager
 from app.db import queries as q
 from app.services.message_center import MessageCenter
+from app.utils.constants import EvidenceKind
 
 logger = logging.getLogger(__name__)
 
@@ -41,16 +42,26 @@ class DedupRunResult:
     related_saved: int = 0
     """写入数据库的"疑似相关"单元对数（不逐条发消息，走汇总提醒）。"""
 
+    face_only_saved: int = 0
+    """写入数据库的"只有人脸线索"单元对数（同演员，展示在同演员 Tab）。"""
 
-def _load_face_vectors(session, file_id: int, enabled: bool) -> list[tuple[float, ...]]:
-    """从数据库加载文件的人脸特征向量（解包为浮点元组）。"""
+    pruned_stale: int = 0
+    """清理掉的陈旧结果行数（本轮范围内未再命中且用户未处置）。"""
+
+
+def _load_face_vectors(session, file_id: int, enabled: bool) -> list[tuple]:
+    """从数据库加载文件的人脸特征向量。
+
+    返回 [(source_ms, vector), ...]：source_ms 是视频帧时间位置（图片为 None），
+    引擎据此统计"多帧吻合"的帧数（frame_support）。
+    """
     if not enabled:
         return []
     vectors = []
     for fv in q.get_face_vectors_by_file(session, file_id):
         try:
             if isinstance(fv.vector_data, bytes) and len(fv.vector_data) == 512:
-                vectors.append(struct.unpack("<128f", fv.vector_data))
+                vectors.append((fv.source_ms, struct.unpack("<128f", fv.vector_data)))
         except Exception:
             continue
     return vectors
@@ -73,46 +84,15 @@ def _file_record(f, session, load_face: bool, face_enabled: bool,
     }
 
 
-def run_dedup_pipeline(
-    unit_ids: list[int],
-    *,
-    threshold: float,
-    phash_hamming_threshold: int,
-    dhash_hamming_threshold: int,
-    face_similarity_threshold: float,
-    face_enabled: bool,
-    related_min_matches: int = 2,
-    load_face: bool = True,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
-    duplicate_found_callback: Optional[Callable[[UnitComparisonResult], None]] = None,
-    cancelled: Optional[Callable[[], bool]] = None,
-) -> DedupRunResult:
-    """执行完整查重管线：加载 → 跳过已处置/白名单对 → 比对 → 落库 → 提醒。
+def _load_unit_files(unit_ids: list[int], load_face: bool, face_enabled: bool
+                     ) -> tuple[dict[int, list[dict]], dict[int, str]]:
+    """加载参与比对的单元文件记录（含视频帧与人脸向量）。
 
-    参数:
-        unit_ids: 参与比对的资源单元 ID 列表。
-        threshold: 杰卡德相似度阈值。
-        phash_hamming_threshold / dhash_hamming_threshold: 感知哈希汉明阈值。
-        face_similarity_threshold: 人脸余弦相似度阈值。
-        face_enabled: 是否启用人脸维度。
-        load_face: 是否加载人脸向量（统一为 True 可保证 GUI/API 行为一致）。
-        progress_callback: 引擎比对进度 (已完成对数, 总对数)。
-        duplicate_found_callback: 每组入库的重复 (UnitComparisonResult)。
-        cancelled: 取消探测（返回 True 时不再落库/提醒）。
-
-    返回:
-        DedupRunResult。
-
-    异常:
-        ValueError: 有效单元不足 2 个时抛出（由调用方决定如何提示）。
+    抽成独立函数是为了让"人脸精查后重新比对"能重新读一遍向量：
+    精查会删掉旧的单帧向量、写入多帧向量，不重读就等于白精查。
     """
-    start = time.time()
-    is_cancelled = cancelled or (lambda: False)
-
     unit_files_map: dict[int, list[dict]] = {}
     unit_names: dict[int, str] = {}
-    skip_pairs = set()
-
     with DatabaseManager.session() as session:
         for uid in unit_ids:
             unit = q.get_unit_by_id(session, uid)
@@ -127,6 +107,69 @@ def run_dedup_pipeline(
                     _file_record(f, session, load_face, face_enabled, frame_map)
                     for f in files
                 ]
+    return unit_files_map, unit_names
+
+
+def _compare_once(unit_files_map: dict[int, list[dict]],
+                  unit_names: dict[int, str], engine: DedupEngine,
+                  skip_pairs: set,
+                  progress_callback: Optional[Callable[[int, int], None]]
+                  ) -> DedupSession:
+    """跑一次两两比对（精查前后各跑一次，参数完全一致）。"""
+    return engine.run_dedup(
+        unit_files_map=unit_files_map,
+        unit_names=unit_names,
+        progress_callback=progress_callback,
+        skip_pairs=skip_pairs,
+    )
+
+
+def run_dedup_pipeline(
+    unit_ids: list[int],
+    *,
+    threshold: float,
+    phash_hamming_threshold: int,
+    dhash_hamming_threshold: int,
+    face_similarity_threshold: float,
+    face_enabled: bool,
+    related_min_matches: int = 2,
+    load_face: bool = True,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    duplicate_found_callback: Optional[Callable[[UnitComparisonResult], None]] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
+    config=None,
+    refine_faces: bool = False,
+    face_progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> DedupRunResult:
+    """执行完整查重管线：加载 → 跳过已处置/白名单对 → 比对 → 落库 → 提醒。
+
+    参数:
+        unit_ids: 参与比对的资源单元 ID 列表。
+        threshold: 杰卡德相似度阈值。
+        phash_hamming_threshold / dhash_hamming_threshold: 感知哈希汉明阈值。
+        face_similarity_threshold: 人脸余弦相似度阈值。
+        face_enabled: 是否启用人脸维度。
+        load_face: 是否加载人脸向量（统一为 True 可保证 GUI/API 行为一致）。
+        progress_callback: 引擎比对进度 (已完成对数, 总对数)。
+        duplicate_found_callback: 每组入库的重复 (UnitComparisonResult)。
+        cancelled: 取消探测（返回 True 时不再落库/提醒）。
+        config: 应用配置。精查人脸（refine_faces）时必传 —— 需要抽帧参数。
+        refine_faces: 比对后对"上一轮出现人脸线索的候选视频"做多帧精查，
+            然后**重新比对一次**。旧库的视频人脸是"只取中间一帧"扫出来的，
+            不精查就只能拿不准的线索下结论。
+        face_progress_callback: 人脸精查进度 (已完成, 总数)。
+
+    返回:
+        DedupRunResult。
+
+    异常:
+        ValueError: 有效单元不足 2 个时抛出（由调用方决定如何提示）。
+    """
+    start = time.time()
+    is_cancelled = cancelled or (lambda: False)
+
+    unit_files_map, unit_names = _load_unit_files(unit_ids, load_face, face_enabled)
+    with DatabaseManager.session() as session:
         # 跳过已处置/白名单的单元对（避免重复告警）
         skip_pairs = q.build_dedup_skip_pairs(session, unit_ids)
 
@@ -141,12 +184,26 @@ def run_dedup_pipeline(
         face_enabled=face_enabled,
         related_min_matches=related_min_matches,
     )
-    session_result = engine.run_dedup(
-        unit_files_map=unit_files_map,
-        unit_names=unit_names,
-        progress_callback=progress_callback,
-        skip_pairs=skip_pairs,
-    )
+    session_result = _compare_once(unit_files_map, unit_names, engine,
+                                   skip_pairs, progress_callback)
+
+    # ---- 人脸精查：候选视频多帧重扫 → 重新比对（结论必须基于精查后的向量）----
+    if refine_faces and config is not None and face_enabled and not is_cancelled():
+        from app.services.index_service import run_face_rescan_pipeline
+        rescan = run_face_rescan_pipeline(
+            config, scope="candidates",
+            progress_callback=face_progress_callback,
+            cancelled=is_cancelled,
+        )
+        if rescan.scanned and not is_cancelled():
+            logger.info(
+                f"人脸精查完成（{rescan.scanned} 个视频 / {rescan.faces} 条向量），重新比对"
+            )
+            unit_files_map, unit_names = _load_unit_files(
+                unit_ids, load_face, face_enabled)
+            session_result = _compare_once(unit_files_map, unit_names, engine,
+                                           skip_pairs, progress_callback)
+
     # 统计实际跳过的对数（skip_pairs 中确属于本次参与单元的）
     unit_ids_sorted = sorted(unit_files_map.keys())
     possible_pairs = {
@@ -165,6 +222,8 @@ def run_dedup_pipeline(
 
     saved = 0
     related_saved = 0
+    face_only_saved = 0
+    pruned_stale = 0
     with DatabaseManager.session() as db_session:
         for dup in session_result.duplicates_found:
             _save_result(db_session, dup, notify=True)
@@ -180,19 +239,43 @@ def run_dedup_pipeline(
             related_results.append((rel, result))
             related_saved += 1
 
+        # "同演员"（只有人脸线索、零文件匹配）同样落库，但单独归一类：
+        # 它们杰卡德恒为 0，混进"疑似相关"就是用户看到的 380 条 0% 噪音。
+        face_only_results = []
+        for only in session_result.face_only_found:
+            result = _save_result(db_session, only, notify=False)
+            face_only_results.append((only, result))
+            face_only_saved += 1
+
+        # 清理陈旧结果：规则/阈值一变，旧行不会自己消失（见 prune_stale_dedup_results）
+        keep_pairs = {
+            q._pair_key(item.unit_a_id, item.unit_b_id)
+            for item in (session_result.duplicates_found
+                         + session_result.related_found
+                         + session_result.face_only_found)
+        }
+        pruned_stale = q.prune_stale_dedup_results(
+            db_session, list(unit_ids_sorted), keep_pairs)
+
     if related_results:
-        MessageCenter.create_related_digest([
-            (rel.unit_a_name, rel.unit_b_name, rel.evidence_count, rel.jaccard_similarity,
-             rel.match_types_str or "face")
-            for rel, _ in related_results
-        ])
+        MessageCenter.create_related_digest(
+            [(rel.unit_a_name, rel.unit_b_name, len(rel.file_matches),
+              rel.jaccard_similarity, rel.match_types_str or "video")
+             for rel, _ in related_results],
+            face_pairs=[
+                (rel.unit_a_name, rel.unit_b_name, len(rel.face_hints))
+                for rel, _ in face_only_results
+            ],
+        )
 
     logger.info(
         f"查重完成: {session_result.total_units_compared} 个单元, "
-        f"跳过 {skipped_pairs} 对, 入库重复 {saved} 组 / 疑似相关 {related_saved} 对"
+        f"跳过 {skipped_pairs} 对, 入库重复 {saved} 组 / 疑似相关 {related_saved} 对 / "
+        f"同演员 {face_only_saved} 对, 清理陈旧 {pruned_stale} 条"
     )
     return DedupRunResult(
         session=session_result, saved_count=saved, related_saved=related_saved,
+        face_only_saved=face_only_saved, pruned_stale=pruned_stale,
         skipped_pairs=skipped_pairs, elapsed_seconds=round(time.time() - start, 2),
     )
 
@@ -213,11 +296,15 @@ def _save_result(db_session, item: UnitComparisonResult, *, notify: bool):
         unit_a_id=item.unit_a_id,
         unit_b_id=item.unit_b_id,
         similarity_score=item.jaccard_similarity,
-        match_count=item.evidence_count,
+        # 只统计**计入判定**的文件对。旧实现存 evidence_count（含人脸线索），
+        # 于是卡片写"46 处线索"、详情写"匹配 46 个文件"，而实际入库只有 38 条。
+        match_count=len(item.file_matches),
         total_files_a=item.total_files_a,
         total_files_b=item.total_files_b,
         match_types=item.match_types_str,
         match_level=item.level,
+        evidence_kind=(EvidenceKind.FILE.value if item.has_file_evidence
+                       else EvidenceKind.FACE.value),
     )
     # 清除旧匹配（upsert 可能返回已有 result，旧匹配需要替换）
     q.delete_file_matches_for_result(db_session, result.id)
@@ -230,9 +317,10 @@ def _save_result(db_session, item: UnitComparisonResult, *, notify: bool):
             file_b_id=fm.file_b_id,
             similarity_score=fm.score,
             match_type=fm.match_type,
+            frame_support=fm.frame_support,
         )
         seen_pairs.add((fm.file_a_id, fm.file_b_id))
-    # 人脸线索也落库：它是"疑似相关"的主要依据，界面要能说明为什么提醒。
+    # 人脸线索也落库：它是"同演员"这一档的**唯一**依据，界面要能说明为什么提醒。
     # 必须跳过与计数匹配重复的文件对，否则会撞 uq_file_pair 唯一约束。
     for fm in item.face_hints:
         pair = (fm.file_a_id, fm.file_b_id)
@@ -246,6 +334,7 @@ def _save_result(db_session, item: UnitComparisonResult, *, notify: bool):
             file_b_id=fm.file_b_id,
             similarity_score=fm.score,
             match_type=fm.match_type,
+            frame_support=fm.frame_support,
         )
     db_session.commit()  # 先提交查重结果
 
