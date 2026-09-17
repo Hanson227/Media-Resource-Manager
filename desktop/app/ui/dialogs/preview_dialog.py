@@ -25,11 +25,43 @@ from app.ui.theme import BASE, TEXT, SUBTEXT_0, OVERLAY_0
 
 logger = logging.getLogger(__name__)
 
+
+def _silence_qt_ffmpeg_logs() -> None:
+    """关掉 QtMultimedia 自带 ffmpeg 插件的日志噪音。
+
+    预览走 QMediaPlayer（PySide6 的 ffmpegmediaplugin.dll + 自带的
+    avutil/avcodec DLL），它既不看 OpenCV 的环境变量，还会在打开文件时
+    把整个容器信息 dump 到 stderr；损坏视频更是逐帧刷 h264 报错。
+    （实测直接 av_log_set_level(8)：容器 dump 与 h264 报错全部消失。）
+
+    必须在 QtMultimedia 已经加载之后调用 —— 否则 CDLL 会先于插件把
+    avutil 载进来（同一个 DLL 实例，日志级别是全局的，先设也行但更脆弱）。
+    """
+    import ctypes
+    import os
+
+    try:
+        import PySide6
+        pyside_dir = os.path.dirname(PySide6.__file__)
+        # 逐个版本都设一遍：Qt 具体用哪个版本的 avutil 取决于插件，
+        # 挑错一个版本等于没静音
+        for name in sorted(os.listdir(pyside_dir)):
+            if not (name.startswith("avutil-") and name.endswith(".dll")):
+                continue
+            try:
+                ctypes.CDLL(os.path.join(pyside_dir, name)).av_log_set_level(8)
+            except OSError as e:
+                logger.debug(f"无法加载 {name}: {e}")
+    except Exception as e:                  # noqa: BLE001 — 日志噪音不值得让预览失败
+        logger.debug(f"无法静音 QtMultimedia 的 ffmpeg 日志: {e}")
+
+
 _HAS_MULTIMEDIA = False
 try:
     from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
     from PySide6.QtMultimediaWidgets import QVideoWidget
     _HAS_MULTIMEDIA = True
+    _silence_qt_ffmpeg_logs()
 except ImportError:
     QMediaPlayer = None
     QAudioOutput = None

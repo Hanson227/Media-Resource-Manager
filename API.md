@@ -564,6 +564,7 @@ GET /api/dedup/run/{task_id}
 ```json
 {
   "task_id": "dedup-1",
+  "kind": "dedup",                  // dedup=查重；face=人脸重扫
   "status": "running",              // queued | running | completed | failed
   "phase": "indexing",              // indexing=补索引；comparing=比对；faces=人脸精查；null=未开始/已结束
   "progress": [12, 30],             // 当前阶段进度（索引/人脸=文件数，比对=单元对数）
@@ -604,6 +605,22 @@ GET /api/dedup/run/{task_id}
 （`pruned_stale`）—— 否则分类规则/阈值一变，旧的 380 条 related 会永远留在列表里。
 被清理结果的 `dedup_result_id` 若还挂在旧消息的 `action_data` 上，客户端应容忍
 "查重结果不存在"的空态。
+
+#### 当前在跑的任务
+
+```
+GET /api/dedup/active-task
+```
+
+```json
+{"task_id": "dedup-3", "kind": "dedup", "status": "running",
+ "phase": "comparing", "progress": [12, 30]}
+```
+
+没有任务在跑时返回 `{"task_id": null, "status": null, "kind": null}`。
+任务跑在服务端后台线程里，客户端刷新/换设备/重新打开页面后靠这个端点重新接上
+进度条（否则页面丢了 `task_id` 就只能靠风扇判断在不在跑）。互斥门保证同时最多一个，
+真出现多个时返回最新创建的那个。
 
 ### 3.4 消息
 

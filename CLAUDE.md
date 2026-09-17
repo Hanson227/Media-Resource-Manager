@@ -181,6 +181,26 @@ desktop/app/
   客户端把 409 变成"永久删除 / 仅从媒体库移除"的弹层（`showDeleteFallback`），
   失败时保留选中状态以便重试。桌面 GUI 仍是"提示手动处理"，未接这个出口。
 
+- **服务端长任务的"运行态"不能存在组件 data 里** — 查重/人脸重扫跑在服务端后台
+  线程，页面组件却随路由卸载重建：运行态/进度/当前 Tab/已展开分组放在组件里，
+  切走再回来就全丢（实测报障：进度条消失但风扇还在转；看完详情返回跳回默认 Tab）。
+  Web 端统一放**模块级**：`_dedupRun`（任务镜像）+ `_dedupLevel` / `_dedupExpanded`
+  / `_dedupScrollTop`（`js-pages.js`），mount 时恢复、`beforeUnmount` 只停本地轮询；
+  再配 `GET /api/dedup/active-task`，整页刷新/换设备也能重新接上进度。
+  改这些逻辑时注意：**同一个 URL 的 `page.goto` 是同文档导航**，模块级状态不会重置
+  （测试里要显式点 Tab，或 `reload()` 才会回到默认档）。
+
+- **Windows 上 `os.environ` 改不到 cv2 的环境** — `OPENCV_FFMPEG_LOGLEVEL` /
+  `OPENCV_LOG_LEVEL` 这类变量是 OpenCV 的 `opencv_videoio_ffmpeg*.dll` 用 CRT 的
+  `getenv` 读的，而 `os.environ[k]=v` / `os.putenv` / `SetEnvironmentVariableW` 都只改
+  进程环境块，改不到 UCRT 缓存的那份 —— 抑制会**静默失效**（实测：三种写法解码损坏
+  视频仍打 9~396 行 `[h264 @ ...]`，只有 `ctypes.CDLL("msvcrt")._putenv_s` 能静音）。
+  统一走 `app/utils/image_helpers.silence_ffmpeg_logs()`（模块导入即调用，早于任何
+  延迟 `import cv2`）；QtMultimedia 预览另有自己的一套 ffmpeg（`avutil-*.dll`），
+  用 `av_log_set_level(8)` 关（`preview_dialog._silence_qt_ffmpeg_logs`）。
+  噪音只是表象：这些告警说明**视频文件本身损坏/截断**（解码到一半就报错），
+  静音不等于文件没问题。
+
 ## Resource Unit Auto-Detection
 
 The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "resource unit" if it directly contains media files. If a parent also contains media files directly, both become units. Sub-folders without media files don't create separate units.
@@ -303,6 +323,17 @@ Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desk
   （"有 N 条结果是用旧规则算出来的" + 「立即重算」），卡片显示「旧规则结果 / 待重算」
   而不是旧口径的数字（旧行 `match_count=46` 配 33 个文件的单元曾被渲染成
   "46/33 个文件重叠"，用户以为界面递归了）；分组头标"含旧规则结果"
+- **Web 查重进度跨页存活** — 切到别的 Tab 再回来（或整页刷新）时自动接上仍在跑的
+  任务：模块级 `_dedupRun` 镜像 + `GET /api/dedup/active-task`，进度条/「查重中…」/
+  阶段文案立刻恢复（实测报障：进度条消失只剩风扇转）；任务在别处跑完，回来显示
+  完成摘要并刷新列表
+- **Web 查重状态记忆** — 当前 Tab（`_dedupLevel`）、已展开的分组（`_dedupExpanded`，
+  按 Tab 分开记）、列表滚动位置（`_dedupScrollTop`）跨路由保留：看完详情返回仍停在
+  「疑似相关」且原分组是展开的（实测报障：返回跳回「疑似重复」且收起）。
+  分组的子项不缓存，返回时重新拉一次
+- **控制台安静** — OpenCV/Qt 的 FFmpeg 解码日志统一静音
+  （`image_helpers.silence_ffmpeg_logs` / `preview_dialog._silence_qt_ffmpeg_logs`），
+  否则损坏视频会逐帧刷红色 h264 告警；静音只去噪音，不改变"这些文件确实损坏"的事实
 - **Config** — 设置对话框支持 web_pin、缩略图、API 等全部字段
 
 

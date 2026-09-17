@@ -384,6 +384,139 @@ def test_video_face_multi_frame_extraction():
 
 
 
+def _libavcodec_noise(stderr: str) -> int:
+    """数一数 libavcodec 的日志行 —— 它们都长这样：[h264 @ 000001f...] message。"""
+    import re
+    return sum(
+        1 for line in (stderr or "").splitlines()
+        if re.match(r"^\[[a-z0-9_]+ @ ", line.strip())
+    )
+
+
+def test_ffmpeg_log_suppression():
+    """测试 0.8: FFmpeg 解码噪音必须真的被抑制（Windows 上 os.environ 是空操作）。
+
+    实测报障：查重时控制台刷满红色 h264 解码报错，用户以为程序坏了。这些是
+    libavcodec 对**损坏视频**的正常告警（不该消失的信息是"哪几个文件坏了"，
+    而不是刷屏）。仓库本来就在 main.py 里设了 OPENCV_FFMPEG_LOGLEVEL=-8，
+    但**完全没生效**：Windows 上 os.environ / os.putenv / SetEnvironmentVariableW
+    都只更新进程环境块，而 OpenCV 的 ffmpeg DLL 用 CRT 自己那份 getenv 读
+    （实测三种写法解码损坏视频仍打 9 行噪音，只有 _putenv_s 能静音）。
+    所以这条链必须钉死在测试里，否则"抑制"随时悄悄退化成空操作。
+    """
+    section("测试 0.8: FFmpeg 解码噪音抑制")
+    import ctypes
+    import shutil
+    import subprocess
+
+    repo_root = Path(__file__).parent.parent
+    env = dict(os.environ)
+    # 父进程若已设过就清掉：要验证的是"应用自己设的那一下"是否奏效
+    env.pop("OPENCV_FFMPEG_LOGLEVEL", None)
+    env.pop("OPENCV_LOG_LEVEL", None)
+    env["PYTHONIOENCODING"] = "utf-8"
+
+    # ① 机制层：抑制函数必须让 CRT 的 getenv 读到 -8（cv2 读的就是这一份）
+    probe = (
+        "import ctypes, sys\n"
+        f"sys.path.insert(0, r'{repo_root}')\n"
+        "from app.utils.image_helpers import silence_ffmpeg_logs\n"
+        "silence_ffmpeg_logs()\n"
+        "vals = []\n"
+        "for dll in ('ucrtbase', 'msvcrt'):\n"
+        "    try:\n"
+        "        crt = ctypes.CDLL(dll)\n"
+        "        crt.getenv.restype = ctypes.c_char_p\n"
+        "        vals.append(dll + '=' + str(crt.getenv(b'OPENCV_FFMPEG_LOGLEVEL')))\n"
+        "    except OSError:\n"
+        "        vals.append(dll + '=<dll缺失>')\n"
+        "print('|'.join(vals))\n"
+    )
+    r = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace",
+                       env=env, timeout=180)
+    out = (r.stdout or "").strip()
+    check(f"抑制函数可导入并执行（rc={r.returncode}）", r.returncode == 0)
+    check(f"CRT 的 getenv 读到 -8（实际 {out!r}）",
+          "ucrtbase=b'-8'" in out and "msvcrt=b'-8'" in out)
+
+    # ② 效果层：真解码一个损坏视频，stderr 不能有任何 libavcodec 噪音
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ffmpeg_quiet_"))
+    try:
+        import cv2
+        import numpy as np
+
+        corrupt = tmp_dir / "corrupt.mp4"
+        writer = cv2.VideoWriter(str(corrupt), cv2.VideoWriter_fourcc(*"mp4v"),
+                                 10.0, (320, 240))
+        for i in range(60):
+            writer.write(np.full((240, 320, 3), i * 4 % 255, dtype=np.uint8))
+        writer.release()
+        data = bytearray(corrupt.read_bytes())
+        start = int(len(data) * 0.45)
+        for i in range(start, start + int(len(data) * 0.08)):
+            data[i] = 0
+        corrupt.write_bytes(bytes(data))
+
+        decode_body = (
+            "cap = cv2.VideoCapture(sys.argv[1])\n"
+            "n = 0\n"
+            "while True:\n"
+            "    ret, _ = cap.read()\n"
+            "    if not ret:\n"
+            "        break\n"
+            "    n += 1\n"
+            "cap.release()\n"
+            "print('frames=%d' % n)\n"
+        )
+        # 对照组：不导入应用模块 —— 必须能听到噪音，证明样本确实会触发（判据不是恒假）
+        plain = "import cv2, sys\n" + decode_body
+        r0 = subprocess.run([sys.executable, "-c", plain, str(corrupt)],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", env=env, timeout=180)
+        check(f"对照组（未抑制）确实打出 libavcodec 噪音（{_libavcodec_noise(r0.stderr)} 行）",
+              _libavcodec_noise(r0.stderr) > 0)
+
+        # 实验组：只要导入了应用模块（模块级抑制），解码就必须安静
+        quiet = (
+            "import sys\n"
+            f"sys.path.insert(0, r'{repo_root}')\n"
+            "import app.utils.image_helpers  # noqa: F401 —— 导入即抑制\n"
+            "import cv2\n" + decode_body
+        )
+        r1 = subprocess.run([sys.executable, "-c", quiet, str(corrupt)],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", env=env, timeout=180)
+        check(f"导入应用模块后解码无噪音（实际 {_libavcodec_noise(r1.stderr)} 行）",
+              _libavcodec_noise(r1.stderr) == 0)
+        check("静音不影响解码本身（两组帧数一致）",
+              "frames=" in r0.stdout and r0.stdout == r1.stdout)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # ③ 桌面端空格预览走 QtMultimedia，那是另一套 ffmpeg（PySide6 自带
+    #    avutil-*.dll），OpenCV 的环境变量对它无效，必须在导入预览对话框时
+    #    用 av_log_set_level 关掉（它还会 dump 整个容器信息）
+    try:
+        import app.ui.dialogs.preview_dialog as pd      # 导入即静音
+        if not pd._HAS_MULTIMEDIA:
+            check("QtMultimedia 不可用（跳过预览静音检查）", True)
+        else:
+            import PySide6
+            levels = {}
+            for dll in sorted(Path(PySide6.__file__).parent.glob("avutil-*.dll")):
+                try:
+                    avutil = ctypes.CDLL(str(dll))
+                    avutil.av_log_get_level.restype = ctypes.c_int
+                    levels[dll.name] = avutil.av_log_get_level()
+                except OSError:
+                    pass
+            check(f"Qt 预览的 ffmpeg 日志级别被设为 AV_LOG_FATAL(8)（实际 {levels}）",
+                  bool(levels) and all(v == 8 for v in levels.values()))
+    except Exception as e:                                  # noqa: BLE001
+        check(f"预览对话框导入失败: {e}", False)
+
+
 def test_face_detection_degrades_gracefully():
     """测试 0.7: 人脸链路的错误契约 + OpenCV 5 下模型必须真正可用。
 
@@ -6144,6 +6277,7 @@ def main():
         test_hash_worker_video_face_detection()
         test_video_face_frame_plan()
         test_video_face_multi_frame_extraction()
+        test_ffmpeg_log_suppression()
         test_face_detection_degrades_gracefully()
         test_face_cosine_metric()
         test_face_detector_thread_safety()

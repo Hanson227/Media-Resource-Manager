@@ -409,6 +409,7 @@ def run_dedup(body: DedupRunRequest, request: Request):
     _prune_tasks(now)
     entry = {
         "task_id": task_id,
+        "kind": "dedup",
         "status": "queued",
         "phase": None,
         "created_at": now,
@@ -557,6 +558,7 @@ def run_face_scan(body: DedupFaceScanRequest, request: Request):
     _prune_tasks(now)
     entry = {
         "task_id": task_id,
+        "kind": "face",
         "status": "queued",
         "phase": "faces",
         "created_at": now,
@@ -587,3 +589,25 @@ def get_dedup_task(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail=f"查重任务不存在: {task_id}")
     return task
+
+
+@router.get("/active-task")
+def get_active_task():
+    """当前仍在排队/运行的查重或人脸任务（没有则 task_id 为 None）。
+
+    客户端据此在"整页刷新 / 换设备 / 刚打开页面"时重新接上进度：
+    任务跑在服务端后台线程里，页面丢了 task_id 就只能靠风扇判断在不在跑
+    （实测报障：切走再回来进度条消失）。
+    """
+    now = time.time()
+    _prune_tasks(now)
+    with _tasks_lock:
+        active = [
+            dict(t) for t in _dedup_tasks.values()
+            if t.get("status") in ("queued", "running")
+        ]
+    if not active:
+        return {"task_id": None, "status": None, "kind": None}
+    # 理论上互斥门保证同时只有一个；真出现多个就返回最新的那个
+    active.sort(key=lambda t: t.get("created_at") or 0, reverse=True)
+    return active[0]

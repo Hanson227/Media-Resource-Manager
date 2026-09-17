@@ -5,13 +5,45 @@
 提供常用的图像处理操作，统一异常处理。
 """
 
+import ctypes
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Tuple
 
 from PIL import Image, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
+
+
+def silence_ffmpeg_logs() -> None:
+    """关掉 OpenCV(FFmpeg 后端) 的解码日志噪音 —— 幂等，可重复调用。
+
+    为什么不能用 os.environ: Windows 上 `os.environ[k] = v` / `os.putenv` /
+    `SetEnvironmentVariableW` 只更新**进程环境块**，而 OpenCV 的
+    `opencv_videoio_ffmpeg*.dll` 是用 CRT 的 `getenv` 读 `OPENCV_FFMPEG_LOGLEVEL`
+    —— 那是 UCRT 自己缓存的一份环境，上面三种写法都改不到它。实测：三种写法
+    解码同一个损坏视频，仍然打 9 行 `[h264 @ ...]`，只有 `_putenv_s` 能静音。
+
+    本库有不少损坏/截断的视频（实测报障：查重时控制台刷满红色 h264 告警），
+    逐帧抽帧时这些 libavcodec 告警会把真正的日志淹掉。
+
+    注意: 必须在**第一次 import cv2 之前**调用。本模块导入时会自动调一次，
+    而全项目的 cv2 都是延迟导入（函数内 import），所以这是最早且必经的一点。
+    """
+    for key, value in (("OPENCV_FFMPEG_LOGLEVEL", "-8"),   # AV_LOG_QUIET
+                       ("OPENCV_LOG_LEVEL", "OFF")):
+        os.environ[key] = value                      # Python 侧也要读得到
+        try:
+            # UCRT 的 _putenv_s 才会写进 CRT 那份环境（cv2 读的就是它）
+            ctypes.CDLL("msvcrt")._putenv_s(
+                key.encode("ascii"), value.encode("ascii"))
+        except (OSError, AttributeError) as e:       # 非 Windows：os.environ 够了
+            logger.debug(f"无法通过 CRT 设置 {key}: {e}")
+
+
+# 导入即生效：必须在任何 cv2.VideoCapture 之前
+silence_ffmpeg_logs()
 
 
 def open_image_safe(image_path: Path) -> Optional[Image.Image]:
