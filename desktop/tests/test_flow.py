@@ -214,13 +214,14 @@ def _scan_undefined_globals(py_files: list[Path], project_root: Path) -> list[tu
 
 
 def test_hash_worker_video_face_detection():
-    """测试 0.5: 视频人脸检测链路（回归 os 未导入导致的静默失效）。
+    """测试 0.5: 视频人脸检测链路（多帧抽帧）。
 
     _detect_faces_for_file 的视频分支曾调用未导入的 os.close()，
     NameError 被外层 except Exception 吞掉 → detect_faces 永不执行，
-    视频人脸查重维度静默失效。此处用 stub engine 断言该分支真的被走到。
+    视频人脸查重维度静默失效。此处用 stub engine 断言该分支真的被走到，
+    且走的是"定间隔多帧"接口（旧的"只取中间一帧"已废弃）。
     """
-    section("测试 0.5: 视频人脸检测链路")
+    section("测试 0.5: 视频人脸检测链路（多帧）")
     from app.services.index_service import _detect_faces_for_file
 
     try:
@@ -245,22 +246,142 @@ def test_hash_worker_video_face_detection():
             def __init__(self):
                 self.calls = []
 
-            def detect_faces(self, path):
-                self.calls.append(Path(path))
+            def extract_video_faces(self, path, interval_sec=5, max_frames=10):
+                self.calls.append((Path(path), interval_sec, max_frames))
                 return ["FACE"]
 
         engine = _StubEngine()
-        before = set(Path(tempfile.gettempdir()).glob("vface_*.jpg"))
-        result = _detect_faces_for_file(engine, video, "video")
-        check("视频分支调用 detect_faces（未被 NameError 吞掉）", len(engine.calls) == 1)
+        result = _detect_faces_for_file(engine, video, "video",
+                                        AppConfig(face_video_max_frames=7))
+        check("视频分支调用 extract_video_faces（未被静默吞掉）",
+              len(engine.calls) == 1)
+        check("抽帧上限来自配置", engine.calls and engine.calls[0][2] == 7)
+        check("抽帧间隔来自配置", engine.calls and engine.calls[0][1] == 5)
         check("视频分支返回人脸检测结果", result == ["FACE"])
 
-        # 临时抽帧文件应被清理（只比对本次新增，避免受历史残留影响）
-        after = set(Path(tempfile.gettempdir()).glob("vface_*.jpg"))
-        check("抽帧临时文件已清理", after <= before)
+        # 图片分支仍走全图检测
+        class _ImgStub:
+            def __init__(self):
+                self.calls = []
+
+            def detect_faces(self, path):
+                self.calls.append(Path(path))
+                return ["IMG"]
+
+        img_stub = _ImgStub()
+        img = tmp_dir / "p.jpg"
+        Image.new("RGB", (32, 32), color=(10, 20, 30)).save(img)
+        check("图片分支走 detect_faces",
+              _detect_faces_for_file(img_stub, img, "image") == ["IMG"]
+              and len(img_stub.calls) == 1)
     finally:
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_video_face_frame_plan():
+    """测试 0.6: 视频人脸抽帧计划 —— 定间隔、均匀铺满全片、有上限。
+
+    旧实现只取"中间那一帧"：抽到哪一帧取决于片长、正脸不在中点就整片漏检，
+    而且同一视频重扫结果可能不同（不可复现）。这里锁住新策略的三个性质。
+    """
+    section("测试 0.6: 视频人脸抽帧计划")
+    from app.core.hash_engine import plan_video_face_timestamps
+
+    # ① 短视频：按 5s 间隔，一帧都别少
+    stamps = plan_video_face_timestamps(56_000, min_interval_sec=5, max_frames=10)
+    check("56s 视频 → 10 帧（受上限约束）", len(stamps) == 10)
+    check("时间戳升序且不重复", stamps == sorted(set(stamps)))
+    check("首帧在片头附近、末帧在片尾附近（铺满全片）",
+          stamps[0] <= 1000 and stamps[-1] >= 54_000)
+    check("时间戳不越界", all(0 <= s < 56_000 for s in stamps))
+
+    # ② 3 秒短片：只能取到 1 帧（退化到中点，而不是取 0 帧）
+    check("3s 视频 → 1 帧", plan_video_face_timestamps(3_000, 5, 10) == [1_500])
+
+    # ③ 长视频：上限生效、间距自动放大（不是只扫开头）
+    long_stamps = plan_video_face_timestamps(3_600_000, min_interval_sec=5,
+                                             max_frames=10)
+    check("1 小时视频仍只取 10 帧", len(long_stamps) == 10)
+    check("长视频尾部也被覆盖（不是只扫开头）", long_stamps[-1] > 3_500_000)
+    check("相邻间距 ≈ 3600s/9", abs((long_stamps[1] - long_stamps[0])
+                                    - 400_000) < 2_000)
+
+    # ④ 边界
+    check("时长为 0 → 空计划", plan_video_face_timestamps(0, 5, 10) == [])
+    check("负时长 → 空计划", plan_video_face_timestamps(-100, 5, 10) == [])
+    check("上限为 0 → 空计划", plan_video_face_timestamps(10_000, 5, 0) == [])
+    check("帧数上限被尊重（4 帧）",
+          len(plan_video_face_timestamps(600_000, 5, 4)) == 4)
+
+
+def test_video_face_multi_frame_extraction():
+    """测试 0.7: 视频多帧人脸检测 —— 每帧都检测、source_ms 逐帧记录。
+
+    用桩替换 detect_faces_array，只验证"抽帧规划 + 调用次数 + 时间戳"
+    这条链（真实人脸检测需要真脸素材，不适合放进单元测试）。
+    """
+    section("测试 0.7: 视频多帧人脸检测")
+    from app.core import hash_engine as he
+
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        check("cv2/numpy 可用", False)
+        return
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vface_multi_"))
+    try:
+        video = tmp_dir / "clip.avi"
+        writer = cv2.VideoWriter(
+            str(video), cv2.VideoWriter_fourcc(*"MJPG"), 10.0, (64, 48)
+        )
+        for i in range(30):  # 3 秒
+            writer.write(np.full((48, 64, 3), 120, dtype=np.uint8))
+        writer.release()
+
+        engine = HashEngine(face_detection_enabled=True)
+        seen_ts: list = []
+
+        def _fake_array(image, *, source=None, max_detect_side=1280,
+                        source_ms=None, start_index=0):
+            seen_ts.append((source_ms, max_detect_side, start_index))
+            return [he.FaceVector(face_index=start_index, vector=(0.1,) * 128,
+                                  bbox=(1, 2, 3, 4), source_ms=source_ms)]
+
+        engine.detect_faces_array = _fake_array  # type: ignore[assignment]
+        engine._load_models = lambda *a, **k: True  # type: ignore[assignment]
+        engine._face_enabled = True
+
+        faces = engine.extract_video_faces(video, interval_sec=5, max_frames=10)
+        check("3 秒视频按 5s 间隔 → 1 帧", len(faces) == 1)
+        check("face_index 连续", [f.face_index for f in faces] == [0])
+        check("每条向量带 source_ms", all(f.source_ms is not None for f in faces))
+        check("source_ms 与抽帧计划一致（1500ms）",
+              faces[0].source_ms == 1500 and seen_ts[0][0] == 1500)
+        check("视频帧检测沿用 1280 长边（不牺牲召回）",
+              seen_ts[0][1] == 1280)
+
+        # 长一点的视频：多帧、编号跨帧连续
+        seen_ts.clear()
+        video2 = tmp_dir / "clip2.avi"
+        writer = cv2.VideoWriter(
+            str(video2), cv2.VideoWriter_fourcc(*"MJPG"), 10.0, (64, 48)
+        )
+        for i in range(200):  # 20 秒
+            writer.write(np.full((48, 64, 3), 120, dtype=np.uint8))
+        writer.release()
+        faces2 = engine.extract_video_faces(video2, interval_sec=5, max_frames=10)
+        check("20 秒视频按 5s 间隔 → 5 帧", len(faces2) == 5)
+        check("人脸序号跨帧连续（0,1,2,3,4）",
+              [f.face_index for f in faces2] == [0, 1, 2, 3, 4])
+        check("每帧都记录了不同时间戳",
+              len({f.source_ms for f in faces2}) == 5)
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 
 def test_face_detection_degrades_gracefully():
@@ -645,8 +766,8 @@ def test_migration_v5_to_v6_match_level():
         DatabaseManager.initialize(tmp_db)
         migrate_db()
 
-        check("schema 版本升到 6",
-              _exec("PRAGMA user_version", fetch=True)[0][0] == 6)
+        check(f"schema 版本升到 {CURRENT_SCHEMA_VERSION}",
+              _exec("PRAGMA user_version", fetch=True)[0][0] == CURRENT_SCHEMA_VERSION)
         cols = [r[1] for r in _exec("PRAGMA table_info(dedup_results)", fetch=True)]
         check("match_level 列已添加", "match_level" in cols)
         row = _exec("SELECT id, similarity_score, match_level FROM dedup_results",
@@ -1615,8 +1736,12 @@ def test_dedup_related_level():
                          3: [_img(11, "X", face=False)],
                          4: [_img(12, "X", face=False)]},
                         {1: "A", 2: "B", 3: "C", 4: "D"})
-    check("related 进入 related_found 桶",
-          len(res.related_found) == 1 and res.related_found[0].unit_a_id == 1)
+    check("仅人脸线索进入 face_only_found 桶（不再混进 related）",
+          len(res.face_only_found) == 1 and res.face_only_found[0].unit_a_id == 1)
+    check("face_only 桶的 has_file_evidence 为 False",
+          res.face_only_found[0].has_file_evidence is False)
+    check("related_found 里没有纯人脸线索",
+          len(res.related_found) == 0)
     check("duplicate 进入 duplicates_found 桶",
           len(res.duplicates_found) == 1)
 
@@ -1668,7 +1793,12 @@ def test_dedup_related_persistence():
         with DatabaseManager.session() as s:
             row = s.get(DedupResult, dr_id)
             check("match_level 落库为 related", row is not None and row.match_level == "related")
-            check("match_count = 全部证据数 3", row is not None and row.match_count == 3)
+            # 旧实现存 evidence_count（1 视频 + 2 人脸 = 3），于是界面把 3 说成"匹配 3 个文件"，
+            # 而实际入库的计数匹配只有 1 条。新语义：match_count 只数计入判定的文件对。
+            check("match_count 只数文件匹配（不含人脸线索）",
+                  row is not None and row.match_count == 1)
+            check("evidence_kind 落库为 file",
+                  row is not None and row.evidence_kind == "file")
             matches = q.get_file_matches_for_result(s, dr_id)
             check("重复文件对去重（不撞唯一约束）",
                   sorted(m.match_type for m in matches) == ["face", "video"])
@@ -1692,6 +1822,721 @@ def test_dedup_related_persistence():
     if msg is not None:
         with DatabaseManager.session() as s:
             s.query(Message).filter(Message.id == msg.id).delete(synchronize_session=False)
+
+
+def test_dedup_subset_containment_duplicate():
+    """测试 6.16: 子集重复 —— 一边几乎完全在另一边里时必须判为重复。
+
+    复现用户真实场景：33 个文件 vs 41 个文件，其中 29 个 MD5 完全一致。
+    杰卡德只有 0.644（够不到 0.80），旧逻辑把它降级成"疑似相关"，
+    于是界面显示"疑似重复 0 组 / 疑似相关 380 对"，用户核对后说"这条确实是相同的"。
+    """
+    section("测试 6.16: 子集重复（包含度判定）")
+    from app.core.dedup_engine import DedupEngine
+    from app.utils.constants import MatchLevel
+
+    def _img(fid, md5=None, phash=None):
+        return {"id": fid, "path": f"{fid}.jpg", "md5_hash": md5, "phash": phash,
+                "dhash": None, "face_vectors": [], "video_frames": []}
+
+    eng = DedupEngine(jaccard_threshold=0.8, face_enabled=False)
+
+    # ① 33 vs 41，29 个文件字节级一致 → 杰卡德 0.644、包含度 0.879 → duplicate
+    a = [_img(i, md5=f"s{i}") for i in range(1, 30)]          # 29 个共同文件
+    a += [_img(i, md5=f"a{i}") for i in range(30, 34)]        # A 独有 4 个
+    b = [_img(100 + i, md5=f"s{i}") for i in range(1, 30)]    # 同一批文件
+    b += [_img(100 + i, md5=f"b{i}") for i in range(30, 42)]  # B 独有 12 个
+    r1 = eng.compare_units(a, b, 1, 2, "抖音颜值小姐姐", "清纯女大喊爸爸")
+    check("29/33 文件相同 → 判为 duplicate（不再降级成 related）",
+          r1 is not None and r1.level == MatchLevel.DUPLICATE.value)
+    check("杰卡德仍是 0.6444（低于阈值 0.80）",
+          r1 is not None and abs(r1.jaccard_similarity - 0.6444) < 0.001)
+    check("包含度 = 29/33 ≈ 0.8788",
+          r1 is not None and abs(r1.overlap_ratio - 0.8788) < 0.001)
+    check("匹配数 = 29", r1 is not None and len(r1.file_matches) == 29)
+
+    # ② 9 个文件的目录被 180 个文件的目录完全包含：包含度 1.0 但杰卡德仅 0.05
+    #    → 属于"部分重叠"而不是"重复"（否则会诱导用户整目录删除 171 个独有文件）
+    #    注：n_b 不能超过 180（文件数比例 20 倍的早期过滤会直接跳过这一对）
+    small = [_img(i, md5=f"t{i}") for i in range(1, 10)]
+    big = [_img(2000 + i, md5=f"t{i}") for i in range(1, 10)]
+    big += [_img(3000 + i, md5=f"u{i}") for i in range(1, 172)]
+    r2 = eng.compare_units(small, big, 3, 4, "小目录", "大目录")
+    check("9 文件被 180 文件完全包含 → 不是 duplicate",
+          r2 is not None and r2.level == MatchLevel.RELATED.value)
+    check("包含度确实是 1.0", r2 is not None and r2.overlap_ratio == 1.0)
+    check("杰卡德被压到 0.05（低于 0.10 下限）",
+          r2 is not None and r2.jaccard_similarity < 0.10)
+
+    # ③ 纯 pHash 的高包含度不给"重复"结论（近似图不该建议保留一份）
+    pa = [_img(i, phash="aa" * 8) for i in range(1, 11)]
+    pb = [_img(4000 + i, phash="aa" * 8) for i in range(1, 11)]
+    pb += [_img(5000 + i, phash="bb" * 8) for i in range(1, 11)]
+    r3 = eng.compare_units(pa, pb, 5, 6, "近似甲", "近似乙")
+    check("纯 pHash 高包含度 → related（缺强证据，不判重复）",
+          r3 is not None and r3.level == MatchLevel.RELATED.value)
+    check("该对包含度 = 1.0、杰卡德 0.5（10 匹配 / 20 并集）",
+          r3 is not None and r3.overlap_ratio == 1.0
+          and abs(r3.jaccard_similarity - 0.5) < 0.001)
+
+    # ④ 达阈值的老路径不受影响
+    r4 = eng.compare_units([_img(1, md5="X")], [_img(2, md5="X")], 7, 8)
+    check("完全相同 → duplicate", r4 is not None
+          and r4.level == MatchLevel.DUPLICATE.value)
+
+
+def test_dedup_related_requires_file_evidence():
+    """测试 6.17: 人脸线索不再是"疑似相关"的证据。
+
+    旧逻辑 `evidence_count = 文件匹配 + 人脸线索` 且门槛 2：
+    **两条人脸就算相关** —— 于是实测库里 380 条 related 中有 373 条
+    是零文件重叠的同演员对（杰卡德恒为 0，界面显示"0%"）。
+    """
+    section("测试 6.17: 疑似相关必须有人脸以外的证据")
+    from app.core.dedup_engine import DedupEngine
+    from app.utils.constants import MatchLevel
+
+    vec = tuple([0.1] * 128)
+
+    def _img(fid, md5=None, phash=None, face=False):
+        return {"id": fid, "path": f"{fid}.jpg", "md5_hash": md5, "phash": phash,
+                "dhash": None, "face_vectors": [vec] if face else [],
+                "video_frames": []}
+
+    eng = DedupEngine(jaccard_threshold=0.8, face_enabled=True,
+                      related_min_matches=2)
+
+    # ① 只有人脸 → related，但 has_file_evidence=False（客户端据此归入"同演员"）
+    r1 = eng.compare_units([_img(1, face=True), _img(2, face=True)],
+                           [_img(3, face=True), _img(4, face=True)], 1, 2)
+    check("纯人脸线索仍提醒（同演员也算知情）",
+          r1 is not None and r1.level == MatchLevel.RELATED.value)
+    check("has_file_evidence=False", r1 is not None and r1.has_file_evidence is False)
+    check("杰卡德恒为 0（人脸不计入判定）",
+          r1 is not None and r1.jaccard_similarity == 0.0)
+
+    # ② 3 vs 3 里只有 1 条文件匹配 + 1 条人脸 → 文件证据不足，不再打扰
+    #    （1 个文件对单文件单元是 duplicate 而非 related，必须凑够分母）
+    a2 = [_img(5, phash="cc" * 8, face=True), _img(7, phash="dd" * 8),
+          _img(8, phash="ee" * 8)]
+    b2 = [_img(6, phash="cc" * 8, face=True), _img(9, phash="ff" * 8),
+          _img(10, phash="1a" * 8)]
+    r2 = eng.compare_units(a2, b2, 5, 6)
+    check("1 条文件匹配 + 1 条人脸 → None（旧逻辑会判 related）", r2 is None)
+
+    # ③ 大单元里的零星匹配不算"相关"：1000 文件里凑巧相近 5 个 → 门槛 20
+    a3 = [_img(i, md5=f"m{i}") for i in range(1, 6)]
+    a3 += [_img(i, md5=f"x{i}") for i in range(6, 1001)]
+    b3 = [_img(2000 + i, md5=f"m{i}") for i in range(1, 6)]
+    b3 += [_img(2000 + i, md5=f"y{i}") for i in range(6, 1001)]
+    r3 = eng.compare_units(a3, b3, 9, 10)
+    check("1000 文件里只有 5 个匹配（0.5%）→ None", r3 is None)
+
+    # ④ 比例达标的部分重叠 → related 且给出包含度（界面显示"5/9 个文件重叠"）
+    a4 = [_img(i, md5=f"n{i}") for i in range(1, 6)]
+    a4 += [_img(i, md5=f"p{i}") for i in range(6, 10)]
+    b4 = [_img(3000 + i, md5=f"n{i}") for i in range(1, 6)]
+    b4 += [_img(3000 + i, md5=f"q{i}") for i in range(6, 10)]
+    r4 = eng.compare_units(a4, b4, 11, 12)
+    check("5/9 部分重叠 → related", r4 is not None
+          and r4.level == MatchLevel.RELATED.value)
+    check("包含度 ≈ 0.5556", r4 is not None and abs(r4.overlap_ratio - 0.5556) < 0.001)
+    check("有三条匹配时不再走人脸兜底", r4 is not None and r4.has_file_evidence is True)
+
+
+def test_face_matching_semantics_and_support():
+    """测试 6.19: 人脸匹配 numpy 重写后语义不变 + 多帧吻合帧数。
+
+    人脸匹配从"Python 双层循环"改成"numpy 余弦矩阵"，因为视频改成
+    定间隔多帧后每个文件有 10 条向量，原来的写法会变成 10×10 次纯 Python
+    点积。重写最容易悄悄改变贪心语义（同演员线索会莫名其妙变多变少），
+    因此这里用独立实现的参考版本做差分比对，并锁住 frame_support。
+    """
+    section("测试 6.19: 人脸匹配语义与吻合帧数")
+    import numpy as np
+    from app.core.dedup_engine import DedupEngine
+
+    def _vec(values):
+        """把前几个分量填成给定值、其余补 0 的 128 维向量。"""
+        base = [0.0] * 128
+        for i, v in enumerate(values):
+            base[i] = float(v)
+        return tuple(base)
+
+    def _ref_match(eng, files_a, files_b):
+        """参考实现：照抄重写前的贪心语义（全局最大、人脸级一对一）。"""
+        matched_a, matched_b, faces_b = set(), set(), set()
+        out = []
+        for idx_a, fa in enumerate(files_a):
+            if idx_a in matched_a:
+                continue
+            va = fa.get("face_vectors") or []
+            if not va:
+                continue
+            best = None
+            best_b = None
+            best_sim = eng._face_threshold - 1.0
+            best_key = None
+            for idx_b, fb in enumerate(files_b):
+                if idx_b in matched_b:
+                    continue
+                vb = fb.get("face_vectors") or []
+                if not vb:
+                    continue
+                for xa in va:
+                    for fi_b, xb in enumerate(vb):
+                        key = (fb["id"], fi_b)
+                        if key in faces_b:
+                            continue
+                        sim = eng._cosine_similarity(xa, xb)
+                        if sim > best_sim:
+                            best_sim = sim
+                            best = (fa["id"], fb["id"])
+                            best_b = idx_b
+                            best_key = key
+            if best is not None and best_b is not None and best_sim >= eng._face_threshold:
+                out.append(best)
+                faces_b.add(best_key)
+                matched_a.add(idx_a)
+                matched_b.add(best_b)
+        return out
+
+    eng = DedupEngine(face_enabled=True, face_similarity_threshold=0.5)
+
+    # ① 随机向量差分：numpy 版与参考版必须给出完全相同的文件对
+    rng = np.random.default_rng(20240917)
+    file_id = 1
+    files_a, files_b = [], []
+    for _ in range(8):
+        files_a.append({
+            "id": file_id, "path": f"a{file_id}.jpg",
+            "face_vectors": [tuple(float(v) for v in rng.random(128))
+                             for _ in range(rng.integers(1, 4))],
+        })
+        file_id += 1
+    for _ in range(8):
+        files_b.append({
+            "id": file_id, "path": f"b{file_id}.jpg",
+            "face_vectors": [tuple(float(v) for v in rng.random(128))
+                             for _ in range(rng.integers(1, 4))],
+        })
+        file_id += 1
+    # 塞入两组"同一个人"，保证确实有命中可比较
+    twin = tuple(float(v) for v in rng.random(128))
+    files_a[0]["face_vectors"].append(twin)
+    files_b[3]["face_vectors"].append(twin)
+    files_a[1]["face_vectors"].append(twin)
+    files_b[4]["face_vectors"].append(twin)
+
+    got = [(m.file_a_id, m.file_b_id) for m in
+           eng._match_by_face(files_a, files_b, set(), set())]
+    expect = _ref_match(eng, files_a, files_b)
+    check("numpy 版与参考实现在 8×8 随机输入上结果一致", got == expect)
+    check("差分输入确实产生了命中（测试有效）", len(expect) >= 2)
+
+    # ② 文件级一对一：B 侧的同一个文件只能被匹配一次（合影不该被反复计数），
+    #    但同一文件里的多张脸仍参与"选最强的那一张"
+    v1, v2, v3 = _vec([1]), _vec([1, 1]), _vec([1, 1, 1])
+    group = {"id": 100, "path": "group.jpg", "face_vectors": [v1, v2, v3]}
+    singles = [{"id": 101, "path": "s1.jpg", "face_vectors": [v1]},
+               {"id": 102, "path": "s2.jpg", "face_vectors": [v2]},
+               {"id": 103, "path": "s3.jpg", "face_vectors": [v3]}]
+    multi = eng._match_by_face(singles, [group], set(), set())
+    check("同一 B 文件只被消费一次（一对一）", len(multi) == 1)
+    check("命中的是相似度最高的那个 A 文件（v1 与 v1 余弦 1.0）",
+          len(multi) == 1 and multi[0].file_a_id == 101)
+
+    # ③ frame_support：A 侧 3 帧都吻合 → 3；只有 1 帧吻合 → 1；图片 → 1
+    frames = [(0, v1), (5000, v1), (10000, v1)]
+    fa = {"id": 200, "path": "a.mp4", "face_vectors": frames}
+    fb = {"id": 201, "path": "b.mp4", "face_vectors": [(0, v1)]}
+    r3 = eng._match_by_face([fa], [fb], set(), set())
+    check("A 侧 3 帧都吻合 → frame_support=3",
+          len(r3) == 1 and r3[0].frame_support == 3)
+
+    other = _vec([0, 1])  # 与 v1 正交 → 余弦 0，低于阈值，不算吻合
+    fa2 = {"id": 210, "path": "a2.mp4",
+           "face_vectors": [(0, v1), (5000, other), (10000, other)]}
+    r4 = eng._match_by_face([fa2], [fb], set(), set())
+    check("只有 1 帧吻合 → frame_support=1",
+          len(r4) == 1 and r4[0].frame_support == 1)
+
+    r5 = eng._match_by_face(
+        [{"id": 220, "path": "p.jpg", "face_vectors": [v1]}],
+        [{"id": 221, "path": "q.jpg", "face_vectors": [v1]}], set(), set())
+    check("图片（无 source_ms）→ frame_support=1",
+          len(r5) == 1 and r5[0].frame_support == 1)
+
+    # ④ 旧数据（视频只有一帧、source_ms 全为 NULL）不能虚报多帧吻合
+    legacy = {"id": 230, "path": "old.mp4",
+              "face_vectors": [(None, v1), (None, v1)]}
+    r6 = eng._match_by_face([legacy], [fb], set(), set())
+    check("source_ms 全为 None → 只算 1 帧",
+          len(r6) == 1 and r6[0].frame_support == 1)
+
+
+def test_migration_v7_to_v8_computed_version():
+    """测试 1.9: v7→v8 增加 computed_version —— 升级后必须能认出"旧规则的结论"。
+
+    用户实测踩到：升级只做了分类搬迁、没重算，于是界面把旧规则的
+    match_count=46 配 33 个文件的单元渲染成"46/33 个文件重叠"，还显示"疑似重复 0"。
+    存量行必须标成"旧版本"，界面才能提示重新查重。
+    """
+    section("测试 1.9: 迁移 v7→v8（旧结论标记）")
+    import shutil
+    import sqlite3
+
+    _BASE = Path(__file__).parent.parent
+    main_db = _BASE / "data" / "test_flow.db"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="mig78_"))
+    tmp_db = tmp_dir / "mig.db"
+
+    def _exec(sql, params=(), fetch=False):
+        con = sqlite3.connect(str(tmp_db))
+        try:
+            cur = con.execute(sql, params)
+            rows = cur.fetchall() if fetch else None
+            con.commit()
+            return rows
+        finally:
+            con.close()
+
+    try:
+        _exec("""
+            CREATE TABLE dedup_results (
+                id INTEGER NOT NULL,
+                unit_a_id INTEGER NOT NULL,
+                unit_b_id INTEGER NOT NULL,
+                similarity_score FLOAT NOT NULL,
+                match_count INTEGER NOT NULL,
+                total_files_a INTEGER NOT NULL,
+                total_files_b INTEGER NOT NULL,
+                match_types VARCHAR(128),
+                match_level VARCHAR(16) NOT NULL DEFAULT 'duplicate',
+                evidence_kind VARCHAR(8) NOT NULL DEFAULT 'file',
+                is_resolved BOOLEAN NOT NULL,
+                resolution VARCHAR(16) NOT NULL,
+                resolved_by VARCHAR(64),
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                CONSTRAINT uq_dedup_pair UNIQUE (unit_a_id, unit_b_id)
+            )
+        """)
+        # 典型脏数据：旧口径的 match_count（46）大于较小单元的文件数（33）
+        _exec("INSERT INTO dedup_results VALUES "
+              "(1,10,20,0.6444,46,33,41,'md5','related','file',0,'pending',NULL,"
+              "'2026-01-01','2026-01-01')")
+        _exec("PRAGMA user_version=7")
+
+        DatabaseManager.initialize(tmp_db)
+        migrate_db()
+
+        check(f"schema 版本升到 {CURRENT_SCHEMA_VERSION}",
+              _exec("PRAGMA user_version", fetch=True)[0][0] == CURRENT_SCHEMA_VERSION)
+        cols = [r[1] for r in _exec("PRAGMA table_info(dedup_results)", fetch=True)]
+        check("computed_version 列已添加", "computed_version" in cols)
+        check("存量行标记为 0（旧规则）",
+              _exec("SELECT computed_version FROM dedup_results WHERE id=1",
+                    fetch=True)[0][0] == 0)
+
+        migrate_db()  # 幂等
+        check("重复迁移不丢数据",
+              _exec("SELECT count(*) FROM dedup_results", fetch=True)[0][0] == 1)
+    finally:
+        DatabaseManager.dispose()
+        DatabaseManager.initialize(main_db)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_dedup_stale_marker():
+    """测试 6.22: 旧规则结论必须被标成 stale（列表/计数/详情三处都要）。
+
+    两个判据：computed_version 落后；或 match_count 超过较小单元的文件数
+    （新口径下"计入判定的文件对"不可能超过它）。
+    """
+    section("测试 6.22: 旧规则查重结果的标记")
+    from app.api.server import create_app
+    from app.utils.constants import DEDUP_RESULT_VERSION
+
+    client = TestClient(create_app(AppConfig()))
+    tmp_root = Path(tempfile.mkdtemp(prefix="dedup_stale_"))
+    unit_ids = []
+    try:
+        uid_a, ids_a, _ = _make_temp_unit(tmp_root, "旧A", ["a1.jpg", "a2.jpg", "a3.jpg"])
+        uid_b, ids_b, _ = _make_temp_unit(tmp_root, "旧B", ["b1.jpg", "b2.jpg"])
+        uid_c, _, _ = _make_temp_unit(tmp_root, "旧C", ["c1.jpg"])
+        unit_ids = [uid_a, uid_b, uid_c]
+
+        with DatabaseManager.session() as session:
+            # ① 迁移后的旧行：computed_version=0 且 match_count(46) > min(3,2)
+            old = q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_b,
+                similarity_score=0.6444, match_count=46, total_files_a=3,
+                total_files_b=2, match_types="md5", match_level="related",
+                evidence_kind="file", computed_version=0)
+            # ② 版本号是新的，但数字口径不可能（旧口径残留）→ 也要判旧
+            weird = q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_c,
+                similarity_score=0.1, match_count=9, total_files_a=3,
+                total_files_b=1, match_types="md5", match_level="related",
+                evidence_kind="file", computed_version=DEDUP_RESULT_VERSION)
+            old_id, weird_id = old.id, weird.id
+
+        resp = client.get("/api/dedup/results?per_page=100")
+        rows = {r["id"]: r for r in resp.json()["results"]}
+        check("旧版本行标记 stale", rows[old_id]["stale"] is True)
+        check("比例不可能的行也标记 stale（match_count > 文件数）",
+              rows[weird_id]["stale"] is True)
+
+        counts = client.get("/api/dedup/counts").json()
+        check("counts 暴露 stale 数量", counts.get("stale", 0) >= 2)
+        check("counts 暴露当前算法版本",
+              counts.get("result_version") == DEDUP_RESULT_VERSION)
+
+        detail = client.get(f"/api/dedup/results/{old_id}").json()
+        check("详情也带 stale 标记", detail["stale"] is True)
+
+        groups = client.get("/api/dedup/groups?per_page=100").json()
+        anchor_a = next((g for g in groups["groups"]
+                         if g["anchor_unit_id"] == uid_a), None)
+        check("分组头标记组内含旧结论",
+              anchor_a is not None and anchor_a["stale"] is True)
+
+        # ③ 重跑查重（用新版本写入）后不再标记为旧
+        with DatabaseManager.session() as session:
+            q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_b,
+                similarity_score=0.9, match_count=2, total_files_a=3,
+                total_files_b=2, match_types="md5", match_level="related",
+                evidence_kind="file")
+        rows = {r["id"]: r for r in
+                client.get("/api/dedup/results?per_page=100").json()["results"]}
+        check("按新版本重算后不再是旧结论", rows[old_id]["stale"] is False)
+    finally:
+        import shutil
+        with DatabaseManager.session() as session:
+            for uid in unit_ids:
+                q.delete_resource_unit(session, uid)
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_face_rescan_pipeline_scope():
+    """测试 6.20: 人脸重扫管线 —— 候选/全部两种范围、旧向量替换、幂等。
+
+    候选精查是本轮"提高同演员线索准确率"的关键动作：只重扫上一轮出现在
+    人脸匹配里的视频（实测本库 165 个，约 2~3 分钟），而不是全库 1142 个。
+    """
+    section("测试 6.20: 人脸重扫范围与幂等")
+    from app.core.hash_engine import FaceVector, HashEngine
+    from app.services.index_service import run_face_rescan_pipeline
+    from app.utils.constants import FACE_SCAN_VERSION
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="face_rescan_"))
+    unit_ids = []
+    fake = [FaceVector(face_index=0, vector=(0.1,) * 128, bbox=(1, 2, 3, 4),
+                       source_ms=0),
+            FaceVector(face_index=1, vector=(0.2,) * 128, bbox=(1, 2, 3, 4),
+                       source_ms=5000)]
+    orig = HashEngine.extract_video_faces
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        check("cv2/numpy 可用", False)
+        return
+
+    def _make_video(path: Path) -> None:
+        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"),
+                                 5.0, (64, 48))
+        for _ in range(10):
+            writer.write(np.full((48, 64, 3), 120, dtype=np.uint8))
+        writer.release()
+
+    try:
+        uid_a, ids_a, paths_a = _make_temp_video_unit(tmp_root, "重扫A", ["a.mp4"])
+        uid_b, ids_b, paths_b = _make_temp_video_unit(tmp_root, "重扫B", ["b.mp4"])
+        uid_c, ids_c, paths_c = _make_temp_video_unit(tmp_root, "重扫C", ["c.mp4"])
+        unit_ids = [uid_a, uid_b, uid_c]
+        _make_video(paths_a[0])
+        _make_video(paths_b[0])
+        _make_video(paths_c[0])
+        with DatabaseManager.session() as session:
+            # A/B 出现在人脸匹配行里 → 它们是"候选"；C 不是（只在"全部"里被扫）
+            dr = q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_b,
+                similarity_score=0.0, match_count=0, total_files_a=1,
+                total_files_b=1, match_types="", match_level="related",
+                evidence_kind="face")
+            q.insert_file_match(session, dedup_result_id=dr.id,
+                                file_a_id=ids_a[0], file_b_id=ids_b[0],
+                                similarity_score=0.6, match_type="face")
+            # 旧策略留下的向量（source_ms 为空），重扫后必须被替换而不是叠加
+            for i in range(3):
+                q.insert_face_vector(session, ids_a[0],
+                                     vector_data=FaceVector(
+                                         face_index=i, vector=(0.9,) * 128
+                                     ).vector_bytes, face_index=i)
+
+        HashEngine.extract_video_faces = (
+            lambda self, path, interval_sec=5, max_frames=10: list(fake))
+        try:
+            cfg = AppConfig()
+            result = run_face_rescan_pipeline(cfg, scope="candidates")
+            check("候选范围扫 2 个视频（人脸匹配的两侧）", result.scanned == 2)
+            check("范围标签回传", result.scope == "candidates")
+            with DatabaseManager.session() as session:
+                vecs_a = q.get_face_vectors_by_file(session, ids_a[0])
+                vecs_b = q.get_face_vectors_by_file(session, ids_b[0])
+                vecs_c = q.get_face_vectors_by_file(session, ids_c[0])
+                check("新向量条数 = 检测结果条数（旧的 3 条被替换，不是叠加）",
+                      len(vecs_a) == 2)
+                check("每条新向量都带 source_ms",
+                      sorted(v.source_ms for v in vecs_a) == [0, 5000])
+                check("候选两侧都拿到了新向量", len(vecs_b) == 2)
+                check("不在人脸匹配里的视频没被候选精查动过",
+                      len(vecs_c) == 0)
+                check("抽帧版本号已更新",
+                      q.get_file_by_id(session, ids_a[0]).face_scan_version
+                      == FACE_SCAN_VERSION)
+
+            # 幂等：候选集已全部是新策略 → 无事可做
+            again = run_face_rescan_pipeline(cfg, scope="candidates")
+            check("重复精查是空操作（不再花时间）",
+                  again.scanned == 0 and again.total == 0)
+
+            # 全部补扫：C 仍未按新策略扫过 → 会被处理
+            all_result = run_face_rescan_pipeline(cfg, scope="all")
+            check("补扫范围只处理剩下的视频", all_result.scanned == 1)
+            with DatabaseManager.session() as session:
+                check("补扫后 C 也有了人脸向量",
+                      len(q.get_face_vectors_by_file(session, ids_c[0])) == 2)
+            check("再次补扫为空操作",
+                  run_face_rescan_pipeline(cfg, scope="all").scanned == 0)
+
+            # 人脸识别关掉时是空操作（不误删已有向量）
+            off = run_face_rescan_pipeline(
+                cfg.with_updates(face_detection_enabled=False), scope="all")
+            check("人脸未启用时不扫描", off.scanned == 0)
+        finally:
+            HashEngine.extract_video_faces = orig
+    finally:
+        HashEngine.extract_video_faces = orig
+        import shutil
+        with DatabaseManager.session() as session:
+            for uid in unit_ids:
+                q.delete_resource_unit(session, uid)
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_api_face_scan_status():
+    """测试 6.21: 人脸重扫状态接口（Web 按钮显示待扫数量与工作量）。"""
+    section("测试 6.21: 人脸重扫状态接口")
+    from app.api.server import create_app
+
+    client = TestClient(create_app(AppConfig()))
+    tmp_root = Path(tempfile.mkdtemp(prefix="face_status_"))
+    unit_ids = []
+    try:
+        uid, ids, _ = _make_temp_video_unit(tmp_root, "状态A", ["s.mp4"])
+        unit_ids = [uid]
+        with DatabaseManager.session() as session:
+            check("新视频的抽帧版本为 0（待扫）",
+                  q.get_file_by_id(session, ids[0]).face_scan_version == 0)
+
+        resp = client.get("/api/dedup/face-scan/status")
+        check("状态接口返回 200", resp.status_code == 200)
+        data = resp.json()
+        for key in ("videos_total", "videos_pending", "candidates", "faces_total",
+                    "scan_version"):
+            check(f"状态含 {key}", key in data)
+        check("待扫数量 ≥ 1（刚插入的未扫视频）", data["videos_pending"] >= 1)
+        check("scan_version 与常量一致", data["scan_version"] >= 1)
+
+        # 非法 scope 被拒（pydantic 校验）
+        resp = client.post("/api/dedup/face-scan", json={"scope": "bogus"})
+        check("非法 scope 返回 422", resp.status_code == 422)
+    finally:
+        import shutil
+        with DatabaseManager.session() as session:
+            for uid in unit_ids:
+                q.delete_resource_unit(session, uid)
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_dedup_prune_stale_results():
+    """测试 6.18: 分类规则变化后，重跑必须清掉"本轮未再命中"的陈旧结果。
+
+    否则用户重跑一次查重，列表里仍是旧的 380 条 related ——
+    规则改了、结论变了，但没人删旧行（upsert 只更新仍命中的单元对）。
+    """
+    section("测试 6.18: 陈旧查重结果清理")
+    from app.db.models import DedupResult
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="dedup_prune_"))
+    unit_ids = []
+    try:
+        uid_a, ids_a, _ = _make_temp_unit(tmp_root, "清理A", ["a.jpg"])
+        uid_b, ids_b, _ = _make_temp_unit(tmp_root, "清理B", ["b.jpg"])
+        uid_c, ids_c, _ = _make_temp_unit(tmp_root, "清理C", ["c.jpg"])
+        # 范围外的单元（不在本次比对的 unit_ids 里）
+        uid_out, _, _ = _make_temp_unit(tmp_root, "清理X", ["x.jpg"])
+        unit_ids = [uid_a, uid_b, uid_c, uid_out]
+
+        with DatabaseManager.session() as session:
+            keep = q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_b,
+                similarity_score=0.9, match_count=1, total_files_a=1,
+                total_files_b=1, match_types="md5", match_level="duplicate")
+            stale = q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_c,
+                similarity_score=0.01, match_count=0, total_files_a=1,
+                total_files_b=1, match_types="", match_level="related",
+                evidence_kind="face")
+            resolved = q.upsert_dedup_result(
+                session, unit_a_id=uid_b, unit_b_id=uid_c,
+                similarity_score=0.3, match_count=1, total_files_a=1,
+                total_files_b=1, match_types="md5", match_level="related")
+            q.insert_file_match(session, dedup_result_id=stale.id,
+                                file_a_id=ids_a[0], file_b_id=ids_c[0],
+                                similarity_score=0.5, match_type="face")
+            q.resolve_dedup_pair(session, uid_b, uid_c, "ignore")
+            outside = q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_out,
+                similarity_score=0.02, match_count=0, total_files_a=1,
+                total_files_b=1, match_types="", match_level="related",
+                evidence_kind="face")
+            keep_id, stale_id, resolved_id, outside_id = (
+                keep.id, stale.id, resolved.id, outside.id)
+
+        with DatabaseManager.session() as session:
+            # 只给 keep 对放行：本轮参与单元 = A/B/C（不含 X）
+            pruned = q.prune_stale_dedup_results(
+                session, [uid_a, uid_b, uid_c],
+                {q._pair_key(uid_a, uid_b)})
+            check("清理掉 1 条陈旧结果", pruned == 1)
+            check("已处置（is_resolved）的结果永久保留",
+                  q.get_dedup_by_id(session, resolved_id) is not None
+                  and q.get_dedup_by_id(session, resolved_id).is_resolved is True)
+            check("本轮仍未命中的未处置结果被删除",
+                  q.get_dedup_by_id(session, stale_id) is None)
+            check("范围外单元对不受影响",
+                  q.get_dedup_by_id(session, outside_id) is not None)
+            check("保留下来的那对仍在", q.get_dedup_by_id(session, keep_id) is not None)
+            from app.db.models import DedupFileMatch
+            left = (session.query(DedupFileMatch)
+                    .filter(DedupFileMatch.dedup_result_id == stale_id).count())
+            check("被删结果的匹配明细级联清除", left == 0)
+    finally:
+        import shutil
+        with DatabaseManager.session() as session:
+            for uid in unit_ids:
+                q.delete_resource_unit(session, uid)
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_migration_v6_to_v7_columns():
+    """测试 1.8: v6→v7 四个新列 + 两处关键回填。
+
+    回填错了界面就会给出错误分类：纯人脸线索会被标成 file（继续混在
+    "疑似相关"里），图片会被标成 0（补扫任务白扫 2000 多张图）。
+    """
+    section("测试 1.8: 迁移 v6→v7（证据来源/人脸多帧）")
+    import shutil
+    import sqlite3
+
+    _BASE = Path(__file__).parent.parent
+    main_db = _BASE / "data" / "test_flow.db"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="mig67_"))
+    tmp_db = tmp_dir / "mig.db"
+
+    def _exec(sql, params=(), fetch=False):
+        con = sqlite3.connect(str(tmp_db))
+        try:
+            cur = con.execute(sql, params)
+            rows = cur.fetchall() if fetch else None
+            con.commit()
+            return rows
+        finally:
+            con.close()
+
+    try:
+        _exec("""
+            CREATE TABLE dedup_results (
+                id INTEGER NOT NULL,
+                unit_a_id INTEGER NOT NULL,
+                unit_b_id INTEGER NOT NULL,
+                similarity_score FLOAT NOT NULL,
+                match_count INTEGER NOT NULL,
+                total_files_a INTEGER NOT NULL,
+                total_files_b INTEGER NOT NULL,
+                match_types VARCHAR(128),
+                match_level VARCHAR(16) NOT NULL DEFAULT 'duplicate',
+                is_resolved BOOLEAN NOT NULL,
+                resolution VARCHAR(16) NOT NULL,
+                resolved_by VARCHAR(64),
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                CONSTRAINT uq_dedup_pair UNIQUE (unit_a_id, unit_b_id)
+            )
+        """)
+        _exec("CREATE TABLE dedup_file_matches ("
+              "id INTEGER PRIMARY KEY, dedup_result_id INTEGER, file_a_id INTEGER,"
+              "file_b_id INTEGER, similarity_score FLOAT, match_type VARCHAR(8))")
+        _exec("CREATE TABLE face_vectors ("
+              "id INTEGER PRIMARY KEY, file_id INTEGER, vector_data BLOB,"
+              "face_index INTEGER, bbox_x INTEGER)")
+        _exec("CREATE TABLE media_files ("
+              "id INTEGER PRIMARY KEY, path VARCHAR(2048), media_type VARCHAR(8))")
+        # 纯人脸线索（match_types 为空）与真实文件匹配各一条
+        _exec("INSERT INTO dedup_results VALUES "
+              "(1,10,20,0.0,3,5,5,'',  'related',0,'pending',NULL,'2026-01-01','2026-01-01')")
+        _exec("INSERT INTO dedup_results VALUES "
+              "(2,10,30,0.1,2,5,5,'md5','related',0,'pending',NULL,'2026-01-01','2026-01-01')")
+        _exec("INSERT INTO media_files VALUES (1,'a.jpg','image')")
+        _exec("INSERT INTO media_files VALUES (2,'b.mp4','video')")
+        _exec("PRAGMA user_version=6")
+
+        DatabaseManager.initialize(tmp_db)
+        migrate_db()
+
+        check(f"schema 版本升到 {CURRENT_SCHEMA_VERSION}",
+              _exec("PRAGMA user_version", fetch=True)[0][0] == CURRENT_SCHEMA_VERSION)
+        for table, col in [("dedup_results", "evidence_kind"),
+                           ("dedup_file_matches", "frame_support"),
+                           ("face_vectors", "source_ms"),
+                           ("media_files", "face_scan_version")]:
+            cols = [r[1] for r in _exec(f"PRAGMA table_info({table})", fetch=True)]
+            check(f"{table}.{col} 已添加", col in cols)
+
+        rows = _exec("SELECT id, match_count, evidence_kind FROM dedup_results "
+                     "ORDER BY id", fetch=True)
+        check("纯人脸旧行回填为 evidence_kind='face' 且 match_count 归零",
+              rows[0] == (1, 0, "face"))
+        check("有文件匹配的旧行保持 file",
+              rows[1] == (2, 2, "file"))
+        check("图片标记为已按新策略处理（无需补扫）",
+              _exec("SELECT face_scan_version FROM media_files WHERE id=1",
+                    fetch=True)[0][0] == 1)
+        check("视频标记为待补扫",
+              _exec("SELECT face_scan_version FROM media_files WHERE id=2",
+                    fetch=True)[0][0] == 0)
+
+        rejected = False
+        try:
+            _exec("UPDATE dedup_results SET evidence_kind='bogus' WHERE id=2")
+        except sqlite3.IntegrityError:
+            rejected = True
+        check("非法 evidence_kind 被 CHECK 拒绝", rejected)
+
+        migrate_db()  # 幂等
+        check("重复迁移不丢数据",
+              _exec("SELECT count(*) FROM dedup_results", fetch=True)[0][0] == 2)
+    finally:
+        DatabaseManager.dispose()
+        DatabaseManager.initialize(main_db)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def test_hash_worker_indexes_all_batches():
@@ -3881,6 +4726,43 @@ def _make_temp_unit(tmp_root: Path, name: str, files: list[str]) -> tuple:
     return unit.id, ids, paths
 
 
+def _make_temp_video_unit(tmp_root: Path, name: str, files: list[str]) -> tuple:
+    """建一个临时资源单元并登记若干视频文件（内容由调用方按需写入）。
+
+    与 _make_temp_unit 的区别：media_type 必须是 'video' —— 补扫/精查任务
+    只处理视频（图片的人脸全图检测不受抽帧策略影响）。
+
+    返回:
+        (unit_id, [file_id, ...], [Path, ...])。
+    """
+    unit_dir = tmp_root / name
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    with DatabaseManager.session() as session:
+        root = next(
+            (r for r in q.get_all_roots(session) if r.path == str(tmp_root)), None
+        )
+        if root is None:
+            root = q.add_library_root(session, str(tmp_root))
+        unit = q.create_unit(
+            session, str(unit_dir), name, root.id,
+            file_count=len(files), total_size=0,
+        )
+        ids = []
+        for fname in files:
+            p = unit_dir / fname
+            if not p.exists():
+                p.write_bytes(b"")
+            mf = q.insert_media_file(
+                session, path=str(p), filename=p.name, extension=".mp4",
+                media_type="video", size_bytes=p.stat().st_size,
+                resource_unit_id=unit.id,
+            )
+            ids.append(mf.id)
+            paths.append(p)
+    return unit.id, ids, paths
+
+
 def test_api_file_delete_modes():
     """T20.5: 文件删除 API —— 回收站 / 仅记录 / 批量 / 单元统计重算。
 
@@ -4044,6 +4926,165 @@ def test_api_unit_delete_folder():
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+def test_delete_offline_volume_refuses():
+    """测试 6.23: 磁盘未连接时删除必须报错并保留记录，绝不能假装删掉。
+
+    实测场景：媒体库在移动盘/网络盘上（G:\\Guofu），盘掉线或没插时
+    `move_to_trash` 看到 Path.exists() 为 False 就返回"路径已不存在，无需删除"，
+    于是数据库记录被删、磁盘文件其实还在 —— 用户看到"删了"，一重扫文件又全回来，
+    表现就是"web 端删不了"。必须区分"文件被别人删了"（终态已达成）与
+    "磁盘没连"（文件还在，只是看不见）。
+    """
+    section("测试 6.23: 磁盘未连接时的删除")
+    from app.api.server import create_app
+
+    client = TestClient(create_app(AppConfig()))
+
+    # 找一个不存在的盘符（Windows），模拟"盘没连"
+    missing = None
+    for letter in "QRSTUVWXYZ":
+        anchor = f"{letter}:\\"
+        if not Path(anchor).exists():
+            missing = anchor
+            break
+    if missing is None:
+        check("找不到可用作'未连接磁盘'的盘符，跳过", True)
+        return
+
+    unit_id = None
+    root_path = missing + "__offline_root__"
+    file_path = root_path + "\\离线单元\\x.mp4"
+    try:
+        with DatabaseManager.session() as session:
+            root = q.add_library_root(session, root_path)
+            unit = q.create_unit(session, root_path + "\\离线单元",
+                                 "离线单元", root.id, file_count=1, total_size=0)
+            mf = q.insert_media_file(
+                session, path=file_path, filename="x.mp4", extension=".mp4",
+                media_type="video", size_bytes=0, resource_unit_id=unit.id)
+            unit_id, file_id = unit.id, mf.id
+        check("前置条件：该磁盘确实不可用", not Path(missing).exists())
+
+        resp = client.delete(f"/api/files/{file_id}")
+        check(f"磁盘未连接时删文件必须失败（实际 {resp.status_code}）",
+              resp.status_code == 409)
+        reason = resp.json().get("detail", "") if resp.status_code != 200 else ""
+        check("失败原因说明磁盘未连接（客户端据此提示插盘）", "未连接" in reason)
+        with DatabaseManager.session() as session:
+            check("数据库记录必须保留（否则重扫文件又回来）",
+                  q.get_file_by_id(session, file_id) is not None)
+
+        resp = client.delete(f"/api/units/{unit_id}")
+        check(f"磁盘未连接时删文件夹必须失败（实际 {resp.status_code}）",
+              resp.status_code == 409)
+        with DatabaseManager.session() as session:
+            check("单元记录保留", q.get_unit_by_id(session, unit_id) is not None)
+
+        # 对照：磁盘可用但文件确实不在了 → 仍按"终态已达成"处理（成功）
+        tmp_dir = Path(tempfile.mkdtemp(prefix="vanished_"))
+        try:
+            uid, _, _ = _make_temp_unit(tmp_dir, "已消失", ["gone.jpg"])
+            with DatabaseManager.session() as session:
+                fid = q.get_files_by_unit(session, uid)[0].id
+                gone_path = q.get_file_by_id(session, fid).path
+            os.remove(gone_path)
+            resp = client.delete(f"/api/files/{fid}")
+            check("文件被别的程序删掉了 → 删除仍算成功（无需报错）",
+                  resp.status_code == 200)
+        finally:
+            import shutil as _sh
+            _sh.rmtree(tmp_dir, ignore_errors=True)
+    finally:
+        import shutil as _sh
+        with DatabaseManager.session() as session:
+            if unit_id:
+                q.delete_resource_unit(session, unit_id)
+            for r in q.get_all_roots(session):
+                if r.path.startswith(missing):
+                    session.delete(r)
+        _sh.rmtree(root_path, ignore_errors=True)
+
+
+def test_delete_permanent_mode_when_trash_unavailable():
+    """测试 6.24: 回收站不可用（网络盘 / exFAT 等无 $RECYCLE.BIN 的卷）时的出路。
+
+    用户报"web 端删不了"的另一半原因：盘上没有回收站时 send2trash 必然抛错，
+    API 只回 409，而客户端只有"移至回收站"一条路，于是永远删不掉。
+    必须提供显式的"永久删除"模式（不可恢复，由用户明确选择），
+    绝不能在 trash 失败时自动降级 —— 那等于无声永久销毁数据。
+    """
+    section("测试 6.24: 回收站不可用时的永久删除")
+    from app.api.server import create_app
+    import send2trash
+
+    client = TestClient(create_app(AppConfig()))
+    orig = send2trash.send2trash
+
+    def _boom(path):
+        raise OSError("[WinError 50] 不支持该请求（该卷没有回收站）")
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="perm_del_"))
+    unit_ids = []
+    try:
+        send2trash.send2trash = _boom
+        uid_a, ids_a, paths_a = _make_temp_unit(tmp_root, "永久A", ["a1.jpg", "a2.jpg"])
+        uid_b, ids_b, paths_b = _make_temp_unit(tmp_root, "永久B", ["b1.jpg", "b2.jpg"])
+        uid_c, ids_c, paths_c = _make_temp_unit(tmp_root, "永久C", ["c1.jpg"])
+        unit_ids = [uid_a, uid_b, uid_c]
+
+        # ① 默认 trash：回收站不可用 → 409，磁盘文件与记录都保留
+        resp = client.delete(f"/api/files/{ids_a[0]}")
+        check(f"回收站不可用时 trash 返回 409（实际 {resp.status_code}）",
+              resp.status_code == 409)
+        check("失败不静默降级（文件仍在磁盘上）", paths_a[0].exists())
+        with DatabaseManager.session() as session:
+            check("失败时数据库记录保留",
+                  q.get_file_by_id(session, ids_a[0]) is not None)
+
+        # ② 显式 mode=delete：真的删掉，且记录一起清理
+        resp = client.delete(f"/api/files/{ids_a[0]}?mode=delete")
+        check(f"mode=delete 返回 200（实际 {resp.status_code}）", resp.status_code == 200)
+        check("文件已从磁盘删除", not paths_a[0].exists())
+        with DatabaseManager.session() as session:
+            check("记录已删除", q.get_file_by_id(session, ids_a[0]) is None)
+
+        # ③ 批量 mode=delete
+        resp = client.post("/api/files/batch-delete",
+                           json={"file_ids": [ids_a[1], ids_b[0]], "mode": "delete"})
+        check("批量永久删除返回 200", resp.status_code == 200)
+        body = resp.json()
+        check("批量永久删除全部成功",
+              sorted(body["deleted"]) == sorted([ids_a[1], ids_b[0]])
+              and not body["failed"])
+        check("两个文件都已从磁盘删除",
+              not paths_a[1].exists() and not paths_b[0].exists())
+
+        # ④ 整个文件夹 mode=delete
+        folder_c = paths_c[0].parent
+        resp = client.delete(f"/api/units/{uid_c}?mode=delete")
+        check(f"文件夹永久删除返回 200（实际 {resp.status_code}）", resp.status_code == 200)
+        check("文件夹已从磁盘删除", not folder_c.exists())
+        with DatabaseManager.session() as session:
+            check("单元记录已删除", q.get_unit_by_id(session, uid_c) is None)
+        unit_ids.remove(uid_c)
+
+        # ⑤ 非法 mode 仍被拒
+        resp = client.delete(f"/api/files/{ids_b[0]}?mode=bogus")
+        check("非法 mode 返回 422", resp.status_code == 422)
+
+        # ⑥ record 模式不受影响（只出库；用另一个仍存在的文件）
+        resp = client.delete(f"/api/files/{ids_b[1]}?mode=record")
+        check("record 模式仍可用", resp.status_code == 200)
+        check("record 模式不动磁盘文件", paths_b[1].exists())
+    finally:
+        send2trash.send2trash = orig
+        import shutil as _sh
+        with DatabaseManager.session() as session:
+            for uid in unit_ids:
+                q.delete_resource_unit(session, uid)
+        _sh.rmtree(tmp_root, ignore_errors=True)
+
+
 def test_dedup_level_api():
     """T20.7: 查重结果分级 API —— level 过滤 / counts / 详情 is_hint。
 
@@ -4108,10 +5149,10 @@ def test_dedup_level_api():
         resp = client.get("/api/dedup/counts")
         check("counts 返回 200", resp.status_code == 200)
         counts = resp.json()
-        check("counts 含 duplicate/related/total",
-              all(k in counts for k in ("duplicate", "related", "total")))
-        check("counts.total = duplicate + related",
-              counts["total"] == counts["duplicate"] + counts["related"])
+        check("counts 含 duplicate/related/face_only/total",
+              all(k in counts for k in ("duplicate", "related", "face_only", "total")))
+        check("counts.total = duplicate + related + face_only",
+              counts["total"] == counts["duplicate"] + counts["related"] + counts["face_only"])
         check("counts.related ≥ 1", counts["related"] >= 1)
         check("counts.duplicate ≥ 1", counts["duplicate"] >= 1)
 
@@ -4127,6 +5168,143 @@ def test_dedup_level_api():
               and matches[0]["file_a_name"] != f"#{matches[0]['file_a_id']}")
         check("人脸行被标记为 is_hint",
               any(m["match_type"] == "face" and m["is_hint"] is True for m in matches))
+    finally:
+        import shutil
+        with DatabaseManager.session() as session:
+            for uid in unit_ids:
+                q.delete_resource_unit(session, uid)
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_api_dedup_evidence_and_groups():
+    """T20.10: 证据来源过滤 / counts 四键 / 按来源单元分组接口。
+
+    用户诉求：380 条结果里"左边相同、右边不同"的一大堆，能不能归成二级文件夹；
+    以及"相似度全是 0 的那批别再放上来"。两者都依赖：能按 evidence 分开取、
+    能按左侧单元分组。这里验证过滤、计数与分组的算术自洽。
+    """
+    section("T20.10: 查重 evidence 过滤与分组接口")
+    from app.api.server import create_app
+
+    client = TestClient(create_app(AppConfig()))
+    tmp_root = Path(tempfile.mkdtemp(prefix="dedup_group_"))
+    unit_ids = []
+    try:
+        uid_a, ids_a, _ = _make_temp_unit(tmp_root, "分组A", ["g1.jpg", "g2.jpg"])
+        uid_b, ids_b, _ = _make_temp_unit(tmp_root, "分组B", ["g3.jpg"])
+        uid_c, ids_c, _ = _make_temp_unit(tmp_root, "分组C", ["g4.jpg"])
+        uid_d, ids_d, _ = _make_temp_unit(tmp_root, "分组D", ["g5.jpg"])
+        uid_e, ids_e, _ = _make_temp_unit(tmp_root, "分组E", ["g6.jpg"])
+        unit_ids = [uid_a, uid_b, uid_c, uid_d, uid_e]
+
+        with DatabaseManager.session() as session:
+            dup = q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_b,
+                similarity_score=0.91, match_count=1, total_files_a=2,
+                total_files_b=1, match_types="md5", match_level="duplicate")
+            rel1 = q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_c,
+                similarity_score=0.12, match_count=1, total_files_a=2,
+                total_files_b=1, match_types="video", match_level="related",
+                evidence_kind="file")
+            rel2 = q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_e,
+                similarity_score=0.08, match_count=1, total_files_a=2,
+                total_files_b=1, match_types="video", match_level="related",
+                evidence_kind="file")
+            face = q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_d,
+                similarity_score=0.0, match_count=0, total_files_a=2,
+                total_files_b=1, match_types="", match_level="related",
+                evidence_kind="face")
+            q.insert_file_match(session, dedup_result_id=rel1.id,
+                                file_a_id=ids_a[0], file_b_id=ids_c[0],
+                                similarity_score=1.0, match_type="video")
+            q.insert_file_match(session, dedup_result_id=rel1.id,
+                                file_a_id=ids_a[1], file_b_id=ids_c[0],
+                                similarity_score=0.62, match_type="face",
+                                frame_support=3)
+            q.insert_file_match(session, dedup_result_id=face.id,
+                                file_a_id=ids_a[0], file_b_id=ids_d[0],
+                                similarity_score=0.55, match_type="face",
+                                frame_support=2)
+            q.insert_file_match(session, dedup_result_id=face.id,
+                                file_a_id=ids_a[1], file_b_id=ids_d[0],
+                                similarity_score=0.48, match_type="face",
+                                frame_support=1)
+            ids = {"dup": dup.id, "rel1": rel1.id, "rel2": rel2.id, "face": face.id}
+
+        # ---- evidence 过滤：两类互斥，并集等于不过滤 ----
+        rel_file = client.get(
+            "/api/dedup/results?level=related&evidence=file&per_page=100").json()
+        rel_face = client.get(
+            "/api/dedup/results?level=related&evidence=face&per_page=100").json()
+        rel_all = client.get("/api/dedup/results?level=related&per_page=100").json()
+        file_ids = {r["id"] for r in rel_file["results"]}
+        face_ids = {r["id"] for r in rel_face["results"]}
+        check("evidence=file 命中两条有文件重叠的相关",
+              {ids["rel1"], ids["rel2"]} <= file_ids)
+        check("evidence=face 只命中纯人脸线索",
+              ids["face"] in face_ids and ids["face"] not in file_ids)
+        check("evidence 两类互斥", not (file_ids & face_ids))
+        check("evidence 并集 = 不过滤时的总数",
+              rel_file["total"] + rel_face["total"] == rel_all["total"])
+
+        # ---- 列表项新增字段 ----
+        row = next(r for r in rel_file["results"] if r["id"] == ids["rel1"])
+        check("列表项带 evidence_kind", row["evidence_kind"] == "file")
+        check("列表项带人脸线索条数（不计入 match_count）",
+              row["face_hint_count"] == 1 and row["match_count"] == 1)
+        check("列表项带包含度（1 / min(2,1) = 1.0）",
+              abs(row["overlap_ratio"] - 1.0) < 1e-6)
+
+        # ---- counts 四键 ----
+        counts = client.get("/api/dedup/counts").json()
+        check("counts 含 face_only", "face_only" in counts)
+        check("face_only ≥ 1（刚种入的纯人脸对）", counts["face_only"] >= 1)
+        check("related 只数有文件证据的",
+              counts["related"] >= 2)
+        check("相关不是靠人脸撑起来的（related 与 face_only 相加才等于总数）",
+              counts["total"] == counts["duplicate"] + counts["related"] + counts["face_only"])
+
+        # ---- 按左侧单元分组 ----
+        groups = client.get("/api/dedup/groups?per_page=100").json()
+        anchor_a = next((g for g in groups["groups"] if g["anchor_unit_id"] == uid_a), None)
+        check("分组接口返回以 A 为左侧的组", anchor_a is not None)
+        check("A 组覆盖 4 对（duplicate 1 + related 2 + face 1）",
+              anchor_a is not None and anchor_a["pair_count"] == 4)
+        check("组里带封面文件 ID（列表页组头缩略图）",
+              anchor_a is not None and anchor_a["anchor_cover_file_id"] is not None)
+        check("组按对数降序", groups["groups"][0]["anchor_unit_id"] == uid_a)
+
+        g_file = client.get("/api/dedup/groups?level=related&evidence=file&per_page=100").json()
+        anchor_file = next(
+            (g for g in g_file["groups"] if g["anchor_unit_id"] == uid_a), None)
+        check("按 evidence 过滤时 A 组只剩 2 对",
+              anchor_file is not None and anchor_file["pair_count"] == 2)
+        check("组内最高分被带出",
+              anchor_file is not None
+              and abs(anchor_file["max_similarity"] - 0.12) < 1e-6)
+        check("组内匹配类型去重（group_concat 会拼出 video,video）",
+              anchor_file is not None and anchor_file["match_types"] == "video")
+
+        # ---- 展开某组：unit_a_id 过滤 ----
+        children = client.get(
+            f"/api/dedup/results?unit_a_id={uid_a}&per_page=100").json()
+        check("unit_a_id 过滤只返回该组子项",
+              children["total"] == 4
+              and all(r["unit_a_id"] == uid_a for r in children["results"]))
+
+        # ---- 详情：包含度 / 人脸条数 / 吻合帧数 ----
+        detail = client.get(f"/api/dedup/results/{ids['rel1']}").json()
+        check("详情带 evidence_kind", detail["evidence_kind"] == "file")
+        check("详情带 face_hint_count", detail["face_hint_count"] == 1)
+        check("详情带包含度", abs(detail["overlap_ratio"] - 1.0) < 1e-6)
+        face_row = next(m for m in detail["file_matches"] if m["match_type"] == "face")
+        check("人脸行带吻合帧数", face_row["frame_support"] == 3)
+        face_detail = client.get(f"/api/dedup/results/{ids['face']}").json()
+        check("纯人脸结果 match_count=0 但 face_hint_count=2",
+              face_detail["match_count"] == 0 and face_detail["face_hint_count"] == 2)
     finally:
         import shutil
         with DatabaseManager.session() as session:
@@ -4964,6 +6142,8 @@ def main():
         # 0. 预检——全模块导入
         test_preflight()
         test_hash_worker_video_face_detection()
+        test_video_face_frame_plan()
+        test_video_face_multi_frame_extraction()
         test_face_detection_degrades_gracefully()
         test_face_cosine_metric()
         test_face_detector_thread_safety()
@@ -4974,6 +6154,8 @@ def main():
         test_db()
         test_migration_v4_to_v5_dedup_match_type()
         test_migration_v5_to_v6_match_level()
+        test_migration_v6_to_v7_columns()
+        test_migration_v7_to_v8_computed_version()
         test_db_integrity()
         result = test_scanner(temp_root)
         test_save_to_db(result, temp_root)
@@ -4997,6 +6179,13 @@ def main():
         test_dedup_face_is_auxiliary_only()
         test_dedup_related_level()
         test_dedup_related_persistence()
+        test_dedup_subset_containment_duplicate()
+        test_dedup_related_requires_file_evidence()
+        test_face_matching_semantics_and_support()
+        test_dedup_stale_marker()
+        test_face_rescan_pipeline_scope()
+        test_api_face_scan_status()
+        test_dedup_prune_stale_results()
         test_hash_worker_indexes_all_batches()
         test_save_dedup_results()
         test_dedup_results_pagination()
@@ -5038,8 +6227,11 @@ def main():
         test_expand_unit_preserves_other_state()
         test_file_unit_delete_db()
         test_api_file_delete_modes()
+        test_delete_offline_volume_refuses()
+        test_delete_permanent_mode_when_trash_unavailable()
         test_api_unit_delete_folder()
         test_dedup_level_api()
+        test_api_dedup_evidence_and_groups()
         test_dedup_run_index_first()
         test_dedup_web_js_no_underscore_method_calls()
         test_tag_assign_ui()

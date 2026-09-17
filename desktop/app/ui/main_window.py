@@ -156,6 +156,12 @@ class MainWindow(QMainWindow):
         reset_db_action.triggered.connect(self._on_reset_db)
         tools_menu.addAction(reset_db_action)
 
+        face_rescan_action = QAction("重扫视频人脸(&F)...", self)
+        face_rescan_action.setStatusTip(
+            "按定间隔多帧重新检测视频人脸（旧数据只取了中间一帧，线索不准）")
+        face_rescan_action.triggered.connect(self._on_rescan_faces)
+        tools_menu.addAction(face_rescan_action)
+
         tools_menu.addSeparator()
         settings_action = QAction("设置(&E)...", self)
         settings_action.setShortcut(QKeySequence("Ctrl+,"))
@@ -1024,9 +1030,12 @@ class MainWindow(QMainWindow):
         """查重完成。"""
         dup_count = len(session.duplicates_found)
         related_count = len(getattr(session, "related_found", ()) or ())
+        face_only_count = len(getattr(session, "face_only_found", ()) or ())
         status = f"查重完成: {session.total_units_compared} 个单元, 发现 {dup_count} 组重复"
         if related_count:
             status += f", {related_count} 对疑似相关"
+        if face_only_count:
+            status += f", {face_only_count} 对同演员线索"
         self._status_bar.set_status(status)
         self._status_bar.hide_progress()
 
@@ -1268,6 +1277,82 @@ class MainWindow(QMainWindow):
         from app.ui.dialogs.smb_share import SMBDialog
         dlg = SMBDialog(self._config, self)
         dlg.exec()
+
+    @Slot()
+    def _on_rescan_faces(self) -> None:
+        """重扫视频人脸（定间隔多帧）—— 让"同演员"线索基于全片而不是中间一帧。
+
+        只处理视频：图片的人脸检测本来就是全图检测。范围可选：
+        候选（上一轮出现过人脸线索的视频，快）或全部过期视频（慢但覆盖全）。
+        """
+        from app.utils.constants import FACE_SCAN_VERSION
+        from app.db.engine import DatabaseManager
+        from app.db import queries as q
+
+        try:
+            with DatabaseManager.session() as session:
+                pending = q.count_videos_needing_face_scan(session, FACE_SCAN_VERSION)
+                candidates = q.count_candidate_videos_for_face_rescan(
+                    session, FACE_SCAN_VERSION)
+        except Exception as e:
+            QMessageBox.warning(self, "重扫视频人脸", f"统计待扫视频失败：{e}")
+            return
+
+        if pending == 0:
+            QMessageBox.information(
+                self, "重扫视频人脸",
+                "所有视频都已按最新的多帧策略扫描过，无需重扫。")
+            return
+
+        # 单帧约 82ms（长边 1280），这里按 10 帧/视频粗略估算
+        est_min = max(1, round(pending * 10 * 0.082 / 60))
+        box = QMessageBox(self)
+        box.setWindowTitle("重扫视频人脸")
+        box.setText(
+            f"待重扫视频：{pending} 个（其中出现过人脸线索的候选 {candidates} 个）\n\n"
+            f"新策略：定间隔、均匀铺满全片、每个视频最多 "
+            f"{self._config.face_video_max_frames} 帧。\n"
+            f"旧数据只取了中间一帧，正脸不在中点就整片漏检、且结果不可复现。\n\n"
+            f"预计耗时：候选约 {max(1, round(candidates * 10 * 0.082 / 60))} 分钟，"
+            f"全部约 {est_min} 分钟。"
+        )
+        cand_btn = box.addButton("仅精查候选", QMessageBox.ButtonRole.AcceptRole)
+        all_btn = box.addButton("全部重扫", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cand_btn:
+            scope = "candidates"
+        elif clicked is all_btn:
+            scope = "all"
+        else:
+            return
+
+        self._cancel_all_workers()
+        self._status_bar.set_status("正在重扫视频人脸...")
+        self._status_bar.set_progress(0, 0)
+        self._status_bar.set_cancellable(True)
+
+        self._hash_worker = HashWorker(self._config, face_scan_scope=scope)
+        self._hash_worker.progress.connect(self._status_bar.set_progress)
+        self._hash_worker.finished.connect(
+            lambda n: self._on_face_rescan_finished(n, scope))
+        self._hash_worker.error_occurred.connect(
+            lambda e: self._status_bar.set_status(f"人脸重扫错误: {e}")
+        )
+        self._hash_worker.start()
+
+    @Slot(int, str)
+    def _on_face_rescan_finished(self, scanned: int, scope: str) -> None:
+        """人脸重扫完成：提示需要重新查重才会更新结论。"""
+        label = "候选视频" if scope == "candidates" else "全部视频"
+        self._status_bar.set_status(f"人脸重扫完成: {scanned} 个{label}")
+        self._status_bar.hide_progress()
+        QMessageBox.information(
+            self, "重扫视频人脸",
+            f"已按多帧策略重扫 {scanned} 个{label}。\n\n"
+            "请重新执行一次「查重」以更新同演员线索（旧结论仍基于旧向量）。"
+        )
 
     @Slot()
     def _on_reset_db(self) -> None:

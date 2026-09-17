@@ -3,10 +3,14 @@
 查重引擎 —— 资源单元级别的两两比对与文件级匹配。
 
 核心算法：
-1. 对每对资源单元，执行多策略匹配（人脸 → MD5 → 视频帧 → pHash → dHash）
+1. 对每对资源单元，执行多策略匹配（MD5 → 视频帧 → pHash → dHash，人脸另算线索）
 2. 一对一贪婪匹配（每个文件 A/B 最多各匹配一次，保证杰卡德指数 ≤ 1.0）
-3. 杰卡德指数 = |匹配对| / (|A| + |B| - |匹配对|)
-4. 杰卡德指数 ≥ 阈值 → 视为单元级重复
+3. 杰卡德指数 = |匹配对| / (|A| + |B| - |匹配对|)；包含度 = |匹配对| / min(|A|, |B|)
+4. 分级（见 compare_units）：
+   - 杰卡德 ≥ 阈值 → duplicate（整单元重复）
+   - 包含度 ≥ 0.85 且有强证据 → duplicate（子集重复：一边几乎全在另一边里）
+   - 文件匹配数达标 → related（部分重叠）
+   - 只有人脸线索 → related + has_file_evidence=False（同演员的不同作品）
 """
 
 import logging
@@ -19,7 +23,11 @@ import numpy as np
 
 from app.registry.hash_registry import HashAlgorithmRegistry, create_default_registry
 from app.core.hash_engine import FileHashes
-from app.utils.constants import FACE_SIMILARITY_THRESHOLD, MatchLevel, MatchType
+from app.utils.constants import (
+    CONTAINMENT_MATCH_THRESHOLD, CONTAINMENT_MIN_JACCARD, CONTAINMENT_MIN_MATCHES,
+    CONTAINMENT_STRONG_MATCH_TYPES, FACE_SIMILARITY_THRESHOLD, RELATED_MIN_OVERLAP,
+    MatchLevel, MatchType,
+)
 from app.utils.hash_helpers import hamming_distance
 
 logger = logging.getLogger(__name__)
@@ -44,6 +52,42 @@ VIDEO_FRAME_MIN_FRAMES = 3
 # 不可变结果类型
 # ============================================================
 
+def normalize_face_entries(vectors) -> list[tuple[Optional[int], tuple]]:
+    """把人脸向量统一成 [(source_ms, vector), ...]。
+
+    支持两种输入格式（历史原因）：
+    - 裸向量元组 `(0.1, 0.2, ...)`（图片、以及早期测试直接构造的记录）→ source_ms=None
+    - `(source_ms, vector)` 对（视频多帧，来自 dedup_service._load_face_vectors）
+
+    返回的 source_ms 用来统计"吻合帧数"：None 表示"只有一帧"（图片或旧数据），
+    同一文件的多个 None 会被视作同一帧。
+    """
+    out: list[tuple[Optional[int], tuple]] = []
+    if not vectors:
+        return out
+    for item in vectors:
+        if (isinstance(item, tuple) and len(item) == 2
+                and isinstance(item[1], (tuple, list, np.ndarray))):
+            out.append((item[0], tuple(float(v) for v in item[1])))
+        else:
+            out.append((None, tuple(float(v) for v in item)))
+    return out
+
+
+def _face_matrix(vectors: list[tuple]) -> np.ndarray:
+    """(n, 128) 行归一化余弦矩阵；零范数行置 0（结果得 0 分，不会过阈值）。
+
+    归一化后再做点积就是余弦相似度，避免每对都重复求模长。
+    """
+    if not vectors:
+        return np.zeros((0, 128), dtype=np.float32)
+    mat = np.asarray(vectors, dtype=np.float32)
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mat = np.where(norms > 0, mat / np.maximum(norms, 1e-12), 0.0)
+    return mat.astype(np.float32)
+
+
 @dataclass(frozen=True)
 class FileMatch:
     """一对匹配文件的详细信息。"""
@@ -64,6 +108,13 @@ class FileMatch:
     score: float
     """归一化相似度分数 [0.0, 1.0]（1 = 完全相同）。"""
 
+    frame_support: int = 1
+    """支持这条匹配的帧数（人脸线索专用；其它类型恒为 1）。
+
+    视频人脸改为定间隔多帧后，同一文件对可能在多个时间点上都判为"同一张脸"。
+    2 帧以上吻合远比单帧偶然相似可信 —— 这是"多帧抽帧"带来的额外精度信号。
+    """
+
 
 @dataclass(frozen=True)
 class UnitComparisonResult:
@@ -78,6 +129,14 @@ class UnitComparisonResult:
     jaccard_similarity: float = 0.0
     """杰卡德相似度 [0.0, 1.0]。"""
 
+    overlap_ratio: float = 0.0
+    """包含度 = 匹配数 / min(|A|, |B|)，[0.0, 1.0]。
+
+    杰卡德回答"两个目录是不是几乎一样"，包含度回答"其中一个是不是几乎全在另一个里"。
+    真重复常常只满足后者（实测：29 个文件完全相同、另一侧多 12 个文件 → 杰卡德 0.644、
+    包含度 0.879），只认杰卡德会把它降级成"疑似相关"。
+    """
+
     file_matches: tuple = ()
     """匹配到的文件对列表（不可变元组）。"""
 
@@ -91,6 +150,13 @@ class UnitComparisonResult:
 
     level: str = MatchLevel.DUPLICATE.value
     """命中等级：duplicate（建议处置）/ related（仅提醒，见 MatchLevel）。"""
+
+    has_file_evidence: bool = True
+    """证据里是否存在**文件级**匹配（人脸线索不算）。
+
+    False 的那些（只有人脸线索、杰卡德必为 0）在库中落 evidence_kind='face'，
+    客户端据此把它归入"同演员"而不是"疑似相关"（见 EvidenceKind）。
+    """
 
     @property
     def evidence_count(self) -> int:
@@ -129,7 +195,14 @@ class DedupSession:
     related_found: tuple = ()
     """疑似相关但未达重复阈值的单元对（仅提醒，不建议处置）。
 
-    包括同演员、同场景、部分文件重叠等情形 —— 用户希望知情但不打算删除。
+    包括同场景、部分文件重叠等**有文件级证据**的情形 —— 人脸线索不在其中。
+    """
+
+    face_only_found: tuple = ()
+    """只有人脸线索、零文件匹配的单元对（同一演员的不同作品）。
+
+    与 related_found 同属 related 等级，但证据来源不同（evidence_kind='face'），
+    客户端把它们单独归入"同演员"，避免 0% 相似的行淹没真正的重叠。
     """
 
 
@@ -153,6 +226,7 @@ class DedupEngine:
         registry: Optional[HashAlgorithmRegistry] = None,
         file_count_ratio_limit: float = 0.05,
         related_min_matches: int = 2,
+        related_min_overlap: float = RELATED_MIN_OVERLAP,
     ) -> None:
         """初始化查重引擎。
 
@@ -165,8 +239,13 @@ class DedupEngine:
             registry: 哈希算法注册器。
             file_count_ratio_limit: 单元文件数比例下限（默认 0.05 = 1/20，
                 即两单元文件数相差 20 倍以上时杰卡德指数不可能达标，直接跳过）。
-            related_min_matches: 未达重复阈值时，"疑似相关"所需的最少证据数
-                （计数匹配 + 人脸线索）。
+            related_min_matches: 未达重复阈值时，"疑似相关"所需的**文件匹配**
+                数下限（人脸线索不计入 —— 人脸回答的是"是不是同一个人"，
+                不是"是不是同一份文件"，见 face_hints 说明）。
+            related_min_overlap: "疑似相关"的匹配比例下限，实际门槛取
+                max(related_min_matches, ceil(related_min_overlap × min(|A|,|B|)))。
+                绝对条数在大单元里没有意义：2000 个文件的单元里凑巧相近的 2 个
+                文件就能凑出一对"0% 相似"，正是用户抱怨的那批噪音。
         """
         self._jaccard_threshold = jaccard_threshold
         self._phash_threshold = phash_hamming_threshold
@@ -176,6 +255,7 @@ class DedupEngine:
         self._registry = registry or create_default_registry()
         self._file_count_ratio_limit = file_count_ratio_limit
         self._related_min_matches = max(1, related_min_matches)
+        self._related_min_overlap = max(0.0, related_min_overlap)
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -251,9 +331,12 @@ class DedupEngine:
             face_hints = tuple(self._match_by_face(
                 files_a, files_b, set(), set()))
 
-        # 计算杰卡德指数
+        # 计算杰卡德指数与包含度
         n_matches = len(matches)
-        jaccard = n_matches / (n_a + n_b - n_matches) if (n_a + n_b - n_matches) > 0 else 0.0
+        union = n_a + n_b - n_matches
+        jaccard = n_matches / union if union > 0 else 0.0
+        min_files = max(1, min(n_a, n_b))
+        overlap = n_matches / min_files
 
         # 统计各类匹配数量
         match_counts: dict[str, int] = {}
@@ -266,13 +349,16 @@ class DedupEngine:
             unit_a_name=unit_a_name,
             unit_b_name=unit_b_name,
             jaccard_similarity=round(jaccard, 4),
+            overlap_ratio=round(overlap, 4),
             file_matches=tuple(matches),
             face_hints=face_hints,
+            has_file_evidence=n_matches > 0,
             match_counts=match_counts,
             total_files_a=n_a,
             total_files_b=n_b,
         )
 
+        # ① 整单元重复：两个目录几乎一样（含多副本，杰卡德仍接近 1）
         if jaccard >= self._jaccard_threshold:
             logger.info(
                 f"查重命中: [{unit_a_name}] vs [{unit_b_name}] "
@@ -280,21 +366,60 @@ class DedupEngine:
             )
             return result_dup
 
-        # 未达"重复"阈值，但证据足够 → 记为一档"疑似相关"（仅提醒）。
-        # 典型来源：同演员的不同片子（人脸线索）、同场景不同剪辑（帧匹配）。
-        if result_dup.evidence_count >= self._related_min_matches:
+        # ② 子集重复：一边几乎完全包含在另一边里（杰卡德被"多出来的文件"压低）
+        if self._is_containment_duplicate(n_matches, overlap, jaccard, matches):
+            logger.info(
+                f"子集重复: [{unit_a_name}] vs [{unit_b_name}] "
+                f"杰卡德={jaccard:.3f} 包含度={overlap:.3f} 匹配={n_matches}"
+            )
+            return result_dup
+
+        # ③ 部分重叠：有真实文件证据（且比例不至于低到只是巧合）→ 疑似相关
+        required = self._required_related_matches(min_files)
+        if n_matches >= required:
             logger.info(
                 f"疑似相关: [{unit_a_name}] vs [{unit_b_name}] "
-                f"杰卡德={jaccard:.3f} 证据={result_dup.evidence_count}"
-                f"（匹配{n_matches} + 人脸{len(face_hints)}）"
+                f"杰卡德={jaccard:.3f} 包含度={overlap:.3f} 文件匹配={n_matches}"
+                f"（门槛 {required}）"
+            )
+            return replace(result_dup, level=MatchLevel.RELATED.value)
+
+        # ④ 纯人脸线索：同演员的不同作品。**不计入查重结论**，单独归一类提醒。
+        if n_matches == 0 and len(face_hints) >= self._related_min_matches:
+            logger.info(
+                f"同演员线索: [{unit_a_name}] vs [{unit_b_name}] "
+                f"人脸线索={len(face_hints)}（无文件匹配）"
             )
             return replace(result_dup, level=MatchLevel.RELATED.value)
 
         logger.debug(
             f"未达阈值: [{unit_a_name}] vs [{unit_b_name}] "
-            f"杰卡德={jaccard:.3f} 阈值={self._jaccard_threshold}"
+            f"杰卡德={jaccard:.3f} 包含度={overlap:.3f} 匹配={n_matches}"
+            f" 阈值={self._jaccard_threshold}"
         )
         return None
+
+    def _is_containment_duplicate(self, n_matches: int, overlap: float,
+                                  jaccard: float, matches: Sequence) -> bool:
+        """包含度达到"子集重复"标准（见 constants.CONTAINMENT_* 的三个门槛）。
+
+        三个附加条件缺一不可：
+        - 最少匹配数：小目录只有 2~3 个文件时包含度天然是 1.0；
+        - 杰卡德下限：挡住"9 个文件的目录被 2000 个文件的目录完全包含"；
+        - 强证据：纯 pHash 近似（截图、相似构图）不该给出"建议保留一份"。
+        """
+        if n_matches < CONTAINMENT_MIN_MATCHES:
+            return False
+        if overlap < CONTAINMENT_MATCH_THRESHOLD:
+            return False
+        if jaccard < CONTAINMENT_MIN_JACCARD:
+            return False
+        return any(m.match_type in CONTAINMENT_STRONG_MATCH_TYPES for m in matches)
+
+    def _required_related_matches(self, min_files: int) -> int:
+        """疑似相关所需的最少文件匹配数（绝对下限与比例下限取大）。"""
+        return max(self._related_min_matches,
+                   math.ceil(self._related_min_overlap * min_files))
 
     def run_dedup(
         self,
@@ -322,6 +447,7 @@ class DedupEngine:
         comparisons: list[UnitComparisonResult] = []
         duplicates: list[UnitComparisonResult] = []
         related: list[UnitComparisonResult] = []
+        face_only: list[UnitComparisonResult] = []
 
         # 计算总比对对数
         total_pairs = n_units * (n_units - 1) // 2
@@ -354,7 +480,8 @@ class DedupEngine:
                         if result.level == MatchLevel.DUPLICATE.value:
                             duplicates.append(result)
                         elif result.level == MatchLevel.RELATED.value:
-                            related.append(result)
+                            # 按证据来源分流：有文件匹配 vs 只有人脸线索
+                            (related if result.has_file_evidence else face_only).append(result)
                 except Exception as e:
                     logger.error(f"比对失败: 单元{uid_a} vs 单元{uid_b} - {e}")
 
@@ -370,13 +497,14 @@ class DedupEngine:
             comparisons=tuple(comparisons),
             duplicates_found=tuple(duplicates),
             related_found=tuple(related),
+            face_only_found=tuple(face_only),
             total_units_compared=n_units,
             elapsed_seconds=round(elapsed, 2),
         )
         logger.info(
             f"查重完成: {n_units} 个单元，{completed_pairs} 对，"
-            f"发现 {len(duplicates)} 组重复、{len(related)} 对疑似相关，"
-            f"耗时 {elapsed:.1f}s"
+            f"发现 {len(duplicates)} 组重复、{len(related)} 对疑似相关、"
+            f"{len(face_only)} 对同演员线索，耗时 {elapsed:.1f}s"
         )
         return session
 
@@ -743,10 +871,18 @@ class DedupEngine:
 
     def _match_by_face(self, files_a: list[dict], files_b: list[dict],
                        matched_a: set[int], matched_b: set[int]) -> list[FileMatch]:
-        """人脸特征向量匹配 —— 128 维欧氏距离比对。
+        """人脸特征向量匹配（余弦相似度，文件级一对一贪婪）。
 
-        对文件 A 中的每张人脸，在文件 B 中查找最近的人脸。
-        距离 ≤ 阈值视为同一人。文件级一对一（贪婪策略）。
+        与旧实现的区别：
+        - 用 numpy 余弦矩阵一次算完一个文件对。视频改成定间隔多帧后每个文件
+          可能有 10 条向量，原来的 Python 双层循环会变成 10×10 次纯 Python
+          点积向量，实测成为查重的主要耗时来源；
+        - 额外产出 frame_support（吻合帧数）：同一文件对在 A 侧多少个采样帧里
+          都能找到 B 侧同一张脸。≥2 帧吻合远比单帧偶然相似可信，是"多帧抽帧"
+          带来的精度信号，存进 dedup_file_matches.frame_support。
+
+        匹配语义保持不变（既有测试锁定）：按 A 文件顺序、全局取最大相似度、
+        人脸级一对一消费、≥ 阈值才算命中。
         """
         if not self._face_enabled:
             return []
@@ -758,50 +894,58 @@ class DedupEngine:
         for idx_a, fa in enumerate(files_a):
             if idx_a in matched_a:
                 continue
-            vectors_a = fa.get("face_vectors")
-            if not vectors_a:
+            entries_a = normalize_face_entries(fa.get("face_vectors"))
+            if not entries_a:
                 continue
+            rows_a = _face_matrix([vec for _, vec in entries_a])
 
-            best_overall: Optional[FileMatch] = None
-            best_b_idx: Optional[int] = None
-            best_overall_sim = self._face_threshold - 1.0
-            # 追踪最佳匹配对应的 B 人脸 key，最终匹配确认后才标记为已消费
-            best_face_keys: set[tuple[int, int]] = set()
+            best: Optional[dict] = None
+            best_score = self._face_threshold - 1.0
 
             for idx_b, fb in enumerate(files_b):
                 if idx_b in matched_b:
                     continue
-                vectors_b = fb.get("face_vectors")
-                if not vectors_b:
+                entries_b = normalize_face_entries(fb.get("face_vectors"))
+                free_b = [
+                    (fi, sm, vec) for fi, (sm, vec) in enumerate(entries_b)
+                    if (fb["id"], fi) not in matched_faces_b
+                ]
+                if not free_b:
                     continue
 
-                # 对 A 中的每张人脸找 B 中的最佳匹配
-                for fi_a, vec_a in enumerate(vectors_a):
-                    for fi_b, vec_b in enumerate(vectors_b):
-                        face_key = (fb["id"], fi_b)
-                        if face_key in matched_faces_b:
-                            continue
+                rows_b = _face_matrix([vec for _, _, vec in free_b])
+                sims = rows_a @ rows_b.T          # (n_a, n_b) 余弦矩阵
+                flat = int(np.argmax(sims))
+                ia, ib = divmod(flat, sims.shape[1])
+                score = float(sims[ia, ib])
+                if score > best_score:
+                    best_score = score
+                    best = {
+                        "file": fb, "b_idx": idx_b, "sims": sims,
+                        "face_key": (fb["id"], free_b[ib][0]),
+                    }
 
-                        sim = self._cosine_similarity(vec_a, vec_b)
-                        if sim > best_overall_sim:
-                            best_overall_sim = sim
-                            best_overall = FileMatch(
-                                file_a_id=fa["id"],
-                                file_b_id=fb["id"],
-                                file_a_path=fa.get("path", ""),
-                                file_b_path=fb.get("path", ""),
-                                match_type=MatchType.FACE.value,
-                                score=round(max(0.0, min(1.0, sim)), 4),
-                            )
-                            best_b_idx = idx_b
-                            best_face_keys = {face_key}
-
-            if (best_overall is not None and best_b_idx is not None
-                    and best_overall_sim >= self._face_threshold):
-                matches.append(best_overall)
-                matched_faces_b.update(best_face_keys)
+            if best is not None and best_score >= self._face_threshold:
+                fb = best["file"]
+                sims = best["sims"]
+                # 吻合帧数：A 侧有多少个采样帧在这张 B 文件里找到了 ≥阈值 的脸
+                row_max = sims.max(axis=1)
+                support_frames = {
+                    entries_a[i][0] for i in range(len(entries_a))
+                    if float(row_max[i]) >= self._face_threshold
+                }
+                matches.append(FileMatch(
+                    file_a_id=fa["id"],
+                    file_b_id=fb["id"],
+                    file_a_path=fa.get("path", ""),
+                    file_b_path=fb.get("path", ""),
+                    match_type=MatchType.FACE.value,
+                    score=round(max(0.0, min(1.0, best_score)), 4),
+                    frame_support=max(1, len(support_frames)),
+                ))
+                matched_faces_b.add(best["face_key"])
                 matched_a.add(idx_a)
-                matched_b.add(best_b_idx)
+                matched_b.add(best["b_idx"])
 
         return matches
 
@@ -810,7 +954,8 @@ class DedupEngine:
         """计算两个人脸特征向量的余弦相似度（SFace 官方度量）。
 
         旧实现是 OpenFace nn4 + 欧氏距离；换成 SFace 后必须改用余弦相似度，
-        阈值也随之变为 FACE_SIMILARITY_THRESHOLD(0.363)。维度不一致返回 -1。
+        阈值也随之变为 FACE_SIMILARITY_THRESHOLD。维度不一致返回 -1。
+        批量比对走 _face_matrix（numpy），本方法保留给单对场景与测试使用。
         """
         import math
         if not vec_a or len(vec_a) != len(vec_b):

@@ -20,7 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 from app.utils.constants import (
-    MatchLevel, MatchType, MediaType, MessageType, ResolutionStatus,
+    EvidenceKind, MatchLevel, MatchType, MediaType, MessageType, ResolutionStatus,
     ScanStatus, UnitStatus, WhitelistMatchType,
 )
 
@@ -189,6 +189,15 @@ class MediaFile(Base):
     resource_unit_id = Column(Integer, ForeignKey("resource_units.id", ondelete="CASCADE"), nullable=False)
     """所属资源单元 ID。"""
 
+    face_scan_version = Column(Integer, nullable=False, default=0)
+    """人脸抽帧策略版本（见 constants.FACE_SCAN_VERSION）。
+
+    0 = 旧策略（视频只取中间 1 帧）；1 = 定间隔多帧。
+    "没有 face_vectors 行"既可能是没检出人脸，也可能根本没扫过 ——
+    单看向量表无法区分，因此必须把这个版本号落在文件行上，
+    补扫任务才能精确挑出"还没按新策略扫过"的视频。
+    """
+
     indexed_at = Column(DateTime, nullable=False, default=datetime.now)
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
@@ -212,6 +221,11 @@ class FaceVector(Base):
         Index("ix_face_vectors_file", "file_id"),
     )
 
+    # 说明：同一文件可有多行（视频多帧、图片多张脸），face_index 在每个文件内递增。
+    # 视频帧对应的行用 source_ms 记录帧时间位置：既是"这条向量从哪来"的可追溯信息，
+    # 也是"同一文件对在多少帧里都吻合"（frame_support）的判定依据。
+    # 图片只有一"帧"，source_ms 为 NULL。
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     """自增主键。"""
 
@@ -229,6 +243,13 @@ class FaceVector(Base):
     bbox_w = Column(Integer, nullable=True)
     bbox_h = Column(Integer, nullable=True)
     """人脸边界框坐标（像素）。"""
+
+    source_ms = Column(Integer, nullable=True)
+    """该向量取自视频的第几毫秒处；图片为 NULL。
+
+    旧数据（视频只取中间 1 帧时写入的行）也是 NULL，无法区分 ——
+    靠 media_files.face_scan_version 判断是否需要按新策略重扫。
+    """
 
     created_at = Column(DateTime, nullable=False, default=datetime.now)
 
@@ -290,6 +311,10 @@ class DedupResult(Base):
             f"match_level IN ({_enum_in(MatchLevel)})",
             name="ck_dedup_results_level",
         ),
+        CheckConstraint(
+            f"evidence_kind IN ({_enum_in(EvidenceKind)})",
+            name="ck_dedup_results_evidence_kind",
+        ),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -305,7 +330,12 @@ class DedupResult(Base):
     """杰卡德指数 [0.0, 1.0]。"""
 
     match_count = Column(Integer, nullable=False, default=0)
-    """匹配到的文件对数。"""
+    """计入判定的文件对数（**不含**人脸线索）。
+
+    历史遗留：旧实现存的是 evidence_count（文件匹配 + 人脸线索），
+    于是卡片写"46 处线索"、详情写"匹配 46 个文件"，而实际入库的文件对只有 38 条。
+    人脸线索的条数请按 dedup_file_matches 里 match_type='face' 的行数单独统计。
+    """
 
     total_files_a = Column(Integer, nullable=False, default=0)
     total_files_b = Column(Integer, nullable=False, default=0)
@@ -316,6 +346,22 @@ class DedupResult(Base):
 
     match_level = Column(String(16), nullable=False, default=MatchLevel.DUPLICATE.value)
     """命中等级：duplicate（建议处置）/ related（仅提醒）。"""
+
+    evidence_kind = Column(String(8), nullable=False, default=EvidenceKind.FILE.value)
+    """证据来源：file（有文件级匹配）/ face（只有人脸线索）。
+
+    "疑似相关"这一档里混着两类完全不同的东西：真的有文件重叠（值得看），
+    以及只是同一演员（0% 重叠，纯噪音）。判重时人脸不计入杰卡德，
+    因此必须把"证据里有没有文件匹配"显式落库，客户端才能把它们分开展示。
+    """
+
+    computed_version = Column(Integer, nullable=False, default=0)
+    """算出这条结果的算法版本（见 DEDUP_RESULT_VERSION）。
+
+    0 = 旧库遗留（v7 迁移前）。分级规则/证据口径一变，旧行不会自己消失，
+    界面必须能提示"这是旧结论、需要重新查重"，否则用户会拿旧数字当结论
+    （实测踩到：旧 match_count=46 配 33 个文件的单元，界面显示"46/33 个文件重叠"）。
+    """
 
     is_resolved = Column(Boolean, nullable=False, default=False)
     """是否已处理。"""
@@ -367,6 +413,13 @@ class DedupFileMatch(Base):
 
     match_type = Column(String(8), nullable=False)
     """匹配类型：md5 / phash / dhash / face / video。"""
+
+    frame_support = Column(Integer, nullable=False, default=1)
+    """支持这条匹配的帧数（人脸线索专用，其它类型恒为 1）。
+
+    视频人脸改为定间隔多帧后，同一文件对会在多个时间点上都被判为"同一张脸"：
+    ≥2 帧吻合远比单帧偶然相似可信。图片只有一"帧"，恒为 1。
+    """
 
     created_at = Column(DateTime, nullable=False, default=datetime.now)
 

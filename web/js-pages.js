@@ -1,4 +1,49 @@
 /* 页面组件（ConnectPage … SettingsPage）与滚动辅助 —— 依赖 js-core.js，先于 js-app.js 加载 */
+
+/* ========== 删除失败的补救路径 ==========
+   回收站不可用（网络盘 / exFAT 等没有 $RECYCLE.BIN 的卷）时 send2trash 必然失败，
+   服务端只回 409 —— 用户报的"web 端删不了"就是卡在这里：
+   客户端原先只有"移至回收站"一条路，于是永远删不掉。
+   这里给出两条明确出路：永久删除（不可恢复）或仅从媒体库移除。
+   **绝不静默降级成永久删除**，必须由用户在弹层里主动选。 */
+function deleteErrorIsOffline(reason) {
+  return String(reason || '').indexOf('未连接') >= 0;
+}
+
+/** 删除失败时弹出补救选择；retry(ids, mode) 由调用方给出对应端点的调用方式。 */
+function showDeleteFallback(root, ids, reason, retry, onSuccess) {
+  if (!ids || !ids.length) return;
+  if (deleteErrorIsOffline(reason)) {
+    alert('删除失败：' + reason + '\n\n该磁盘当前未连接，请先连接磁盘后重试。');
+    return;
+  }
+  const what = ids.length === 1 ? '该文件' : '选中的 ' + ids.length + ' 个';
+  // 标题里已经写了"回收站不可用"，去掉原因自带的前缀避免"回收站不可用：无法移至回收站：…"
+  const shortReason = String(reason || '')
+    .replace(/^无法(?:移至回收站|永久删除)[:：]?\s*/, '');
+  root.showSheet('回收站不可用：' + shortReason, [
+    { label: '永久删除' + what + '（不可恢复）', icon: 'mdi-delete-forever',
+      danger: true, action: () => runDeleteWithMode(root, ids, 'delete', retry, onSuccess) },
+    { label: '仅从媒体库移除（磁盘文件保留）', icon: 'mdi-playlist-remove',
+      action: () => runDeleteWithMode(root, ids, 'record', retry, onSuccess) },
+  ]);
+}
+
+/** 用指定 mode 重试删除，并把结果交回调用方收敛列表状态。 */
+async function runDeleteWithMode(root, ids, mode, retry, onSuccess) {
+  try {
+    const res = await retry(ids, mode);
+    const done = (res && res.deleted) ? res.deleted : ids;
+    if (onSuccess) onSuccess(done);
+    if (res && res.failed && res.failed.length) {
+      alert('仍有 ' + res.failed.length + ' 个未删除：\n'
+        + res.failed.map(x => x.reason).join('\n'));
+    }
+  } catch (e) {
+    alert('删除失败: ' + e.message);
+  }
+}
+
 /* ========== Connect Page ========== */
 const ConnectPage = {
   template: `
@@ -236,12 +281,20 @@ const UnitsPage = {
       if (unit.file_count > 0) msg += '\n\n该文件夹包含 ' + unit.file_count + ' 个文件。';
       msg += '\n（文件进入系统回收站，可手动恢复）';
       if (!confirm(msg)) return;
-      try {
-        await api(this.serverUrl, '/api/units/' + unit.id, { method: 'DELETE' });
+      const drop = () => {
         for (const g of this.roots) g.units = g.units.filter(x => x.id !== unit.id);
         // 组内清空后整组消失，避免留下一个空标题
         this.roots = this.roots.filter(g => g.units.length > 0);
-      } catch (e) { alert('删除失败: ' + e.message); }
+      };
+      try {
+        await api(this.serverUrl, '/api/units/' + unit.id, { method: 'DELETE' });
+        drop();
+      } catch (e) {
+        showDeleteFallback(this.$root, [unit.id], e.message,
+          (ids, mode) => api(this.serverUrl,
+            '/api/units/' + ids[0] + '?mode=' + mode, { method: 'DELETE' }),
+          drop);
+      }
     },
 
     setSort(field) {
@@ -506,9 +559,13 @@ const UnitFilesPage = {
       if (!confirm('确定将「' + file.filename + '」移至回收站？\n（文件进入系统回收站，可手动恢复）')) return;
       try {
         await api(this.serverUrl, '/api/files/' + file.id, { method: 'DELETE' });
-        this.files = this.files.filter(f => f.id !== file.id);
-        this.selectedIds.delete(file.id);
-      } catch (e) { alert('删除失败: ' + e.message); }
+        this.afterDelete([file.id]);
+      } catch (e) {
+        showDeleteFallback(this.$root, [file.id], e.message,
+          (ids, mode) => api(this.serverUrl,
+            '/api/files/' + ids[0] + '?mode=' + mode, { method: 'DELETE' }),
+          (done) => this.afterDelete(done));
+      }
     },
 
     enterSelectMode(fileId) {
@@ -531,7 +588,25 @@ const UnitFilesPage = {
       else this.sortedFiles.forEach(f => this.selectedIds.add(f.id));
     },
 
-    /** 批量删除选中文件（服务端逐条返回成功/失败，部分失败也保留成功项的结果）。 */
+    /** 删除成功后的本地状态收敛：列表、勾选、选择模式一起更新。 */
+    afterDelete(ids) {
+      const done = new Set(ids || []);
+      this.files = this.files.filter(f => !done.has(f.id));
+      done.forEach(id => this.selectedIds.delete(id));
+      if (this.selectedIds.size === 0) this.selectMode = false;
+    },
+
+    /** 批量删除请求（mode 由调用方决定：trash / delete / record）。 */
+    sendBatchDelete(ids, mode) {
+      return api(this.serverUrl, '/api/files/batch-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_ids: ids, mode: mode }),
+      });
+    },
+
+    /** 批量删除选中文件（服务端逐条返回成功/失败，成功项立即从列表移除）。
+     *  回收站不可用时不是"报个错就完"，而是给出永久删除 / 仅移除记录的出路。 */
     async deleteSelected() {
       const ids = Array.from(this.selectedIds);
       if (!ids.length) return;
@@ -539,20 +614,19 @@ const UnitFilesPage = {
       if (!confirm('确定将' + label + '移至回收站？\n（文件进入系统回收站，可手动恢复）')) return;
       this.deleting = true;
       try {
-        const res = await api(this.serverUrl, '/api/files/batch-delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ file_ids: ids, mode: 'trash' }),
-        });
-        const done = new Set(res.deleted || []);
-        this.files = this.files.filter(f => !done.has(f.id));
-        this.selectedIds.clear();
-        this.selectMode = false;
-        if (res.failed && res.failed.length) {
-          alert('部分文件删除失败：\n' + res.failed.map(x => '#' + x.file_id + ': ' + x.reason).join('\n'));
+        const res = await this.sendBatchDelete(ids, 'trash');
+        this.afterDelete(res.deleted || []);
+        const failed = res.failed || [];
+        if (failed.length) {
+          showDeleteFallback(
+            this.$root, failed.map(x => x.file_id), failed[0].reason,
+            (fids, mode) => this.sendBatchDelete(fids, mode),
+            (done) => this.afterDelete(done));
         }
       } catch (e) {
-        alert('删除失败: ' + e.message);
+        showDeleteFallback(this.$root, ids, e.message,
+          (fids, mode) => this.sendBatchDelete(fids, mode),
+          (done) => this.afterDelete(done));
       } finally {
         this.deleting = false;
       }
@@ -1517,6 +1591,40 @@ const DedupPage = {
           {{ running ? '查重中…' : '开始查重' }}
         </button>
       </div>
+
+      <!-- 运行参数：人脸阈值可临时覆盖，精查让"同演员"线索基于全片而不是中间一帧 -->
+      <div class="dedup-opts">
+        <label class="dedup-opt">
+          <span>人脸线索阈值</span>
+          <select v-model.number="faceThreshold" :disabled="running">
+            <option :value="0.363">0.363 官方（线索最多）</option>
+            <option :value="0.45">0.45 推荐</option>
+            <option :value="0.5">0.50 更严</option>
+            <option :value="0.6">0.60 最严</option>
+          </select>
+        </label>
+        <label class="dedup-opt dedup-opt-check">
+          <input type="checkbox" v-model="refineFaces" :disabled="running">
+          <span>精查疑似同演员视频（多帧重扫，约 2~3 分钟）</span>
+        </label>
+      </div>
+
+      <!-- 旧策略人脸数据：提示补扫（改了抽帧策略后必须重扫才准） -->
+      <div v-if="faceStatus && faceStatus.videos_pending > 0" class="face-scan-hint">
+        <span class="mdi mdi-account-search-outline"></span>
+        <div class="face-scan-text">
+          还有 <b>{{ faceStatus.videos_pending }}</b> 个视频的人脸是旧策略扫的
+          （只取中间一帧，正脸不在中点就漏检）。
+        </div>
+        <button class="btn btn-secondary face-scan-btn" :disabled="running || scanning"
+          @click="startFaceScan('all')">
+          {{ scanning ? '补扫中…' : '补扫全部（约 ' + estMinutes(faceStatus.videos_pending) + ' 分钟）' }}
+        </button>
+      </div>
+      <div v-if="scanProgress" class="run-progress">
+        <div class="run-progress-bar" :style="{ width: scanPercent + '%' }"></div>
+      </div>
+
       <div v-if="running && runProgress" class="run-progress">
         <div class="run-progress-bar" :style="{ width: runPercent + '%' }"></div>
       </div>
@@ -1528,63 +1636,117 @@ const DedupPage = {
         </button>
       </div>
 
+      <!-- 旧规则的结论：升级后还没重算时把新旧数字混在一起会误导（实测踩到
+           旧 match_count=46 配 33 个文件的单元，界面显示"46/33 个文件重叠"） -->
+      <div v-if="counts.stale > 0" class="stale-hint">
+        <span class="mdi mdi-alert-outline"></span>
+        <div class="stale-text">
+          有 <b>{{ counts.stale }}</b> 条结果是用<b>旧规则</b>算出来的
+          （分级口径已更新），下面的数字不可当真。
+        </div>
+        <button class="btn btn-primary stale-btn" :disabled="running" @click="startDedup">
+          {{ running ? '重算中…' : '立即重算' }}
+        </button>
+      </div>
+
       <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
-      <template v-else-if="results.length === 0">
+      <template v-else-if="groups.length === 0">
         <div class="empty-state">
-          <span class="mdi" :class="level === 'related' ? 'mdi-account-search-outline' : 'mdi-check-circle-outline'"
-            :style="{ color: level === 'related' ? 'var(--amber)' : 'var(--green)' }"></span>
-          <p>{{ level === 'related' ? '暂无疑似相关单元' : '暂无查重结果' }}</p>
+          <span class="mdi" :class="level === 'duplicate' ? 'mdi-check-circle-outline' : emptyIcon"
+            :style="{ color: level === 'duplicate' ? 'var(--green)' : 'var(--amber)' }"></span>
+          <p>{{ emptyText }}</p>
         </div>
       </template>
       <template v-else>
-        <div v-for="r in results" :key="r.id" class="card"
-          :class="{ 'card-related': r.match_level === 'related' }"
-          @click="$router.push('/dedup/' + r.id)">
-          <div class="card-row">
-            <div class="card-icon" :class="r.match_level === 'related' ? 'amber' : scoreColor(r.similarity_score)">
-              <span class="mdi" :class="r.match_level === 'related' ? 'mdi-account-multiple-outline' : 'mdi-compare-arrows'"></span>
+        <!-- 二级分组：按左侧单元折叠（"左边相同、右边不同"成百条线索 → 几十个文件夹） -->
+        <div v-for="g in groups" :key="g.anchor_unit_id" class="dedup-group">
+          <div class="dedup-group-head" @click="toggleGroup(g)">
+            <img v-if="g.anchor_cover_file_id" class="group-cover"
+              :src="coverUrl(g.anchor_cover_file_id)" loading="lazy"
+              @error="markCoverFailed(g.anchor_cover_file_id)">
+            <div v-else class="group-cover group-cover-empty">
+              <span class="mdi mdi-folder-outline"></span>
             </div>
-            <div class="card-body">
-              <div class="card-title">{{ r.unit_a_name }} ↔ {{ r.unit_b_name }}</div>
-              <div class="card-sub">
-                <span class="lvl-badge" :class="r.match_level">{{ levelLabel(r.match_level) }}</span>
-                <span v-if="r.match_level === 'related'">{{ r.match_count }} 处线索 · 不建议删除</span>
-                <span v-else>匹配 {{ r.match_count }} 个文件 · {{ typeLabels(r.match_types) }}</span>
+            <div class="group-body">
+              <div class="group-name">{{ g.anchor_unit_name }}</div>
+              <div class="group-sub">
+                {{ g.pair_count }} 对<span v-if="g.match_types"> · {{ typeLabels(g.match_types) }}</span><span
+                  v-if="g.stale" class="group-stale"> · 含旧规则结果</span>
               </div>
             </div>
-            <div class="card-meta">
-              <div class="count" :style="{color: r.match_level === 'related' ? 'var(--amber)' : scoreHex(r.similarity_score)}">
-                {{ (r.similarity_score * 100).toFixed(0) }}%
+            <span class="mdi group-chevron"
+              :class="expanded[g.anchor_unit_id] ? 'mdi-chevron-up' : 'mdi-chevron-down'"></span>
+          </div>
+          <div v-if="expanded[g.anchor_unit_id]" class="group-children">
+            <div v-if="!children[g.anchor_unit_id]" class="loading-dots"><span></span><span></span><span></span></div>
+            <template v-else>
+              <div v-for="r in children[g.anchor_unit_id]" :key="r.id" class="card card-child"
+                :class="{ 'card-related': r.match_level === 'related', 'card-stale': r.stale }"
+                @click="$router.push('/dedup/' + r.id)">
+                <div class="card-row">
+                  <div class="card-icon" :class="iconClass(r)">
+                    <span class="mdi" :class="iconName(r)"></span>
+                  </div>
+                  <div class="card-body">
+                    <div class="card-title">{{ r.unit_a_name }} ↔ {{ r.unit_b_name }}</div>
+                    <div class="card-sub">
+                      <span class="lvl-badge" :class="badgeClass(r)">{{ badgeLabel(r) }}</span>
+                      <span>{{ subLabel(r) }}</span>
+                    </div>
+                  </div>
+                  <div class="card-meta">
+                    <div class="count" :class="metaClass(r)">{{ metaValue(r) }}</div>
+                    <div class="label">{{ metaLabel(r) }}</div>
+                  </div>
+                </div>
               </div>
-              <div class="label">{{ r.match_level === 'related' ? '杰卡德' : '相似' }}</div>
-            </div>
+            </template>
           </div>
         </div>
-        <button v-if="hasMore" class="btn btn-secondary more-btn" @click="loadMore">加载更多</button>
+        <button v-if="hasMore" class="btn btn-secondary more-btn" @click="loadMore">加载更多分组</button>
+        <button class="btn btn-secondary more-btn" @click="toggleAll">
+          {{ allExpanded ? '全部收起' : '全部展开' }}
+        </button>
       </template>
     </div>
   `,
   props: ['serverUrl'],
   emits: ['loading'],
   data() { return {
-    loading: true, results: [], level: 'duplicate', total: 0, page: 1,
-    counts: { duplicate: 0, related: 0, total: 0 },
+    loading: true, level: 'duplicate', page: 1, total: 0,
+    groups: [], children: {}, expanded: {}, coverFailed: {},
+    counts: { duplicate: 0, related: 0, face_only: 0, total: 0 },
     running: false, runPhase: '', runProgress: null, runSummary: '',
+    scanning: false, scanProgress: null,
+    faceThreshold: 0.45, refineFaces: true,
+    faceStatus: null,
     tabs: [
       { key: 'duplicate', label: '疑似重复', count: 0 },
       { key: 'related', label: '疑似相关', count: 0 },
+      { key: 'face', label: '同演员', count: 0 },
     ],
   };},
   computed: {
-    hasMore() { return this.results.length < this.total; },
+    hasMore() { return this.groups.length < this.total; },
+    allExpanded() {
+      return this.groups.length > 0
+        && this.groups.every(g => this.expanded[g.anchor_unit_id]);
+    },
     runPercent() {
       if (!this.runProgress || !this.runProgress[1]) return 0;
       return Math.min(100, Math.round(this.runProgress[0] / this.runProgress[1] * 100));
+    },
+    scanPercent() {
+      if (!this.scanProgress || !this.scanProgress[1]) return 0;
+      return Math.min(100, Math.round(this.scanProgress[0] / this.scanProgress[1] * 100));
     },
     runSub() {
       if (this.running) {
         if (this.runPhase === 'indexing' && this.runProgress) {
           return '正在计算哈希 ' + this.runProgress[0] + ' / ' + this.runProgress[1];
+        }
+        if (this.runPhase === 'faces' && this.runProgress) {
+          return '正在精查视频人脸 ' + this.runProgress[0] + ' / ' + this.runProgress[1];
         }
         if (this.runPhase === 'comparing' && this.runProgress) {
           return '正在比对 ' + this.runProgress[0] + ' / ' + this.runProgress[1] + ' 对';
@@ -1593,32 +1755,113 @@ const DedupPage = {
       }
       return this.runSummary || '对所有资源单元比对重复与疑似相关';
     },
+    emptyText() {
+      if (this.level === 'duplicate') return '暂无重复结果';
+      if (this.level === 'related') return '暂无疑似相关单元';
+      return '暂无疑似同演员线索';
+    },
+    emptyIcon() {
+      return this.level === 'related' ? 'mdi-account-search-outline' : 'mdi-account-outline';
+    },
   },
   methods: {
-    scoreColor(s) {
-      if (s >= 0.9) return 'red';
-      if (s >= 0.8) return 'amber';
-      return 'blue';
+    /** 当前分组列表对应的 level / evidence 查询参数（单一来源） */
+    queryParams() {
+      if (this.level === 'duplicate') return { level: 'duplicate', evidence: '' };
+      if (this.level === 'face') return { level: 'related', evidence: 'face' };
+      return { level: 'related', evidence: 'file' };
     },
-    scoreHex(s) {
-      if (s >= 0.9) return 'var(--red)';
-      if (s >= 0.8) return 'var(--accent)';
-      return 'var(--blue)';
+    minFiles(r) {
+      return Math.max(1, Math.min(r.total_files_a || 0, r.total_files_b || 0));
     },
-    levelLabel(l) { return l === 'related' ? '疑似相关' : '疑似重复'; },
+    /** 子集重复：文件几乎全在另一边里，杰卡德被"多出来的文件"压低 */
+    isSubset(r) {
+      return r.match_level === 'duplicate'
+        && (r.overlap_ratio || 0) >= 0.85 && (r.similarity_score || 0) < 0.8;
+    },
+    badgeLabel(r) {
+      if (r.stale) return '旧规则结果';
+      if (r.match_level === 'related') {
+        return r.evidence_kind === 'face' ? '同演员' : '部分重叠';
+      }
+      return this.isSubset(r) ? '子集重复' : '整单元重复';
+    },
+    badgeClass(r) {
+      if (r.stale) return 'stale';
+      if (r.match_level === 'related') {
+        return r.evidence_kind === 'face' ? 'face' : 'related';
+      }
+      return 'duplicate';
+    },
+    subLabel(r) {
+      if (r.stale) return '升级前算出的结论，请重新查重后再看数字';
+      if (r.evidence_kind === 'face' && r.match_level === 'related') {
+        return r.face_hint_count + ' 处人脸线索 · 无文件重叠 · 不建议删除';
+      }
+      return r.match_count + ' / ' + this.minFiles(r) + ' 个文件重叠'
+        + (r.match_level === 'related' ? ' · 不建议删除' : '');
+    },
+    /** 关键数字：重复看杰卡德、子集重复与部分重叠看"重叠文件数"、同演员看线索条数
+     *  —— 不再出现无意义的 0%（人脸线索的杰卡德恒为 0）。旧规则的数字一律显"待重算"。 */
+    metaValue(r) {
+      if (r.stale) return '待重算';
+      if (r.match_level === 'related' && r.evidence_kind === 'face') {
+        return String(r.face_hint_count);
+      }
+      if (r.match_level === 'duplicate' && !this.isSubset(r)) {
+        return Math.round((r.similarity_score || 0) * 100) + '%';
+      }
+      return r.match_count + '/' + this.minFiles(r);
+    },
+    metaLabel(r) {
+      if (r.stale) return '旧规则';
+      if (r.match_level === 'related' && r.evidence_kind === 'face') return '人脸线索';
+      if (r.match_level === 'duplicate' && !this.isSubset(r)) return '杰卡德';
+      return '文件重叠';
+    },
+    metaClass(r) {
+      if (r.stale) return 'is-stale';
+      if (r.match_level === 'related') return 'is-related';
+      if (this.isSubset(r)) return 'is-subset';
+      return 'is-duplicate';
+    },
+    iconClass(r) {
+      if (r.stale) return 'gray';
+      if (r.match_level === 'related') {
+        return r.evidence_kind === 'face' ? 'amber' : 'amber';
+      }
+      return this.isSubset(r) ? 'amber' : 'red';
+    },
+    iconName(r) {
+      if (r.stale) return 'mdi-history';
+      if (r.match_level === 'related') {
+        return r.evidence_kind === 'face'
+          ? 'mdi-account-multiple-outline' : 'mdi-content-duplicate';
+      }
+      return this.isSubset(r) ? 'mdi-content-copy' : 'mdi-compare-arrows';
+    },
     typeLabels(types) {
       const map = { md5: '内容相同', phash: '画面相似', dhash: '结构相似',
                     video: '视频帧匹配', face: '人脸相似' };
       return String(types || '').split(',').filter(Boolean)
         .map(t => map[t] || t).join(' · ');
     },
+    coverUrl(fid) {
+      if (this.coverFailed[fid]) return '';
+      return fid ? mediaUrl(this.serverUrl, '/api/files/' + fid + '/thumbnail') : '';
+    },
     setLevel(key) {
       if (this.level === key) return;
       this.level = key;
-      this.results = [];
+      this.reset();
+      this.load(true);
+    },
+    reset() {
+      this.groups = [];
+      this.children = {};
+      this.expanded = {};
       this.page = 1;
       this.total = 0;
-      this.load(true);
     },
     async loadCounts() {
       try {
@@ -1626,19 +1869,27 @@ const DedupPage = {
         this.counts = c;
         this.tabs[0].count = c.duplicate || 0;
         this.tabs[1].count = c.related || 0;
+        this.tabs[2].count = c.face_only || 0;
       } catch (e) { /* 计数失败不影响列表 */ }
+    },
+    async loadFaceStatus() {
+      try {
+        this.faceStatus = await api(this.serverUrl, '/api/dedup/face-scan/status');
+      } catch (e) { this.faceStatus = null; }
     },
     async load(reset) {
       this.loading = reset;
+      const p = this.queryParams();
       try {
-        const data = await api(this.serverUrl,
-          '/api/dedup/results?unresolved_only=true&level=' + this.level
-          + '&page=' + this.page + '&per_page=30');
-        const rows = data.results || [];
-        this.results = reset ? rows : this.results.concat(rows);
+        const url = '/api/dedup/groups?unresolved_only=true'
+          + '&level=' + p.level + (p.evidence ? '&evidence=' + p.evidence : '')
+          + '&page=' + this.page + '&per_page=50';
+        const data = await api(this.serverUrl, url);
+        const rows = data.groups || [];
+        this.groups = reset ? rows : this.groups.concat(rows);
         this.total = data.total || 0;
       } catch (e) {
-        if (reset) this.results = [];
+        if (reset) this.reset();
       } finally {
         this.loading = false;
         this.$emit('loading', false);
@@ -1648,14 +1899,59 @@ const DedupPage = {
       this.page += 1;
       this.load(false);
     },
+    async toggleGroup(g) {
+      const id = g.anchor_unit_id;
+      if (this.expanded[id]) {
+        this.expanded[id] = false;
+        return;
+      }
+      this.expanded[id] = true;
+      if (this.children[id]) return;             // 已缓存，直接展开
+      this.children[id] = null;                  // null = 加载中（模板判空）
+      const p = this.queryParams();
+      try {
+        const data = await api(this.serverUrl, '/api/dedup/results?unresolved_only=true'
+          + '&level=' + p.level + (p.evidence ? '&evidence=' + p.evidence : '')
+          + '&unit_a_id=' + id + '&per_page=100');
+        this.children[id] = data.results || [];
+      } catch (e) {
+        this.children[id] = [];
+        alert('加载分组失败：' + e.message);
+      }
+    },
+    toggleAll() {
+      if (this.allExpanded) {
+        this.expanded = {};
+        return;
+      }
+      this.groups.forEach(g => this.toggleGroup(g));
+    },
+    markCoverFailed(id) {
+      this.coverFailed[id] = true;
+    },
+    readStoredThreshold() {
+      try {
+        const v = parseFloat(localStorage.getItem('dsh_dedup_face_threshold'));
+        if (v > 0 && v <= 1) this.faceThreshold = v;
+        const r = localStorage.getItem('dsh_dedup_refine_faces');
+        if (r === '0') this.refineFaces = false;
+      } catch (e) { /* 隐私模式等：用默认值 */ }
+    },
     async refresh() {
       await this.loadCounts();
+      await this.loadFaceStatus();
       this.page = 1;
       await this.load(true);
     },
+    estMinutes(n) {
+      // 单帧约 82ms（长边 1280），默认每视频 10 帧
+      return Math.max(1, Math.round(n * 10 * 0.082 / 60));
+    },
     async startDedup() {
       if (this.running) return;
-      if (!confirm('对所有资源单元执行查重？\n（会先为未索引文件计算哈希/人脸，耗时可能较长）')) return;
+      if (!confirm('对所有资源单元执行查重？\n'
+        + '（会先为未索引文件计算哈希/人脸，耗时可能较长）'
+        + (this.refineFaces ? '\n并精查疑似同演员的视频（约 2~3 分钟）' : ''))) return;
       let unitIds = [];
       try {
         const data = await api(this.serverUrl, '/api/units');
@@ -1666,6 +1962,7 @@ const DedupPage = {
       }
       if (unitIds.length < 2) { alert('至少需要 2 个资源单元才能查重'); return; }
 
+      this.persistOptions();
       this.running = true;
       this.runPhase = 'queued';
       this.runProgress = null;
@@ -1674,13 +1971,24 @@ const DedupPage = {
         const res = await api(this.serverUrl, '/api/dedup/run', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ unit_ids: unitIds, index_first: true }),
+          body: JSON.stringify({
+            unit_ids: unitIds,
+            index_first: true,
+            face_similarity_threshold: this.faceThreshold,
+            refine_faces: this.refineFaces,
+          }),
         });
         this.pollTask(res.task_id);
       } catch (e) {
         this.running = false;
         alert('查重启动失败：' + e.message);
       }
+    },
+    persistOptions() {
+      try {
+        localStorage.setItem('dsh_dedup_face_threshold', String(this.faceThreshold));
+        localStorage.setItem('dsh_dedup_refine_faces', this.refineFaces ? '1' : '0');
+      } catch (e) { /* 忽略 */ }
     },
     pollTask(taskId) {
       if (this._timer) clearInterval(this._timer);
@@ -1699,7 +2007,8 @@ const DedupPage = {
           this.stopPolling();
           const r = t.result || {};
           this.runSummary = '完成：重复 ' + (r.duplicates_found || 0) + ' 组 · 疑似相关 '
-            + (r.related_found || 0) + ' 对（耗时 ' + (r.elapsed_seconds || 0) + 's）';
+            + (r.related_found || 0) + ' 对 · 同演员 ' + (r.face_only_found || 0)
+            + ' 对（耗时 ' + (r.elapsed_seconds || 0) + 's）';
           await this.refresh();
         } else if (t.status === 'failed') {
           this.stopPolling();
@@ -1713,14 +2022,67 @@ const DedupPage = {
       this.runProgress = null;
       this.runPhase = '';
     },
+    async startFaceScan(scope) {
+      if (this.scanning) return;
+      const n = this.faceStatus ? this.faceStatus.videos_pending : 0;
+      if (!confirm('按定间隔多帧重扫 ' + n + ' 个视频的人脸？\n'
+        + '完成后会自动重新查重一次（预计 ' + this.estMinutes(n) + ' 分钟）。')) return;
+      this.scanning = true;
+      this.scanProgress = null;
+      try {
+        const res = await api(this.serverUrl, '/api/dedup/face-scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scope: scope, run_dedup: true }),
+        });
+        this.pollFaceScan(res.task_id);
+      } catch (e) {
+        this.scanning = false;
+        alert('人脸重扫启动失败：' + e.message);
+      }
+    },
+    pollFaceScan(taskId) {
+      if (this._scanTimer) clearInterval(this._scanTimer);
+      this._scanTimer = setInterval(async () => {
+        let t;
+        try {
+          t = await api(this.serverUrl, '/api/dedup/run/' + taskId);
+        } catch (e) {
+          this.stopScanPolling();
+          alert('重扫状态查询失败：' + e.message);
+          return;
+        }
+        this.scanProgress = t.progress || null;
+        if (t.status === 'completed') {
+          this.stopScanPolling();
+          const r = t.result || {};
+          this.runSummary = '人脸重扫完成：' + (r.scanned || 0) + ' 个视频 / '
+            + (r.faces || 0) + ' 条人脸向量'
+            + (r.dedup ? '，重复 ' + r.dedup.duplicates_found + ' 组 / 疑似相关 '
+                + r.dedup.related_found + ' 对 / 同演员 ' + r.dedup.face_only_found + ' 对' : '');
+          await this.refresh();
+        } else if (t.status === 'failed') {
+          this.stopScanPolling();
+          alert('人脸重扫失败：' + (t.error || '未知错误'));
+        }
+      }, 1000);
+    },
+    stopScanPolling() {
+      if (this._scanTimer) { clearInterval(this._scanTimer); this._scanTimer = null; }
+      this.scanning = false;
+      this.scanProgress = null;
+    },
   },
   async mounted() {
     this.$emit('loading', true);
+    this.readStoredThreshold();
     await this.loadCounts();
+    await this.loadFaceStatus();
     await this.load(true);
   },
   beforeUnmount() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    if (this._scanTimer) { clearInterval(this._scanTimer); this._scanTimer = null; }
   }
 };
 
@@ -1730,17 +2092,32 @@ const DedupDetailPage = {
     <div class="page">
       <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
       <template v-else-if="detail">
-        <div class="dedup-header" :class="{ 'is-related': isRelated }">
+        <div class="dedup-header" :class="{ 'is-related': isRelated, 'is-face-only': isFaceOnly }">
           <div class="score" :class="{ related: isRelated }">
-            {{ isRelated ? '疑似相关' : (detail.similarity_score * 100).toFixed(0) + '%' }}
+            {{ headerScore }}
           </div>
           <div class="units">{{ detail.unit_a.name }} ↔ {{ detail.unit_b.name }}</div>
           <div class="match-info">
-            杰卡德 {{ (detail.similarity_score * 100).toFixed(1) }}% ·
-            匹配 {{ detail.match_count }} 个文件<span v-if="faceHints.length"> · 人脸线索 {{ faceHints.length }} 对</span>
+            {{ overlapText }}<span v-if="detail.match_count">
+              · 杰卡德 {{ (detail.similarity_score * 100).toFixed(1) }}%</span><span
+              v-if="faceHints.length"> · 人脸线索 {{ faceHints.length }} 对</span>
           </div>
-          <div v-if="isRelated" class="related-note">
-            这两个单元有同演员 / 同场景 / 部分文件重叠的迹象，但未达「重复」标准，
+          <div v-if="isSubset" class="subset-note">
+            两个单元<b>并非完全相同</b>：只有 {{ detail.match_count }} 个文件重叠，
+            各含 {{ detail.total_files_a }} / {{ detail.total_files_b }} 个文件。
+            若要清理，请只删除任一侧这 {{ detail.match_count }} 个文件，<b>不要整目录删除</b>。
+          </div>
+          <div v-if="detail.stale" class="stale-note">
+            <span class="mdi mdi-alert-outline"></span>
+            这条结果是<b>升级前的旧规则</b>算出来的，下面的匹配明细与比例不可当真。
+            回到查重页点「开始查重」重算一次即可。
+          </div>
+          <div v-if="isFaceOnly" class="related-note">
+            这两个单元只在人脸维度相似（同一演员的不同作品，0 个文件重叠），
+            它们<b>不是重复</b>，已单独归入「同演员」，<b>不建议删除</b>。
+          </div>
+          <div v-else-if="isRelated" class="related-note">
+            这两个单元有同场景 / 部分文件重叠的迹象，但未达「重复」标准，
             仅供了解，<b>不建议删除</b>。
           </div>
           <div v-if="!detail.is_resolved" class="resolve-actions">
@@ -1757,25 +2134,77 @@ const DedupDetailPage = {
         </div>
 
         <h3 class="section-title">匹配文件（计入判定）</h3>
-        <div v-for="m in countedMatches" :key="m.id" class="match-pair">
-          <span class="mdi mdi-file-document-outline" style="color:var(--text-tertiary)"></span>
-          <span class="filename">{{ m.file_a_name }} ↔ {{ m.file_b_name }}</span>
-          <span class="tag" :class="m.match_type">{{ typeLabel(m.match_type) }}</span>
+        <div class="match-grid">
+          <div v-for="m in countedMatches" :key="m.id" class="match-card">
+            <div class="thumb-pair">
+              <img v-if="!failedThumbs[m.file_a_id]" class="thumb"
+                :src="thumbUrl(m.file_a_id)" loading="lazy" decoding="async"
+                @error="onThumbError(m.file_a_id)" @click="openPreview(m.file_a_id)">
+              <span v-else class="thumb thumb-empty">
+                <span class="mdi mdi-image-off-outline"></span>
+              </span>
+              <span class="mdi mdi-swap-horizontal pair-arrow"></span>
+              <img v-if="!failedThumbs[m.file_b_id]" class="thumb"
+                :src="thumbUrl(m.file_b_id)" loading="lazy" decoding="async"
+                @error="onThumbError(m.file_b_id)" @click="openPreview(m.file_b_id)">
+              <span v-else class="thumb thumb-empty">
+                <span class="mdi mdi-image-off-outline"></span>
+              </span>
+            </div>
+            <div class="pair-names">
+              <span class="fname" :title="m.file_a_name">{{ m.file_a_name }}</span>
+              <span class="pair-arrow-text">↔</span>
+              <span class="fname" :title="m.file_b_name">{{ m.file_b_name }}</span>
+            </div>
+            <div class="pair-meta">
+              <span class="tag" :class="m.match_type">{{ typeLabel(m.match_type) }}</span>
+              <span class="pair-score">{{ scoreText(m) }}</span>
+            </div>
+          </div>
         </div>
         <div v-if="countedMatches.length === 0" class="empty-state" style="padding:20px">
           <p>无匹配文件详情</p>
         </div>
 
         <template v-if="faceHints.length">
-          <h3 class="section-title">人脸相似线索（未计入重复判定）</h3>
-          <div v-for="m in faceHints" :key="'f' + m.id" class="match-pair hint-pair">
-            <span class="mdi mdi-account-outline" style="color:var(--amber)"></span>
-            <span class="filename">{{ m.file_a_name }} ↔ {{ m.file_b_name }}</span>
-            <span class="tag face">人脸相似</span>
-          </div>
-          <div class="face-hint-note">
-            人脸相似只说明是同一个人，不能说明是同一份文件，请人工判断。
-          </div>
+          <h3 class="section-title face-toggle" @click="showHints = !showHints">
+            <span class="mdi" :class="showHints ? 'mdi-chevron-up' : 'mdi-chevron-down'"></span>
+            同演员线索 {{ faceHints.length }} 对（未计入重复判定，点击{{ showHints ? '收起' : '展开' }}）
+          </h3>
+          <template v-if="showHints">
+            <div class="match-grid">
+              <div v-for="m in faceHints" :key="'f' + m.id" class="match-card hint-card">
+                <div class="thumb-pair">
+                  <img v-if="!failedThumbs[m.file_a_id]" class="thumb"
+                    :src="thumbUrl(m.file_a_id)" loading="lazy" decoding="async"
+                    @error="onThumbError(m.file_a_id)" @click="openPreview(m.file_a_id)">
+                  <span v-else class="thumb thumb-empty">
+                    <span class="mdi mdi-image-off-outline"></span>
+                  </span>
+                  <span class="mdi mdi-account-multiple-outline pair-arrow"></span>
+                  <img v-if="!failedThumbs[m.file_b_id]" class="thumb"
+                    :src="thumbUrl(m.file_b_id)" loading="lazy" decoding="async"
+                    @error="onThumbError(m.file_b_id)" @click="openPreview(m.file_b_id)">
+                  <span v-else class="thumb thumb-empty">
+                    <span class="mdi mdi-image-off-outline"></span>
+                  </span>
+                </div>
+                <div class="pair-names">
+                  <span class="fname" :title="m.file_a_name">{{ m.file_a_name }}</span>
+                  <span class="pair-arrow-text">↔</span>
+                  <span class="fname" :title="m.file_b_name">{{ m.file_b_name }}</span>
+                </div>
+                <div class="pair-meta">
+                  <span class="tag face">人脸相似</span>
+                  <span class="pair-score">{{ faceScoreText(m) }}</span>
+                </div>
+              </div>
+            </div>
+            <div class="face-hint-note">
+              人脸相似只说明是同一个人，不能说明是同一份文件，请人工判断。
+              「多帧吻合」表示在该视频的多个时间点都检出同一张脸，比单帧更可信。
+            </div>
+          </template>
         </template>
       </template>
       <template v-else>
@@ -1785,9 +2214,36 @@ const DedupDetailPage = {
   `,
   props: ['serverUrl'],
   emits: ['loading'],
-  data() { return { loading: true, detail: null };},
+  data() { return { loading: true, detail: null, showHints: false, failedThumbs: {} };},
   computed: {
     isRelated() { return !!this.detail && this.detail.match_level === 'related'; },
+    /** 只有人脸线索（0 个文件重叠）：杰卡德恒为 0，不能按"相似度"展示 */
+    isFaceOnly() { return !!this.detail && this.detail.evidence_kind === 'face'; },
+    /** 子集重复：文件几乎全在另一边里，杰卡德被"多出来的文件"压低 */
+    isSubset() {
+      return !!this.detail && this.detail.match_level === 'duplicate'
+        && (this.detail.overlap_ratio || 0) >= 0.85
+        && (this.detail.similarity_score || 0) < 0.8;
+    },
+    minFiles() {
+      if (!this.detail) return 1;
+      return Math.max(1, Math.min(this.detail.total_files_a || 0,
+                                  this.detail.total_files_b || 0));
+    },
+    /** 旧规则结论：比例/包含度都是旧口径，不展示成结论 */
+    isStale() { return !!this.detail && this.detail.stale === true; },
+    headerScore() {
+      if (this.isStale) return '旧规则';
+      if (this.isFaceOnly) return '同演员';
+      if (this.isRelated) return '疑似相关';
+      if (this.isSubset) return (this.detail.match_count || 0) + '/' + this.minFiles;
+      return Math.round((this.detail.similarity_score || 0) * 100) + '%';
+    },
+    overlapText() {
+      if (this.isStale) return '数据待重算';
+      if (this.isFaceOnly) return '无文件重叠';
+      return '文件重叠 ' + (this.detail.match_count || 0) + '/' + this.minFiles;
+    },
     matches() { return (this.detail && this.detail.file_matches) || []; },
     /** 人脸行是"线索"不是"证据"：服务端 is_hint 标记优先，旧数据按 match_type 兜底 */
     faceHints() { return this.matches.filter(m => m.is_hint || m.match_type === 'face'); },
@@ -1798,6 +2254,32 @@ const DedupDetailPage = {
       const map = { md5: '内容相同', phash: '画面相似', dhash: '结构相似',
                     video: '视频帧匹配', face: '人脸相似' };
       return map[t] || t;
+    },
+    /** 缩略图：<img> 带不了 Authorization 头，走 mediaUrl 的 ?token= 回退 */
+    thumbUrl(fid) {
+      if (!fid) return '';
+      return mediaUrl(this.serverUrl, '/api/files/' + fid + '/thumbnail');
+    },
+    onThumbError(fid) {
+      this.failedThumbs[fid] = true;
+    },
+    openPreview(fid) {
+      if (fid) this.$router.push('/preview/' + fid);
+    },
+    scoreText(m) {
+      if (m.match_type === 'md5') return '内容完全相同';
+      const s = Number(m.similarity_score);
+      if (!isFinite(s) || s <= 0) return '';
+      // phash/dhash 的分数是"归一化相似度"，md5 恒为 1
+      return '相似度 ' + Math.round(s * 100) + '%';
+    },
+    faceScoreText(m) {
+      const s = Number(m.similarity_score);
+      const parts = [];
+      if (isFinite(s) && s > 0) parts.push('相似度 ' + Math.round(s * 100) + '%');
+      if ((m.frame_support || 1) >= 2) parts.push('多帧吻合 ' + m.frame_support + ' 帧');
+      else parts.push('单帧线索');
+      return parts.join(' · ');
     },
     resolutionLabel(r) {
       const map = { keep_a: '保留 A', keep_b: '保留 B', whitelist: '加入白名单',

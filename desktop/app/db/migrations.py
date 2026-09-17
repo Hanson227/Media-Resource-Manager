@@ -15,12 +15,12 @@ from sqlalchemy.exc import OperationalError
 
 from app.db.engine import DatabaseManager
 from app.db.models import Base
-from app.utils.constants import MatchLevel, MatchType
+from app.utils.constants import EvidenceKind, MatchLevel, MatchType
 
 logger = logging.getLogger(__name__)
 
 # 当前数据库 Schema 版本号
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 8
 
 # v4→v5 重建 dedup_file_matches 用的建表语句。
 # SQLite 不支持就地修改 CHECK 约束，只能"新建表 → 拷数据 → 换名"重建；
@@ -195,6 +195,101 @@ def _migrate_v5_to_v6(engine) -> None:
     logger.info("迁移 v5→v6: dedup_results 增加 match_level 列")
 
 
+def _migrate_v6_to_v7(engine) -> None:
+    """v6→v7: 查重分级修正 + 视频人脸多帧抽帧所需的四个新列。
+
+    都是 ADD COLUMN（SQLite 支持带 CHECK 的加列），**不重建表**：
+
+    1. `dedup_results.evidence_kind` —— 区分"有文件重叠的相关"与"只有人脸线索"。
+    2. `dedup_file_matches.frame_support` —— 人脸线索的吻合帧数。
+    3. `face_vectors.source_ms` —— 视频人脸取自第几毫秒。
+    4. `media_files.face_scan_version` —— 该文件的人脸是按哪版抽帧策略扫的。
+
+    必须回填的两处（否则界面会给出错误分类）：
+    - `match_types` 为空的旧行只可能是"纯人脸线索"，标成 file 会让它们继续
+      混在"疑似相关"里；同时把 match_count 归零 —— 旧值存的是
+      evidence_count（含人脸），新语义下"计入判定的文件对数"就是 0。
+    - 图片的人脸检测本来就是全图检测（等于"扫过且是最新策略"），
+      标成 1 可避免补扫任务把 2085 张图片全部重扫一遍。
+    幂等：列已存在时直接返回。
+    """
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "dedup_results" not in tables:
+        return
+    columns = [c["name"] for c in inspector.get_columns("dedup_results")]
+    if "evidence_kind" in columns:
+        return
+
+    kinds = ", ".join(f"'{e.value}'" for e in EvidenceKind)
+    # 按表逐个加列：迁移测试会造"只有 dedup_results"的精简旧库，
+    # 因此每张表都要先确认存在，否则整条迁移会在中间炸掉。
+    additions = [
+        ("dedup_results",
+         f"ALTER TABLE dedup_results ADD COLUMN evidence_kind VARCHAR(8) "
+         f"NOT NULL DEFAULT '{EvidenceKind.FILE.value}' "
+         f"CHECK (evidence_kind IN ({kinds}))"),
+        ("dedup_file_matches",
+         "ALTER TABLE dedup_file_matches ADD COLUMN frame_support INTEGER "
+         "NOT NULL DEFAULT 1"),
+        ("face_vectors",
+         "ALTER TABLE face_vectors ADD COLUMN source_ms INTEGER"),
+        ("media_files",
+         "ALTER TABLE media_files ADD COLUMN face_scan_version INTEGER "
+         "NOT NULL DEFAULT 0"),
+    ]
+
+    with engine.connect() as conn:
+        for table, ddl in additions:
+            if table not in tables:
+                continue
+            existing_cols = [c["name"] for c in inspector.get_columns(table)]
+            target = ddl.split("ADD COLUMN ", 1)[1].split()[0]
+            if target in existing_cols:
+                continue
+            conn.execute(text(ddl))
+        # 回填纯人脸线索行（match_types 为空 ⇔ 无计数匹配）
+        if "dedup_results" in tables:
+            conn.execute(text(
+                "UPDATE dedup_results SET evidence_kind = :face, match_count = 0 "
+                "WHERE match_types IS NULL OR match_types = ''"
+            ), {"face": EvidenceKind.FACE.value})
+        # 图片无需重扫（全图检测不受抽帧策略影响）
+        if "media_files" in tables:
+            conn.execute(text(
+                "UPDATE media_files SET face_scan_version = 1 WHERE media_type = 'image'"
+            ))
+        conn.commit()
+    logger.info("迁移 v6→v7: 查重证据来源 + 人脸多帧抽帧所需字段")
+
+
+def _migrate_v7_to_v8(engine) -> None:
+    """v7→v8: dedup_results 增加 computed_version（区分"旧规则的结论"）。
+
+    v7 迁移只做了"分类搬迁"（把纯人脸行标成 face），**没有也无法重算** ——
+    重算需要哈希/人脸向量与引擎，只能在应用里跑。于是升级后用户会看到
+    一批"疑似相关"仍是旧规则的结论，甚至出现 match_count(46) > 单元文件数(33)
+    这种新规则下不可能的比例。加一列版本号，界面才能提示"需要重新查重"。
+
+    存量行默认 0（= 旧规则），重跑查重时由 upsert 写入当前版本。
+    幂等：列已存在时直接返回。
+    """
+    inspector = inspect(engine)
+    if "dedup_results" not in inspector.get_table_names():
+        return
+    columns = [c["name"] for c in inspector.get_columns("dedup_results")]
+    if "computed_version" in columns:
+        return
+
+    with engine.connect() as conn:
+        conn.execute(text(
+            "ALTER TABLE dedup_results ADD COLUMN computed_version INTEGER "
+            "NOT NULL DEFAULT 0"
+        ))
+        conn.commit()
+    logger.info("迁移 v7→v8: dedup_results 增加 computed_version（旧结论标记）")
+
+
 def migrate_db() -> None:
     """执行数据库迁移（当 Schema 版本变更时）。"""
     engine = DatabaseManager.get_engine()
@@ -275,6 +370,16 @@ def migrate_db() -> None:
         _migrate_v5_to_v6(engine)
         _set_schema_version(engine, 6)
         current = 6
+
+    if current < 7:
+        _migrate_v6_to_v7(engine)
+        _set_schema_version(engine, 7)
+        current = 7
+
+    if current < 8:
+        _migrate_v7_to_v8(engine)
+        _set_schema_version(engine, 8)
+        current = 8
 
     logger.info(f"数据库迁移完成，当前版本: v{current}")
 

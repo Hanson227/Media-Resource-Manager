@@ -65,6 +65,12 @@ class DedupWorker(QThread):
                 progress_callback=lambda cur, total: self.progress.emit(cur, total),
                 duplicate_found_callback=lambda dup: self.duplicate_found.emit(dup),
                 cancelled=lambda: self._cancelled,
+                config=self._config,
+                # 精查候选项：旧库的视频人脸是"只取中间一帧"扫出来的，
+                # 不先用多帧精查就会拿不准的线索下结论。候选集精查过之后
+                # 版本号即更新，后续查重会瞬间跳过（不是每次都花这几分钟）。
+                refine_faces=True,
+                face_progress_callback=lambda cur, total: self.progress.emit(cur, total),
             )
             self.finished.emit(outcome.session)
         except ValueError as e:
