@@ -174,16 +174,32 @@ const UnitsPage = {
         </div>
       </template>
       <template v-else>
-        <div v-for="(group, ri) in roots" :key="ri" class="root-group">
-          <div class="root-header" @click="toggleRoot(ri)">
+        <!-- 搜索：文件夹太多时靠滚动找不到（实测报障），支持单元名与所在路径 -->
+        <div class="search-bar units-search">
+          <span class="mdi mdi-magnify"></span>
+          <input v-model="searchQuery" type="text" class="search-input"
+            placeholder="搜索单元名或路径（如日期文件夹）...">
+          <button v-if="searchQuery" class="search-clear" @click="searchQuery = ''">
+            <span class="mdi mdi-close"></span></button>
+        </div>
+        <div v-if="searching" class="search-summary">
+          找到 {{ matchedUnitCount }} 个单元
+        </div>
+        <div v-if="searching && matchedUnitCount === 0" class="empty-state">
+          <span class="mdi mdi-magnify-close"></span>
+          <p>没有匹配的单元<br>试试更短的关键词，或搜索路径里的日期文件夹</p>
+        </div>
+        <div v-for="(group, ri) in visibleGroups()" :key="ri" class="root-group"
+          :data-root="group.name">
+          <div class="root-header" @click="toggleRoot(group)">
             <span class="mdi mdi-folder"></span>
             <h3>{{ group.name }}</h3>
-            <span class="count">{{ group.units.length }} 个单元</span>
-            <span class="mdi mdi-chevron-down mdi-chevron" :class="{ open: group.open }"></span>
+            <span class="count">{{ unitsOf(group).length }} 个单元</span>
+            <span class="mdi mdi-chevron-down mdi-chevron" :class="{ open: group.open || searching }"></span>
           </div>
-          <div v-if="group.open" class="root-units">
+          <div v-if="group.open || searching" class="root-units">
             <div class="sort-bar">
-              <span class="count">{{ group.units.length }} 个单元</span>
+              <span class="count">{{ unitsOf(group).length }} 个单元</span>
               <span class="spacer"></span>
               <button class="sort-btn" :class="{ active: sortBy === 'size' }" @click.stop="setSort('size')">
                 <span class="mdi" :class="sortIcon('size')"></span> 大小
@@ -193,7 +209,7 @@ const UnitsPage = {
               </button>
             </div>
             <div class="unit-grid">
-              <div v-for="u in sortedUnits(group.units)" :key="u.id" class="unit-card"
+              <div v-for="u in sortedUnits(unitsOf(group))" :key="u.id" class="unit-card"
                 :data-unit-id="u.id">
                 <div class="cover">
                   <img v-if="u.cover_file_id" :src="coverUrl(u.cover_file_id)" loading="lazy"
@@ -205,6 +221,7 @@ const UnitsPage = {
                     <div class="info-text">
                       <div class="name"><span v-if="u.is_starred" class="star-icon">⭐ </span>{{ u.name }}</div>
                       <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}<span v-if="u.content_modified_at || u.created_at"> · {{ formatDate(u.content_modified_at || u.created_at) }}</span></div>
+                      <div v-if="searching" class="unit-path" :title="u.path">{{ parentPath(u) }}</div>
                     </div>
                     <button class="card-more" @click.stop="$root.showSheet(u.name, [
                       { label: u.is_starred ? '取消收藏' : '收藏', icon: u.is_starred ? 'mdi-star-off' : 'mdi-star-outline',
@@ -225,11 +242,45 @@ const UnitsPage = {
   emits: ['loading'],
   data() { return {
     loading: true, roots: [], coverFailed: {},
+    searchQuery: '',
     sortBy: localStorage.getItem('unit_sort_by') || 'name',
     sortOrder: localStorage.getItem('unit_sort_order') || 'asc',
     refreshing: false,
   }},
+  computed: {
+    query() { return this.searchQuery.trim().toLowerCase(); },
+    searching() { return this.query.length > 0; },
+    /** 搜索命中的单元总数（跨分组）；未搜索时就是全部 */
+    matchedUnitCount() {
+      return this.visibleGroups().reduce((n, g) => n + this.unitsOf(g).length, 0);
+    },
+  },
   methods: {
+    /** 搜索匹配：单元名或所在路径 —— 本库单元名不带日期，
+     *  用户常按 "9.15" 这种父目录找，所以 path 也要参与匹配 */
+    matchUnit(u) {
+      if (!this.searching) return true;
+      const q = this.query;
+      return (u.name || '').toLowerCase().includes(q)
+        || (u.path || '').toLowerCase().includes(q);
+    },
+    unitsOf(group) {
+      return this.searching
+        ? group.units.filter(u => this.matchUnit(u))
+        : group.units;
+    },
+    /** 搜索时只留命中的分组（整组不命中就整组隐藏） */
+    visibleGroups() {
+      return this.searching
+        ? this.roots.filter(g => this.unitsOf(g).length > 0)
+        : this.roots;
+    },
+    /** 单元所在目录（搜索时用来区分同名文件夹） */
+    parentPath(u) {
+      const p = u.path || '';
+      const cut = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+      return cut > 0 ? p.slice(0, cut) : p;
+    },
     openUnit(id) {
       const main = document.querySelector('.app-main');
       if (main) _unitsScrollTop = main.scrollTop;
@@ -245,7 +296,7 @@ const UnitsPage = {
       }
       this.$router.push('/units/' + id);
     },
-    toggleRoot(ri) { this.roots[ri].open = !this.roots[ri].open; },
+    toggleRoot(group) { group.open = !group.open; },
     coverUrl(fid) { return fid ? mediaUrl(this.serverUrl, '/api/files/' + fid + '/thumbnail') : ''; },
     onCoverLoad(id) { this.coverFailed[id] = false; },
     onCoverError(id) { this.coverFailed[id] = true; },
@@ -2436,6 +2487,15 @@ const MessagesPage = {
         </div>
       </template>
       <template v-else>
+        <div class="msg-bar">
+          <span class="count">{{ unreadCount }} 条未读 / 共 {{ messages.length }} 条</span>
+          <span class="spacer"></span>
+          <button class="sort-btn msg-read-all" :disabled="unreadCount === 0"
+            :title="unreadCount === 0 ? '没有未读消息' : '把全部消息标记为已读'"
+            @click="markAllRead">
+            <span class="mdi mdi-email-open-outline"></span> 全部已读
+          </button>
+        </div>
         <div v-for="m in messages" :key="m.id"
           class="msg-item" :class="{ unread: !m.is_read }"
           @click="markRead(m)">
@@ -2452,6 +2512,9 @@ const MessagesPage = {
   props: ['serverUrl'],
   emits: ['loading', 'unread'],
   data() { return { loading: true, messages: [] };},
+  computed: {
+    unreadCount() { return this.messages.filter(m => !m.is_read).length; },
+  },
   methods: {
     iconFor(t) {
       if (t === 'dedup_alert') return 'mdi-alert-circle-outline';
@@ -2482,6 +2545,18 @@ const MessagesPage = {
           m.is_read = true;
           this.$emit('unread');
         } catch(e) {}
+      }
+    },
+    /** 一键已读：后端早有 /api/messages/read-all，Web 端一直没入口，
+     *  积压几十条时只能一条条点开（实测报障）。 */
+    async markAllRead() {
+      if (this.unreadCount === 0) return;
+      try {
+        await api(this.serverUrl, '/api/messages/read-all', { method: 'POST' });
+        this.messages.forEach(m => { m.is_read = true; });
+        this.$emit('unread', 0);          // 顶栏/底栏角标同步清零
+      } catch (e) {
+        alert('标记失败：' + e.message);
       }
     }
   },

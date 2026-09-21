@@ -3867,6 +3867,25 @@ def test_web_static_files():
     check("manifest.json 可访问", resp3.status_code == 200)
     check("manifest.json 为 JSON", resp3.headers.get("content-type", "").startswith("application/json"))
 
+    # 应用壳的脚本引导：Vue 是这个 SPA 的唯一入口，写死单个 CDN 会白屏。
+    # 实测 unpkg 会整段 ERR_CONNECTION_CLOSED（浏览器里 Vue 未定义、#app 空着），
+    # 所以 index.html 必须自备镜像回退 + 按序加载本地脚本。
+    html = (web_dir / "index.html").read_text(encoding="utf-8")
+    check("index.html 主 CDN 为 jsdelivr", "cdn.jsdelivr.net/npm/vue@3" in html)
+    check("index.html 备有 unpkg 回退", "unpkg.com/vue@3" in html)
+    check("vue-router 同样双镜像",
+          "cdn.jsdelivr.net/npm/vue-router@4" in html
+          and "unpkg.com/vue-router@4" in html)
+    check("引导脚本按固定顺序加载本地脚本",
+          "['js-core.js', 'js-gesture.js', 'js-pages.js', 'js-app.js']" in html)
+    check("不再写死单个 <script src> 引入本地脚本",
+          '<script src="js-core.js">' not in html)
+    check("Vue 挂载前用 v-cloak 藏住原始 HTML", 'id="app" v-cloak' in html)
+    check("锁屏有键盘输入提示", "pin-hint-kb" in html)
+
+    sw = (web_dir / "sw.js").read_text(encoding="utf-8")
+    check("sw.js 有缓存版本号（改应用壳必须 bump）", "const CACHE = 'media-manager-v" in sw)
+
 
 def test_dedup_run_api():
     section("测试 15: 触发查重 API")

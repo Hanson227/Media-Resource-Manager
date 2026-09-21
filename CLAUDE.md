@@ -121,6 +121,16 @@ desktop/app/
   `mediaUrl()` 拼 `?token=` 回退（服务端两种方式等价）
 - **JS/CSS 走网络优先，index.html 走缓存优先** — 改 `index.html`（或应用壳）必须
   bump `sw.js` 的 `CACHE` 版本号，否则 PWA 永远拿到旧壳
+- **index.html 里不再有 `<script src>`** — 脚本由页尾引导块动态加载：vue / vue-router
+  各有 **jsdelivr + unpkg 双镜像**（前一个 onerror 就换下一个），本地脚本按
+  js-core → js-gesture → js-pages → js-app **串行**加载。实测 unpkg 会整段
+  `net::ERR_CONNECTION_CLOSED`，写死单 CDN 时浏览器里 `window.Vue === undefined`、
+  `#app` 空着 —— **打开就是白屏，连锁屏都没有**。动这段必须保证顺序（js-core 第一行
+  就是 `const { createApp } = Vue`，抢跑整页崩）。Vue 挂载前 `#app` 已是原始 HTML，
+  用 `v-cloak` 藏住（Vue 挂载时自动移除；引导失败时 `fail()` 要先 `removeAttribute`
+  再写错误提示，否则提示自己被藏住）
+- **给分组加 `data-*` 钩子** — 分组收起后组内文字会从 DOM 消失，Playwright 的
+  `has_text` 定位会失效；`:data-root="group.name"` 这类稳定属性才是可测的锚点
 
 ## PySide6 Signal 陷阱
 
@@ -334,6 +344,20 @@ Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desk
 - **控制台安静** — OpenCV/Qt 的 FFmpeg 解码日志统一静音
   （`image_helpers.silence_ffmpeg_logs` / `preview_dialog._silence_qt_ffmpeg_logs`），
   否则损坏视频会逐帧刷红色 h264 告警；静音只去噪音，不改变"这些文件确实损坏"的事实
+- **Web 消息一键已读** — 消息页顶部工具条显示「N 条未读 / 共 M 条」+「全部已读」
+  （`.msg-read-all`，无未读时置灰），调后端早已存在的 `POST /api/messages/read-all`，
+  完成后整页条目转已读并同步清空顶栏/底栏角标（`$emit('unread', 0)`）
+- **Web 单元搜索** — 单元页顶部搜索框（`.units-search`）按**单元名或所在路径**过滤
+  （`G:\Guofu\9.15\xxx` 这种按日期文件夹找的场景靠 path 匹配），命中时忽略根组折叠
+  状态、整组不命中就隐藏、卡片多显示一行所在目录（同名文件夹靠它区分）；
+  搜索**不改动**用户的折叠状态（清空后该收起的还是收起的）。172 个单元在前端过滤，
+  不额外请求 API
+- **锁屏键盘输入** — 锁屏期间全局接管数字键/退格/回车（`App.onPinKeydown`），
+  电脑上不必再点屏幕键盘；输入框聚焦时与 Ctrl/Cmd 组合键一律放行；
+  精细指针设备额外显示一行键盘提示（`.pin-hint-kb`）
+- **Web 应用壳双 CDN** — `index.html` 引导块给 vue / vue-router 各备
+  jsdelivr + unpkg 两个镜像并串行加载本地脚本；`sw.js` CACHE 升到 v6。
+  起因：实测 unpkg 整段 `ERR_CONNECTION_CLOSED`，写死单 CDN 时整个 SPA 白屏
 - **Config** — 设置对话框支持 web_pin、缩略图、API 等全部字段
 
 
