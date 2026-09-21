@@ -12,11 +12,9 @@
 <link rel="stylesheet" href="style.css">
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7/css/materialdesignicons.min.css">
-<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-<script src="https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js"></script>
 </head>
 <body>
-<div id="app">
+<div id="app" v-cloak>
   <!-- PIN Lock Screen -->
   <div v-if="!pinUnlocked && !pinChecking" class="pin-overlay">
     <div class="lock-icon"><span class="mdi mdi-lock-outline"></span></div>
@@ -33,6 +31,7 @@
       <button class="pin-key" @click="pinDelete"><span class="mdi mdi-backspace-outline"></span></button>
     </div>
     <div v-else style="color:var(--text-tertiary);font-size:16px">验证中…</div>
+    <p class="pin-hint-kb">电脑上可直接用键盘输入数字，退格删除</p>
   </div>
 
   <template v-if="pinUnlocked">
@@ -124,10 +123,68 @@
   </div>
 </div>
 
-<script src="js-core.js"></script>
-<script src="js-gesture.js"></script>
-<script src="js-pages.js"></script>
-<script src="js-app.js"></script>
+<script>
+/* 脚本引导：CDN 双镜像 + 本地脚本严格按序加载。
+   为什么要这样：Vue 是这个 SPA 的唯一入口，原先 index.html 写死单个 CDN
+   （unpkg），实测它会整段 `net::ERR_CONNECTION_CLOSED` —— 那一下不是"图标没了"，
+   而是**打开就是白屏、连 PIN 界面都没有**（实测复现）。所以：
+   ① vue / vue-router 各备两个镜像，前一个 onerror 就换下一个；
+   ② 本地脚本必须按 js-core → js-gesture → js-pages → js-app 顺序执行
+      （js-core 第一行就是 `const { createApp } = Vue`，Vue 未就绪会整页崩）。 */
+(function () {
+  var MIRRORS = {
+    vue: ['https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js',
+          'https://unpkg.com/vue@3/dist/vue.global.prod.js'],
+    router: ['https://cdn.jsdelivr.net/npm/vue-router@4/dist/vue-router.global.prod.js',
+             'https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js']
+  };
+  var LOCAL = ['js-core.js', 'js-gesture.js', 'js-pages.js', 'js-app.js'];
+
+  function fail() {
+    var el = document.getElementById('app');
+    if (!el) return;
+    el.removeAttribute('v-cloak');   // 否则错误提示自己被 v-cloak 藏着
+    el.innerHTML = '<div style="padding:48px 24px;color:#e5e7eb;'
+      + 'font-family:system-ui,sans-serif;text-align:center">'
+      + '<h2 style="font-size:16px">加载失败</h2>'
+      + '<p style="color:#9ca3af;font-size:13px;line-height:1.8">'
+      + '无法从 CDN 加载 Vue（jsdelivr / unpkg 都不通）。<br>'
+      + '请检查本机网络或代理后刷新页面。</p></div>';
+  }
+
+  // 同一资源依次尝试多个镜像，任一成功即回调
+  function loadOne(urls, onDone) {
+    var i = 0;
+    (function next() {
+      if (i >= urls.length) { fail(); return; }
+      var s = document.createElement('script');
+      s.src = urls[i++];
+      s.onload = onDone;
+      s.onerror = next;
+      document.head.appendChild(s);
+    })();
+  }
+
+  // 一组本地脚本按顺序串行加载（动态插入默认 async，必须等上一个 onload）
+  function loadList(urls, onDone) {
+    var i = 0;
+    (function next() {
+      if (i >= urls.length) { onDone(); return; }
+      var s = document.createElement('script');
+      s.src = urls[i++];
+      s.onload = next;
+      s.onerror = next;      // 本地文件不该失败，但不能卡死整条链
+      document.head.appendChild(s);
+    })();
+  }
+
+  loadOne(MIRRORS.vue, function () {
+    loadOne(MIRRORS.router, function () {
+      loadList(LOCAL, function () {});
+    });
+  });
+})();
+</script>
 
 </body>
 </html>

@@ -1,5 +1,5 @@
 /* 影视资源管理器 — Service Worker */
-const CACHE = 'media-manager-v5';
+const CACHE = 'media-manager-v6';
 
 self.addEventListener('install', (e) => {
   self.skipWaiting();

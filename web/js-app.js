@@ -151,6 +151,27 @@ const App = {
     },
     onLoading(v) { this.loading = v; },
     onError(e) { console.error(e); },
+    // ---- 锁屏物理键盘 ----
+    /** 锁屏时支持物理键盘输入（实测报障：电脑上只能点屏幕键盘，反直觉）。
+     *  只在锁屏期间接管数字键，且绝不抢输入框/快捷键的按键。 */
+    onPinKeydown(e) {
+      if (this.pinUnlocked || this.pinChecking) return;      // 不在锁屏，别管
+      if (e.ctrlKey || e.metaKey || e.altKey) return;        // 浏览器快捷键优先
+      const t = e.target;
+      const tag = t && t.tagName ? t.tagName.toLowerCase() : '';
+      if (tag === 'input' || tag === 'textarea' || tag === 'select'
+          || (t && t.isContentEditable)) return;             // 输入框里的数字不算密码
+      if (e.key >= '0' && e.key <= '9') {
+        e.preventDefault();
+        this.pinPress(e.key);
+      } else if (e.key === 'Backspace' || e.key === 'Delete') {
+        e.preventDefault();
+        this.pinDelete();
+      } else if (e.key === 'Enter' && this.pinValue.length === 4) {
+        e.preventDefault();
+        this.pinSubmit();
+      }
+    },
     onUnread(count) {
       if (typeof count === 'number') this.unreadCount = count;
       else this.fetchUnread();
@@ -226,10 +247,14 @@ const App = {
       this.pinChecking = false;
     };
     window.addEventListener('media-auth-expired', this._onAuthExpired);
+    // 锁屏键盘输入（电脑上没人愿意用鼠标点屏幕数字键盘）
+    this._onKeydown = (e) => this.onPinKeydown(e);
+    window.addEventListener('keydown', this._onKeydown);
   },
   beforeUnmount() {
     if (this._interval) clearInterval(this._interval);
     if (this._onAuthExpired) window.removeEventListener('media-auth-expired', this._onAuthExpired);
+    if (this._onKeydown) window.removeEventListener('keydown', this._onKeydown);
   }
 };
 

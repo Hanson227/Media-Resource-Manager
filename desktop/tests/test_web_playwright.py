@@ -1756,6 +1756,231 @@ def test_dedup_state_restored_after_detail(page):
         shutil.rmtree(seeded["face_paths"][0].parent.parent, ignore_errors=True)
 
 
+def test_messages_mark_all_read(page):
+    """Web 测试 17: 消息页「全部已读」。
+
+    后端早就有 `POST /api/messages/read-all`，但 Web 端没有任何入口 ——
+    未读消息只能一条条点开，积压几十条时用户只能放任角标一直挂着。
+    """
+    section("Web 测试 17: 消息一键已读")
+    import requests
+
+    from app.db import queries as q
+    from app.db.models import Message
+    from app.services.message_center import MessageCenter
+
+    created = []
+    for i in range(3):
+        msg = MessageCenter.create_info(f"一键已读测试 {i}", "测试正文")
+        if msg:
+            created.append(msg.id)
+    check("已造出未读消息", len(created) == 3)
+
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/messages")
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        page.locator(".msg-item").first.wait_for(state="attached", timeout=5000)
+
+        check("消息条目渲染", page.locator(".msg-item").count() > 0)
+        check("存在未读消息（带 unread 样式）",
+              page.locator(".msg-item.unread").count() > 0)
+
+        btn = page.locator(".msg-bar .msg-read-all")
+        check("消息页有「全部已读」按钮", btn.count() > 0)
+        check("有未读时按钮可用", btn.count() > 0 and btn.first.is_enabled())
+
+        if btn.count() > 0 and btn.first.is_enabled():
+            btn.first.click()
+            page.wait_for_timeout(1000)
+        else:
+            check("点击「全部已读」", False)
+        check("点击后所有条目不再是未读样式",
+              page.locator(".msg-item.unread").count() == 0)
+        check("无未读时按钮变灰",
+              btn.count() > 0 and not btn.first.is_enabled())
+
+        unread = requests.get(
+            f"http://127.0.0.1:{_PORT}/api/messages/unread-count", timeout=5
+        ).json().get("unread_count")
+        check(f"服务端未读数归零（实际 {unread}）", unread == 0)
+        check("顶栏/底栏的消息角标消失",
+              page.locator(".badge-num").count() == 0)
+    finally:
+        with DatabaseManager.session() as session:
+            session.query(Message).filter(Message.id.in_(created)).delete(
+                synchronize_session=False)
+        with DatabaseManager.session() as session:
+            q.mark_all_messages_read(session)
+
+
+def test_units_search(page):
+    """Web 测试 18: 单元列表搜索（文件夹太多，靠滚动找不到）。
+
+    搜索必须跨分组、忽略折叠状态（默认展开的根组折叠后仍要能搜到），
+    并且给出行级路径，否则同名文件夹无法区分是哪一个。
+    """
+    section("Web 测试 18: 单元搜索")
+    from app.db import queries as q
+
+    uid_a, ids_a, paths_a = _seed_temp_unit("搜索目标甲-SRCHA", ["sa.jpg"])
+    uid_b, ids_b, paths_b = _seed_temp_unit("搜索目标乙-SRCHB", ["sb.jpg"])
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        page.locator(".unit-card").first.wait_for(state="attached", timeout=5000)
+        total_before = page.locator(".unit-card").count()
+        groups_before = page.locator(".root-group").count()
+        check(f"搜索前列表有多个单元（实际 {total_before}）", total_before > 2)
+
+        box = page.locator(".units-search .search-input")
+        check("单元页有搜索框", box.count() > 0)
+        if box.count() == 0:
+            return
+
+        box.first.fill("SRCHA")
+        page.wait_for_timeout(500)
+        names = page.locator(".unit-card .name")
+        check(f"搜索后只剩匹配项（实际 {names.count()}）", names.count() == 1)
+        check("命中的是目标单元",
+              "搜索目标甲-SRCHA" in (names.first.text_content() or ""))
+        check(f"不匹配的分组整组隐藏（{groups_before} → {page.locator('.root-group').count()}）",
+              page.locator(".root-group").count() < groups_before)
+        check("搜索时显示所在路径（区分同名文件夹）",
+              page.locator(".unit-card .unit-path").count() > 0)
+
+        # 折叠状态下也要搜得到：先把目标所在根组收起，再搜
+        page.locator(".search-clear").first.click()
+        page.wait_for_timeout(400)
+        check("清空搜索后恢复全部", page.locator(".unit-card").count() == total_before)
+
+        box.first.fill("SRCHB")
+        page.wait_for_timeout(500)
+        root_name = (page.locator(".root-header h3").first.text_content() or "").strip()
+        check(f"搜到目标所在的根组（{root_name}）", bool(root_name))
+        # 收起后组内单元名从 DOM 消失，用 has_text 就找不到这个组了 → 用稳定的 data-root
+        page.locator(".search-clear").first.click()
+        page.wait_for_timeout(400)
+        group_b = page.locator(f'.root-group[data-root="{root_name}"]')
+        check("按根组名能定位到分组", group_b.count() == 1)
+        group_b.locator(".root-header").first.click()
+        page.wait_for_timeout(300)
+        check("目标根组已收起（卡片不可见）",
+              group_b.locator(".unit-card").count() == 0)
+
+        box.first.fill("SRCHB")
+        page.wait_for_timeout(500)
+        check("根组收起时搜索仍能找到目标",
+              page.locator(".unit-card .name").count() == 1
+              and "搜索目标乙-SRCHB"
+              in (page.locator(".unit-card .name").first.text_content() or ""))
+        check("命中的组即使收起也把卡片显示出来",
+              page.locator(".root-group").first.locator(".root-units").count() == 1)
+
+        box.first.fill("绝不存在的单元名ZZZ")
+        page.wait_for_timeout(500)
+        check("无匹配时卡片清空", page.locator(".unit-card").count() == 0)
+        check("无匹配时给出空态提示", page.locator(".empty-state").count() > 0)
+
+        box.first.fill("")
+        page.wait_for_timeout(400)
+        # 搜索不该动用户的折叠状态：清空后 SRCHB 那组仍是收起的
+        check("清空搜索后恢复原折叠状态（搜索不改变折叠）",
+              group_b.locator(".unit-card").count() == 0)
+        group_b.locator(".root-header").first.click()
+        page.wait_for_timeout(300)
+        check(f"展开后恢复全部单元（实际 {page.locator('.unit-card').count()}）",
+              page.locator(".unit-card").count() == total_before)
+    finally:
+        import shutil
+        for uid, paths in ((uid_a, paths_a), (uid_b, paths_b)):
+            with DatabaseManager.session() as session:
+                q.delete_resource_unit(session, uid)
+            shutil.rmtree(paths[0].parent.parent, ignore_errors=True)
+
+
+def test_pin_keyboard_input(page):
+    """Web 测试 19: 锁屏支持物理键盘输入。
+
+    实测报障：在电脑上打开 Web 端，锁屏只能点屏幕上的数字键盘 ——
+    桌面浏览器里这是反直觉的（用户会直接敲数字，然后发现毫无反应）。
+    """
+    section("Web 测试 19: 锁屏键盘输入")
+    if _app is None:
+        check("测试服务器 app 可用", False)
+        return
+    from app.api.server import _revoke_all_auth_tokens
+
+    cfg_path = Path(__file__).parent.parent / "config.json"
+    pin_path = Path(__file__).parent.parent / "data" / ".web_pin"
+    cfg_backup = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else None
+    pin_backup = pin_path.read_text(encoding="utf-8") if pin_path.exists() else None
+
+    try:
+        _app.state.config = _app.state.config.with_updates(web_pin="2468")
+        _revoke_all_auth_tokens()
+        page.evaluate("() => localStorage.setItem('media_pin', '')")
+
+        page.goto(f"http://127.0.0.1:{_PORT}/")
+        overlay = page.locator(".pin-overlay")
+        overlay.wait_for(state="visible", timeout=5000)
+        check("启用 PIN 后显示锁屏", overlay.is_visible())
+        check("锁屏给出键盘输入提示", page.locator(".pin-hint-kb").count() > 0)
+
+        page.keyboard.press("2")
+        page.wait_for_timeout(200)
+        check(f"敲数字键填充点位（实际 {page.locator('.pin-dot.filled').count()}）",
+              page.locator(".pin-dot.filled").count() == 1)
+        page.keyboard.press("Backspace")
+        page.wait_for_timeout(200)
+        check("退格键删除一位", page.locator(".pin-dot.filled").count() == 0)
+
+        page.keyboard.type("1111")
+        page.wait_for_timeout(800)
+        check("键盘输入错误密码给出提示",
+              "密码错误" in (page.locator(".pin-error").text_content() or ""))
+        check("错误后仍停留在锁屏", overlay.is_visible())
+
+        page.keyboard.type("2468")
+        unlocked = False
+        for _ in range(25):
+            if not overlay.is_visible():
+                unlocked = True
+                break
+            page.wait_for_timeout(200)
+        check("键盘输入正确密码可解锁", unlocked)
+
+        # 解锁后键盘输入不能被当成 PIN 劫持：页面里正常打字必须进输入框
+        page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+        page.locator(".app-main").wait_for(state="attached", timeout=5000)
+        search = page.locator(".units-search .search-input")
+        if search.count() > 0:
+            search.first.click()
+            page.keyboard.type("1234")
+            page.wait_for_timeout(200)
+            check("解锁后数字键正常进入输入框（未被 PIN 劫持）",
+                  search.first.input_value() == "1234")
+        else:
+            check("解锁后数字键正常进入输入框（未被 PIN 劫持）", False)
+        check("解锁后不会再次弹出锁屏", not overlay.is_visible())
+    finally:
+        if _app is not None:
+            _app.state.config = _app.state.config.with_updates(web_pin="")
+            _revoke_all_auth_tokens()
+        if cfg_backup is not None:
+            try:
+                cfg_path.write_text(cfg_backup, encoding="utf-8")
+            except OSError as e:
+                print(f"  [INFO] 还原 config.json 失败: {e}")
+        if pin_backup is not None:
+            try:
+                pin_path.parent.mkdir(parents=True, exist_ok=True)
+                pin_path.write_text(pin_backup, encoding="utf-8")
+            except OSError as e:
+                print(f"  [INFO] 还原 data/.web_pin 失败: {e}")
+
+
 def test_responsive_layout(page):
     """验证响应式布局。"""
     section("Web 测试 9: 响应式布局")
@@ -1903,8 +2128,18 @@ def main():
             test_dedup_progress_survives_navigation(page)
             test_dedup_state_restored_after_detail(page)
 
+            # 消息一键已读 / 单元搜索
+            test_messages_mark_all_read(page)
+
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_load_state("networkidle")
+            test_units_search(page)
+
             # 取消访问密码不锁死（会临时改动服务端 web_pin，放在最后）
             test_cancel_pin_does_not_lock_out(page)
+
+            # 锁屏键盘输入（同样临时启用 web_pin，放在取消密码之后）
+            test_pin_keyboard_input(page)
 
             browser.close()
 
