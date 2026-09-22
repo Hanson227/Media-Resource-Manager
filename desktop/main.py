@@ -19,9 +19,13 @@ from pathlib import Path
 # 把真正的日志淹掉）。**不能**在这里直接写 os.environ —— 在 Windows 上它
 # 传不进 OpenCV 的 ffmpeg DLL，必须走 CRT 的 _putenv_s，
 # 细节见 app/utils/image_helpers.silence_ffmpeg_logs。
-from app.utils.image_helpers import silence_ffmpeg_logs  # noqa: E402
+from app.utils.image_helpers import ensure_heif_support, silence_ffmpeg_logs  # noqa: E402
 
 silence_ffmpeg_logs()
+
+# 导入 app.utils.image_helpers 时已自动注册 HEIC/HEIF 解码器
+# （ensure_heif_support，幂等）—— 这里只是取回状态用于日志。
+_HEIF_OK = ensure_heif_support()
 
 # ============================================================
 # 编码修复 —— 必须在所有其他导入之前执行
@@ -47,13 +51,6 @@ def _fix_windows_encoding():
             )
 
 _fix_windows_encoding()
-
-# 注册 HEIC/HEIF 图片格式支持（必须在 PIL 使用前）
-try:
-    import pillow_heif
-    pillow_heif.register_heif_opener()
-except ImportError:
-    pass
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
@@ -81,10 +78,9 @@ for handler in logging.root.handlers:
 logger = logging.getLogger(__name__)
 
 # 确认 HEIC 支持状态
-try:
-    __import__("pillow_heif")
+if _HEIF_OK:
     logger.info("HEIC/HEIF 格式支持已加载")
-except ImportError:
+else:
     logger.warning("pillow-heif 未安装，HEIC/HEIF 文件无法识别")
 
 

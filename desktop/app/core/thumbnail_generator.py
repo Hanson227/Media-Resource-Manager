@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from PIL import Image, ImageFile, UnidentifiedImageError
+from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
 
 # 允许 Pillow 加载截断/损坏的 JPEG 图片（与 Qt QPixmap 行为一致）
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -393,22 +393,17 @@ class ThumbnailGenerator:
 
     @staticmethod
     def _fix_orientation(img: Image.Image) -> Image.Image:
-        """根据 EXIF 方向信息修正图片旋转。"""
-        try:
-            exif = img._getexif()
-            if exif is None:
-                return img
-            orientation = exif.get(0x0112)  # EXIF Orientation tag
-            if orientation is None:
-                return img
+        """根据 EXIF 方向信息修正图片旋转。
 
-            # 根据 EXIF 方向值进行旋转/翻转
-            if orientation == 3:
-                return img.rotate(180, expand=True)
-            elif orientation == 6:
-                return img.rotate(270, expand=True)
-            elif orientation == 8:
-                return img.rotate(90, expand=True)
-        except Exception:
-            pass
+        用 `ImageOps.exif_transpose`（而非手工读 `img._getexif()`）：
+        Pillow 12 已移除 `Image.Image._getexif`，旧实现落在 `except: pass` 里
+        **静默 no-op** —— 带 EXIF 方向的照片（iPhone HEIC/JPEG 几乎必然带）
+        缩略图一直是歪的，而这里看不出任何异常。
+        """
+        try:
+            transposed = ImageOps.exif_transpose(img)
+            if transposed is not None:
+                return transposed
+        except Exception as e:
+            logger.debug(f"EXIF 方向修正失败: {e}")
         return img

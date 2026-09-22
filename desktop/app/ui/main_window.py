@@ -134,8 +134,8 @@ class MainWindow(QMainWindow):
         tag_action.triggered.connect(self._on_manage_tags)
         tools_menu.addAction(tag_action)
 
-        heic_action = QAction("HEIC 转换(&H)...", self)
-        heic_action.setStatusTip("将选中的 HEIC 文件批量转换为 JPG")
+        heic_action = QAction("HEIC 检查与转换(&H)...", self)
+        heic_action.setStatusTip("检查媒体库里全部 HEIC 文件并批量转换为 JPG")
         heic_action.triggered.connect(self._on_heic_convert)
         tools_menu.addAction(heic_action)
 
@@ -1181,32 +1181,31 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_heic_convert(self) -> None:
-        """打开 HEIC 批量转换对话框（不触发全库扫描，仅刷新当前视图）。"""
+        """打开 HEIC 检查与转换对话框（默认检查全部媒体库）。"""
         from app.ui.dialogs.heic_batch_convert import HeicBatchConvertDialog
-        dlg = HeicBatchConvertDialog(self)
+        dlg = HeicBatchConvertDialog(self._config, self)
         dlg.exec()
-        # 仅刷新当前单元（文件已被替换为 JPG，不用全库扫描）
+        # 转换已就地改写 DB 记录（file_id 不变），但仍刷新视图让缩略图/大小更新
+        self._refresh_after_heic_convert()
+
+    @Slot(str)
+    def _on_unit_heic_convert(self, folder_path: str) -> None:
+        """右键菜单触发：只检查指定目录下的 HEIC 文件。"""
+        from app.ui.dialogs.heic_batch_convert import HeicBatchConvertDialog
+        dlg = HeicBatchConvertDialog(self._config, self, folder=folder_path)
+        dlg.exec()
+        self._refresh_after_heic_convert()
+
+    def _refresh_after_heic_convert(self) -> None:
+        """转换后刷新树与当前单元（文件已被替换为 JPG，不用全库扫描）。"""
+        try:
+            self._tree_view.refresh_model()
+        except Exception as e:
+            logger.debug(f"刷新目录树失败: {e}")
         if self._current_unit_id is not None:
             self._on_reload_current_unit()
         else:
             self._on_refresh_all()
-
-    @Slot(str)
-    def _on_unit_heic_convert(self, folder_path: str) -> None:
-        """右键菜单触发：对指定目录下的 HEIC 文件批量转 JPG。"""
-        from app.core.heic_converter import is_heic_file
-        from pathlib import Path
-        sources = [f for f in Path(folder_path).rglob("*") if f.suffix.lower() in (".heic", ".heif") and is_heic_file(f)]
-        if not sources:
-            QMessageBox.information(self, "HEIC 转换", f"在「{Path(folder_path).name}」下未找到 HEIC 文件。")
-            return
-        from app.ui.dialogs.heic_convert import HeicConvertDialog
-        dlg = HeicConvertDialog(sources, self)
-        dlg.exec()
-        # 刷新树和当前单元
-        self._tree_view.refresh_model()
-        if self._current_unit_id is not None:
-            self._on_reload_current_unit()
 
     @Slot()
     def _on_manage_tags(self) -> None:

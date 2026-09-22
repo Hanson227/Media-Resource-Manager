@@ -7,6 +7,7 @@ const routes = [
   { path: '/preview/:id', component: PreviewPage },
   { path: '/dedup', component: DedupPage },
   { path: '/dedup/:id', component: DedupDetailPage },
+  { path: '/heic', component: HeicPage },
   { path: '/messages', component: MessagesPage },
   { path: '/settings', component: SettingsPage },
   { path: '/', redirect: '/units' },
@@ -49,6 +50,8 @@ const App = {
       const p = this.$route.path;
       if (p.startsWith('/units')) return 'units';
       if (p.startsWith('/dedup')) return 'dedup';
+      // HEIC 是设置里的工具页（没有独立 Tab），高亮跟随入口所在的「设置」
+      if (p.startsWith('/heic')) return 'settings';
       if (p.startsWith('/messages')) return 'messages';
       if (p.startsWith('/settings') || p.startsWith('/connect')) return 'settings';
       return 'units';
@@ -59,6 +62,7 @@ const App = {
       if (p.startsWith('/units')) return '资源单元';
       if (p.startsWith('/dedup/')) return '查重详情';
       if (p.startsWith('/dedup')) return '查重结果';
+      if (p.startsWith('/heic')) return 'HEIC 转换';
       if (p.startsWith('/messages')) return '消息中心';
       if (p.startsWith('/settings')) return '设置';
       if (p.startsWith('/connect')) return '连接';
@@ -66,7 +70,7 @@ const App = {
     },
     showRefresh() {
       const p = this.$route.path;
-      return p === '/units' || p === '/dedup' || p === '/messages';
+      return p === '/units' || p === '/dedup' || p === '/heic' || p === '/messages';
     }
   },
   watch: {

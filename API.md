@@ -722,6 +722,149 @@ GET /api/events/unread
 
 ---
 
+### 3.8 HEIC 检查与转换
+
+浏览器与 OpenCV 都不原生支持 HEIC/HEIF，而这类文件（iPhone 拍摄、Telegram 下载）
+在很多媒体库里成批存在。这一组端点提供"检查全库 HEIC → 批量转 JPG → 同步数据库/
+索引/缩略图"的完整能力，与桌面端「工具 → HEIC 检查与转换」共用同一套编排
+（`app/services/heic_service.py`）。
+
+#### 检查 HEIC（只读）
+
+```
+GET /api/heic/scan?include_disk=true
+```
+
+| 参数 | 类型 | 默认 | 说明 |
+|--------|------|--------|------|
+| `include_disk` | bool | `true` | 同时遍历磁盘，补上**还没入库**的 HEIC（只看数据库会漏掉从未扫描到的文件） |
+| `root_ids` | string | - | 逗号分隔的媒体库根 ID；省略则扫描全部启用根 |
+
+```json
+{
+  "total": 40, "total_bytes": 24019678,
+  "from_db": 39, "from_disk_only": 1,
+  "broken_hash_count": 19,
+  "missing_count": 0, "invalid_header": 1,
+  "skipped_volume_roots": [], "roots_scanned": ["G:\\Guofu"],
+  "items": [
+    {"path": "G:\\Guofu\\4.15\\xx\\IMG_3103.HEIC", "filename": "IMG_3103.HEIC",
+     "file_id": 476, "size_bytes": 57304, "unit_id": 25, "unit_name": "xx",
+     "in_library": true, "exists": true, "volume_ok": true,
+     "has_perceptual_hash": false}
+  ]
+}
+```
+
+字段说明：
+
+| 字段 | 含义 |
+|--------|------|
+| `broken_hash_count` | pHash/dHash 是**失败占位空串**的数量。这类行不会被自动重算（`get_unindexed_files` 只认 NULL），必须由「修复坏哈希」显式重置 —— 它们此前在查重里完全不可见 |
+| `invalid_header` | 扩展名是 `.heic/.heif` 但文件头不是 HEIC（实测真实库里有一个是改名的 JPEG），已从候选中剔除 |
+| `missing_count` | 库里有记录但磁盘上已找不到（卷可达时才算） |
+| `skipped_volume_roots` | **磁盘未连接**的根目录。客户端必须显式提示"插回磁盘"，不能把掉线显示成"没有 HEIC" |
+| `has_perceptual_hash` | 是否已有非空 pHash（`false` 时该文件在查重里只能靠 MD5 被看见） |
+
+#### 触发转换（异步）
+
+```
+POST /api/heic/convert
+```
+
+```json
+{"paths": ["G:\\Guofu\\...\\IMG_3103.HEIC"],
+ "options": {"quality": 95, "source_action": "trash", "on_conflict": "skip",
+             "reindex": true, "fix_broken": true}}
+```
+
+| 字段 | 类型 | 默认 | 说明 |
+|--------|------|--------|------|
+| `paths` | string[] | - | 待转换的 HEIC 绝对路径，必须位于**启用中的媒体库根**下（越界返回 400） |
+| `quality` | int | `95` | 输出 JPEG 质量 |
+| `source_action` | string | `trash` | `trash`=移至回收站 / `delete`=永久删除 / `keep`=保留源 HEIC。**回收站不可用（网络盘、无回收站分区）时服务端保留源文件**并在逐项结果里给出 `source_kept_reason`，绝不静默降级为永久删除 |
+| `on_conflict` | string | `skip` | 同名 JPG 已存在时：`skip`=跳过（推荐，两边都留）/ `rename`=自动加序号 / `overwrite`=覆盖 |
+| `reindex` | bool | `true` | 转换后立即重算哈希与人脸 |
+| `fix_broken` | bool | `true` | 同时修复"哈希为空串"的旧 HEIC 坏行 |
+
+路径校验失败返回 `400`（不在媒体库范围内）/ `404`（文件不存在）/
+`409`（磁盘未连接）/ `415`（不是 HEIC）。已有重活（查重 / 人脸重扫 / 另一次
+HEIC 转换）在跑时返回 `409`：三者共用同一道进程内互斥门。
+
+立即返回 `202`：
+
+```json
+{"status": "accepted", "task_id": "heic-3", "count": 40}
+```
+
+#### 轮询任务
+
+```
+GET /api/heic/run/{task_id}
+```
+
+```json
+{
+  "task_id": "heic-3", "kind": "heic", "status": "running",
+  "phase": "converting",        // converting=转换 | source=处置源文件 | db=同步记录 | indexing=重算哈希/人脸
+  "progress": [12, 40],
+  "result": null, "error": null, "cancel_requested": false
+}
+```
+
+完成后：
+
+```json
+{
+  "status": "completed", "phase": null, "progress": null,
+  "result": {
+    "total": 40, "converted": 38, "skipped": 2, "failed": 0,
+    "sources_removed": 38, "sources_kept": 0,
+    "db_updated": 38, "healed": 19, "reindexed": 57,
+    "cancelled": false, "elapsed_seconds": 12.4,
+    "items": [{"path": "...", "target": "...jpg", "status": "converted",
+               "error": "", "source_kept_reason": ""}]
+  }
+}
+```
+
+说明：
+
+- `db_updated`：**就地改写**为 `.jpg` 的媒体库记录数（`file_id` 不变，因此
+  `file_tags` 标签关联与星标都不丢）；库里没有的文件（`from_disk_only`）不需要同步。
+- `sources_kept`：源文件被保留的数量。按设置保留、或回收站不可用都会计入，
+  逐项 `source_kept_reason` 给出原因。
+- 取消是**协作式**的：`POST /api/heic/cancel` 后当前文件处理完即停止，
+  结果里 `cancelled=true`，未处理的文件不记为成功。
+
+#### 当前在跑的 HEIC 任务
+
+```
+GET /api/heic/active-task
+```
+
+```json
+{"task_id": "heic-3", "kind": "heic", "status": "running",
+ "phase": "converting", "progress": [12, 40]}
+```
+
+没有任务时返回 `{"task_id": null, "status": null, "kind": null}`。
+只返回 HEIC 类任务，不会误报查重/人脸重扫（那些走 `/api/dedup/active-task`）。
+
+#### 取消转换
+
+```
+POST /api/heic/cancel
+```
+
+```json
+{"status": "cancelling", "task_id": "heic-3"}
+```
+
+空闲时返回 `{"status": "idle", "task_id": null}`（不报错，便于客户端无脑调用）。
+
+---
+
 ## 4. 缩略图与媒体文件
 
 ### 4.1 缩略图 HTTP 服务（已实现）
@@ -732,7 +875,8 @@ GET /api/files/{file_id}/thumbnail
 
 返回缩略图图片二进制（`image/jpeg`），带 `Cache-Control: private, max-age=300`；
 集中缓存（`data/.thumbnails/`）未命中时按需生成。HEIC/HEIF 源文件在服务端
-转码为 JPEG 返回。不存在时返回 404。
+转码为 JPEG 返回（含 EXIF 方向烘焙，横竖不会颠倒）。不存在时返回 404。
+`GET /api/files/{id}/stream` 对 `.heic` 与 `.heif` 同样转码为 JPEG。
 
 ### 4.2 客户端直接读取（同局域网文件共享）
 

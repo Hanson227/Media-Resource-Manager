@@ -1,124 +1,62 @@
 # -*- coding: utf-8 -*-
 """
-HEIC 转换对话框 —— 进度显示 + 后台线程处理。
+HEIC 转换入口（兼容层）—— 单/多文件右键入口都汇聚到同一个对话框。
+
+历史背景：这里曾有一套自己的 QThread + convert_batch 调用，与「HEIC 检查与转换」
+对话框是两份实现 —— 同名冲突、取消、源文件处置（回收站 / 永久删除 / 保留）
+的行为必然漂移，而源文件处置是会丢数据的。现在统一走
+`app.ui.dialogs.heic_batch_convert.HeicBatchConvertDialog`（其内部调
+`app.services.heic_service`，与 Web 端同一条编排）。
 """
 
 import logging
 from pathlib import Path
+from typing import Optional
 
-from PySide6.QtCore import QThread, Signal, Slot, Qt
-from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
-    QPushButton, QTextEdit, QMessageBox,
-)
-
-from app.core.heic_converter import convert_batch, ConvertSummary, ConversionResult
+from config import AppConfig
 
 logger = logging.getLogger(__name__)
 
 
-class HeicConvertWorker(QThread):
-    """后台 HEIC 转换线程。"""
-
-    progress = Signal(int, int, object)  # completed, total, ConversionResult
-    finished = Signal(object)            # ConvertSummary
-
-    def __init__(self, sources: list[Path], overwrite: bool = False,
-                 parent=None) -> None:
-        super().__init__(parent)
-        self._sources = sources
-        self._overwrite = overwrite
-
-    def run(self) -> None:
-        summary = convert_batch(
-            self._sources,
-            overwrite=self._overwrite,
-            progress_callback=lambda c, t, r: self.progress.emit(c, t, r),
-        )
-        self.finished.emit(summary)
+def _resolve_config(config: Optional[AppConfig]) -> AppConfig:
+    """调用方没给配置时，回落到磁盘上的 config.json（再不行用默认值）。"""
+    if config is not None:
+        return config
+    try:
+        return AppConfig.from_file(Path("config.json"))
+    except Exception as e:
+        logger.debug(f"读取 config.json 失败，使用默认配置: {e}")
+        return AppConfig()
 
 
-class HeicConvertDialog(QDialog):
-    """HEIC 转换进度对话框。"""
-
-    def __init__(self, sources: list[Path], parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("HEIC 转 JPG")
-        self.setMinimumWidth(500)
-        self.setModal(True)
-        self._results: list[ConversionResult] = []
-        self._summary: ConvertSummary | None = None
-
-        layout = QVBoxLayout(self)
-
-        # 状态文字
-        self._status_label = QLabel(f"正在转换 {len(sources)} 个 HEIC 文件...")
-        layout.addWidget(self._status_label)
-
-        # 进度条
-        self._progress = QProgressBar()
-        self._progress.setRange(0, len(sources))
-        layout.addWidget(self._progress)
-
-        # 日志区域
-        self._log = QTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setMaximumHeight(200)
-        layout.addWidget(self._log)
-
-        # 按钮
-        btn_layout = QHBoxLayout()
-        self._close_btn = QPushButton("关闭")
-        self._close_btn.clicked.connect(self._on_close)
-        self._close_btn.setEnabled(False)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self._close_btn)
-        layout.addLayout(btn_layout)
-
-        # 启动工作线程
-        self._worker = HeicConvertWorker(sources)
-        self._worker.progress.connect(self._on_progress)
-        self._worker.finished.connect(self._on_finished)
-        self._worker.start()
-
-    @Slot(int, int, object)
-    def _on_progress(self, completed: int, total: int, result: ConversionResult) -> None:
-        self._progress.setValue(completed)
-        if result.success:
-            self._log.append(f"✓ {result.source.name} → {result.target.name}")
-        elif result.skipped:
-            self._log.append(f"− {result.source.name} 已存在（跳过）")
-        else:
-            self._log.append(f"✗ {result.source.name} 失败: {result.error}")
-
-    @Slot(object)
-    def _on_finished(self, summary: ConvertSummary) -> None:
-        self._summary = summary
-        self._status_label.setText(
-            f"转换完成: {summary.success} 成功, "
-            f"{summary.failed} 失败, {summary.skipped} 跳过"
-        )
-        self._close_btn.setEnabled(True)
-        self._close_btn.setText("关闭")
-
-    def _on_close(self) -> None:
-        # 转换未完成时中断工作线程
-        try:
-            if self._worker and self._worker.isRunning():
-                self._worker.requestInterruption()
-                self._worker.wait(3000)
-        except RuntimeError:
-            pass  # 工作线程已被清理
-        self.accept()
+class HeicConvertDialog:
+    """单文件/多文件转换入口（薄封装）。"""
 
     @staticmethod
-    def run_for_files(file_paths: list[str], parent=None) -> bool:
-        """便捷方法：传入文件路径列表，打开转换对话框。"""
-        sources = [Path(p) for p in file_paths if p.lower().endswith(".heic")]
+    def run_for_files(file_paths: list, parent=None,
+                      config: Optional[AppConfig] = None) -> bool:
+        """打开转换对话框并预置给定文件（默认勾选）。
+
+        参数:
+            file_paths: 文件路径列表（非 HEIC 扩展名的会被忽略）。
+            parent: 父窗口。
+            config: 应用配置；None 时回落到 config.json。
+
+        返回:
+            True 表示打开了对话框（对话框内是否真的转换由用户决定）。
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        from app.core.heic_converter import HEIC_EXTENSIONS
+        from app.ui.dialogs.heic_batch_convert import HeicBatchConvertDialog
+
+        sources = [str(p) for p in file_paths
+                   if Path(str(p)).suffix.lower() in HEIC_EXTENSIONS]
         if not sources:
-            QMessageBox.information(parent or None, "HEIC 转换", "没有选中 HEIC 文件")
+            QMessageBox.information(parent, "HEIC 转换", "没有选中 HEIC 文件")
             return False
 
-        dialog = HeicConvertDialog(sources, parent)
+        dialog = HeicBatchConvertDialog(_resolve_config(config), parent,
+                                        sources=sources)
         dialog.exec()
         return True

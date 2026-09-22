@@ -780,9 +780,9 @@ class ThumbnailGridView(QListView):
         menu.exec(self.viewport().mapToGlobal(pos))
 
     def _convert_heic_file(self, file_path: str) -> None:
-        """右键菜单触发单个 HEIC 文件转换。"""
+        """右键菜单触发单个 HEIC 文件转换（走与批量相同的检查/转换对话框）。"""
         from app.ui.dialogs.heic_convert import HeicConvertDialog
-        HeicConvertDialog.run_for_files([file_path], self)
+        HeicConvertDialog.run_for_files([file_path], self, self._config)
         self.refresh()
 
     def _on_tag_toggle(self) -> None:

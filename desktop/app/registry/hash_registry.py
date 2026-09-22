@@ -18,8 +18,13 @@ from PIL import Image
 from app.registry.base import Registry
 from app.utils.constants import HASH_READ_CHUNK_SIZE
 from app.utils.hash_helpers import hamming_distance as _hamming_distance
+from app.utils.image_helpers import ensure_heif_support
 
 logger = logging.getLogger(__name__)
+
+# 本模块的 pHash/dHash 直接调 Image.open() —— 必须先确保 HEIC/HEIF 解码器
+# 已注册，否则 HEIC 会抛 UnidentifiedImageError 并被上层记成失败占位（''）。
+ensure_heif_support()
 
 
 # ============================================================

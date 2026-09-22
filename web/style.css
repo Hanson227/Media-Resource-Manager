@@ -909,6 +909,44 @@ body {
 .face-scan-text { flex: 1; min-width: 160px; line-height: 1.5; }
 .face-scan-btn { width: auto; flex-shrink: 0; font-size: 12px; padding: var(--space-2) var(--space-4); }
 
+/* ========== HEIC 检查与转换 ========== */
+.heic-scan-btn {
+  width: auto; flex-shrink: 0;
+  padding: var(--space-3) var(--space-5); font-size: 12px;
+}
+.heic-warn {
+  display: flex; align-items: flex-start; gap: var(--space-3);
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4); font-size: 12px; color: var(--text-secondary);
+}
+.heic-warn > .mdi { color: var(--amber); font-size: 18px; flex-shrink: 0; }
+.heic-warn-text { flex: 1; min-width: 0; line-height: 1.6; }
+.heic-toolbar {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: 0 var(--space-2) var(--space-3);
+}
+.heic-toolbar .spacer { flex: 1; }
+.heic-count { font-size: 12px; color: var(--text-tertiary); }
+.heic-actions {
+  display: flex; justify-content: flex-end;
+  margin-bottom: var(--space-4);
+}
+.heic-actions .btn { width: auto; padding: var(--space-2) var(--space-5); font-size: 12px; }
+/* 列表行：勾选框 + 文件名/目录 + 大小，右侧不再放操作按钮（避免误点） */
+.heic-row { padding: var(--space-3) var(--space-4); margin-bottom: var(--space-2); }
+.heic-row .card-meta { min-width: 92px; }
+.heic-row .card-meta .count { font-size: 13px; font-weight: 600; }
+.heic-check { display: flex; align-items: center; padding-right: var(--space-2); }
+.heic-check input { width: 18px; height: 18px; accent-color: var(--accent); }
+/* 设置里的 HEIC 工具入口：与其它 setting-item 同构，只加"转换中"提示 */
+.heic-entry .heic-running {
+  margin-left: var(--space-2); padding: 1px 6px; border-radius: 3px;
+  font-size: 10px; font-weight: 600;
+  background: var(--accent-dim); color: var(--accent);
+}
+
 /* ========== Dedup: 二级分组（按左侧单元折叠） ========== */
 /* 视觉上必须是"文件夹 + 列表项"，不能是"盒子套盒子" ——
    组与子项都用卡片样式时，用户会以为界面在递归（实测被反馈过）。 */

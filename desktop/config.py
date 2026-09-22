@@ -140,6 +140,24 @@ class AppConfig:
     thumbnail_quality: int = 80
     """缩略图 JPEG 质量（1-100）。"""
 
+    # ========== HEIC 转换 ==========
+    heic_jpeg_quality: int = 95
+    """HEIC → JPG 的输出质量（1-100）。95 接近视觉无损，体积约为 HEIC 的 2~3 倍。"""
+
+    heic_source_action: str = "trash"
+    """转换成功后如何处理源 HEIC：trash（移至回收站，默认）/ delete（永久删除）/
+    keep（保留源文件）。默认回收站：回收站不可用时**保留源文件**并如实上报，
+    绝不静默降级成永久删除（与 file_ops 的删除纪律一致）。"""
+
+    heic_on_conflict: str = "skip"
+    """同名 JPG 已存在时的策略：skip（跳过并上报，默认）/ rename（自动加序号）/
+    overwrite（覆盖）。默认 skip —— 已存在的同名 JPG 很可能就是这个 HEIC 的
+    历史转换产物，改名会凭空多出重复图，覆盖可能毁掉有价值的那张。"""
+
+    heic_reindex_after_convert: bool = True
+    """转换完成后是否立即为受影响的文件重算哈希与人脸（否则要等下一次
+    一键查重/索引才会补上）。"""
+
     # ========== GUI ==========
     window_title: str = "影视资源管理器"
     """主窗口标题。"""

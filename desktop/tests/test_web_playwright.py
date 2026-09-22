@@ -89,6 +89,17 @@ def ensure_db():
         Image.new("RGB", (100, 100), color=(i * 50, 100, 200)).save(unit_a / f"照片{i+1:02d}.jpg")
         Image.new("RGB", (100, 100), color=(200, 100, i * 50)).save(unit_b / f"视频{i+1:02d}.jpg")
 
+    # HEIC 夹具：Web 端 HEIC 页需要真实可解码的候选（pillow-heif 缺失时跳过）
+    heic_unit = root / "HEIC照片"
+    heic_unit.mkdir(parents=True, exist_ok=True)
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+        for i in range(2):
+            Image.new("RGB", (160, 120), color=(i * 60, 100, 200)).save(
+                heic_unit / f"heic{i}.HEIC", format="HEIF")
+    except Exception as e:
+        print(f"  [INFO] 无法生成 HEIC 夹具（HEIC 页测试会跳过）: {e}")
     # 设置不同的文件真实 mtime：片段A=2024-01-01（较早），片段B=2025-06-01（较新）
     # 使两个单元的 content_modified_at 可区分，供日期排序测试使用
     import os as _os
@@ -99,6 +110,11 @@ def ensure_db():
         _os.utime(f, (ts_a, ts_a))
     for f in unit_b.glob("*.jpg"):
         _os.utime(f, (ts_b, ts_b))
+    # HEIC 单元的日期刻意夹在 A/B 之间：日期排序测试断言"升序第一是片段A、
+    # 降序第一是片段B"，夹具若用当前时间就会插到最前面把断言打穿
+    ts_heic = _dt(2024, 6, 15, 10, 0, 0).timestamp()
+    for f in heic_unit.glob("*.HEIC"):
+        _os.utime(f, (ts_heic, ts_heic))
 
     from app.core.scanner import MediaScanner
     scanner = MediaScanner(
@@ -1592,37 +1608,28 @@ def _inject_running_dedup_task(task_id: str, progress=(3, 10),
     真跑一次查重只要几秒（测试库很小），来不及验证"切走再回来还在跑"；
     所以直接构造运行中的任务状态，不启动真实管线。
     """
-    from app.api.routes import dedup as dedup_routes
+    from app.api import task_registry as registry
 
-    entry = {
-        "task_id": task_id, "kind": "dedup", "status": "running",
-        "phase": phase, "progress": list(progress),
-        "created_at": time.time(), "started_at": time.time(),
-        "finished_at": None, "result": None, "error": None,
-    }
-    with dedup_routes._tasks_lock:
-        dedup_routes._dedup_tasks[task_id] = entry
+    entry = registry.register(task_id, "dedup", phase=phase, progress=list(progress))
+    registry.update(task_id, status="running", started_at=time.time())
     return entry
 
 
 def _finish_dedup_task(task_id: str, result: dict | None = None) -> None:
     """把注入的任务改成已完成（模拟"用户在别的页面时任务跑完了"）。"""
-    from app.api.routes import dedup as dedup_routes
+    from app.api import task_registry as registry
 
-    with dedup_routes._tasks_lock:
-        entry = dedup_routes._dedup_tasks.get(task_id)
-        if entry is not None:
-            entry.update(status="completed", phase=None, progress=None,
-                         finished_at=time.time(),
-                         result=result or {"duplicates_found": 0, "related_found": 0,
-                                           "face_only_found": 0, "elapsed_seconds": 1})
+    registry.update(task_id, status="completed", phase=None, progress=None,
+                    finished_at=time.time(),
+                    result=result or {"duplicates_found": 0, "related_found": 0,
+                                      "face_only_found": 0, "elapsed_seconds": 1})
 
 
 def _drop_dedup_task(task_id: str) -> None:
-    from app.api.routes import dedup as dedup_routes
+    from app.api import task_registry as registry
 
-    with dedup_routes._tasks_lock:
-        dedup_routes._dedup_tasks.pop(task_id, None)
+    registry.prune()
+    registry.drop(task_id)
 
 
 def _progress_width(page) -> str:
@@ -1756,8 +1763,179 @@ def test_dedup_state_restored_after_detail(page):
         shutil.rmtree(seeded["face_paths"][0].parent.parent, ignore_errors=True)
 
 
+# ============================================================
+# HEIC 检查与转换页
+# ============================================================
+
+def _inject_running_heic_task(task_id: str, progress=(1, 4),
+                              phase: str = "converting") -> dict:
+    """在测试服务器的任务表里放一个"正在跑"的 HEIC 转换任务。
+
+    真跑一次转换只要几百毫秒（测试库很小），来不及验证"切走再回来还在跑"，
+    所以直接构造运行中的任务状态，不启动真实管线。
+    """
+    from app.api import task_registry as registry
+
+    entry = registry.register(task_id, "heic", phase=phase, progress=list(progress))
+    registry.update(task_id, status="running", started_at=time.time())
+    return entry
+
+
+def _finish_heic_task(task_id: str, result: dict | None = None) -> None:
+    """把注入的 HEIC 任务改成已完成。"""
+    from app.api import task_registry as registry
+
+    registry.update(task_id, status="completed", phase=None, progress=None,
+                    finished_at=time.time(),
+                    result=result or {"total": 2, "converted": 2, "skipped": 0,
+                                      "failed": 0, "sources_removed": 0,
+                                      "sources_kept": 2, "db_updated": 2,
+                                      "healed": 0, "reindexed": 2,
+                                      "cancelled": False, "elapsed_seconds": 0.5,
+                                      "items": []})
+
+
+def _drop_heic_task(task_id: str) -> None:
+    from app.api import task_registry as registry
+
+    registry.prune()
+    registry.drop(task_id)
+
+
+def _open_heic_tool(page) -> bool:
+    """从「设置」进入 HEIC 工具页（它不占导航 Tab，是设置里的一个入口）。"""
+    _goto_tab(page, "设置")
+    page.wait_for_timeout(500)
+    entry = page.locator(".setting-item.heic-entry")
+    if entry.count() == 0 or not entry.first.is_visible():
+        return False
+    entry.first.click()
+    page.wait_for_timeout(700)
+    return True
+
+
+def test_heic_tool_entry_from_settings(page):
+    """Web 测试 17: HEIC 是设置里的工具入口，而不是独立导航栏目。"""
+    section("Web 测试 17: HEIC 工具入口（设置内）")
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    page.wait_for_load_state("networkidle")
+
+    # 导航里不该再出现 HEIC（用户明确要求不要单独开栏目）
+    nav_heic = page.locator(".sidebar-item, .tab-item", has_text="HEIC").count()
+    check("导航栏没有 HEIC 栏目", nav_heic == 0)
+
+    if not _open_heic_tool(page):
+        check("设置里有 HEIC 入口（移动端布局下侧边栏不可点）", True)
+        return
+    check("从设置进入后路由为 /heic", "/heic" in page.url)
+    check("HEIC 页渲染检查按钮", page.locator(".heic-scan-btn").count() > 0)
+    check("HEIC 页有转换按钮", page.locator(".dedup-run-btn").count() > 0)
+    # 工具页属于"设置"这一块：侧边栏/底部 Tab 应高亮设置
+    active_tab = page.locator(".tab-item.active, .sidebar-item.active").first
+    if active_tab.count():
+        check("工具页高亮「设置」",
+              "设置" in (active_tab.text_content() or ""))
+
+
+def test_heic_page_scan_and_convert(page):
+    """Web 测试 18: HEIC 页检查 → 全选 → 转换 → 状态与摘要。"""
+    section("Web 测试 18: HEIC 检查与转换")
+    page.set_viewport_size({"width": 1280, "height": 900})
+    _open_heic_tool(page)
+    page.wait_for_load_state("networkidle")
+
+    scan_btn = page.locator(".heic-scan-btn")
+    if scan_btn.count() == 0:
+        check("HEIC 页未渲染（跳过）", True)
+        return
+    scan_btn.first.click()
+    page.wait_for_timeout(1500)
+
+    rows = page.locator(".heic-row[data-path]")
+    count = rows.count()
+    check(f"检查到 HEIC 候选（实际 {count}）", count > 0)
+    if count == 0:
+        return
+
+    targets = [rows.nth(i).get_attribute("data-path") or "" for i in range(count)]
+    heic_targets = [t for t in targets if t.lower().endswith((".heic", ".heif"))]
+    check(f"候选中含 .HEIC 文件（{len(heic_targets)} 个）", len(heic_targets) > 0)
+
+    # 源文件处置选"保留"，避免测试依赖回收站可用性
+    page.select_option('.dedup-opt:has-text("源文件") select', "keep")
+    page.locator(".sort-btn", has_text="全选").first.click()
+    page.wait_for_timeout(200)
+    check("已勾选候选",
+          "转换选中 (0)" not in (page.locator(".dedup-run-btn").text_content() or ""))
+
+    page.locator(".dedup-run-btn").first.click()
+    converted = 0
+    for _ in range(60):
+        page.wait_for_timeout(500)
+        converted = page.locator('.heic-row[data-status="converted"]').count()
+        if converted > 0:
+            break
+    check(f"出现「已转换」行（实际 {converted}）", converted > 0)
+
+    sub = page.locator(".dedup-run-text .run-sub").text_content() or ""
+    check(f"显示完成摘要（实际 {sub!r}）", "完成" in sub)
+    check("摘要含成功计数", "成功" in sub)
+    check("转换结束后进度条消失", page.locator(".run-progress-bar").count() == 0)
+
+
+def test_heic_progress_survives_navigation(page):
+    """Web 测试 19: HEIC 转换进度跨路由 / 整页刷新存活。
+
+    与查重页同一类问题：任务跑在服务端后台线程，页面组件却随路由卸载重建 ——
+    运行态存组件 data 里就会"进度条消失但风扇还在转"。
+    """
+    section("Web 测试 19: HEIC 进度跨路由存活")
+    page.set_viewport_size({"width": 1280, "height": 900})
+    task_id = "heic-slow-test"
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/heic")
+        # ① 服务端已有在跑的任务 → 整页刷新后进入也应自动接上进度
+        _inject_running_heic_task(task_id, progress=(1, 4))
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(1600)
+        check("刷新进入时显示进度条", page.locator(".run-progress-bar").count() > 0)
+        w1 = _progress_width(page)
+        check(f"进度条宽度对应 1/4（实际 {w1!r}）", w1.startswith("25"))
+        check("按钮显示「转换中…」",
+              "转换中" in (page.locator(".dedup-run-btn").text_content() or ""))
+        check("副标题显示阶段与进度",
+              "正在转换 1 / 4"
+              in (page.locator(".dedup-run-text .run-sub").text_content() or ""))
+
+        # ② 切到单元页再回来（经设置里的入口）：服务端仍在跑，
+        #    进度条不能消失也不会卡在旧进度
+        _goto_tab(page, "单元")
+        page.wait_for_timeout(400)
+        _inject_running_heic_task(task_id, progress=(3, 4))   # 期间服务端在推进
+        _open_heic_tool(page)
+        page.wait_for_timeout(1600)
+        check("切走再回来进度条仍在", page.locator(".run-progress-bar").count() > 0)
+        w2 = _progress_width(page)
+        check(f"进度条跟进到 3/4（实际 {w2!r}）", w2.startswith("75"))
+
+        # ③ 任务在别的页面时跑完 → 回来必须看到完成摘要
+        _goto_tab(page, "单元")
+        page.wait_for_timeout(300)
+        _finish_heic_task(task_id)
+        _open_heic_tool(page)
+        page.wait_for_timeout(2000)
+        sub = page.locator(".dedup-run-text .run-sub").text_content() or ""
+        check(f"后台完成后回来显示完成摘要（实际 {sub!r}）", "完成" in sub)
+        check("摘要含成功 2", "成功 2" in sub)
+        check("完成后进度条消失", page.locator(".run-progress-bar").count() == 0)
+    finally:
+        _drop_heic_task(task_id)
+
+
 def test_messages_mark_all_read(page):
-    """Web 测试 17: 消息页「全部已读」。
+    """Web 测试 20: 消息页「全部已读」。
 
     后端早就有 `POST /api/messages/read-all`，但 Web 端没有任何入口 ——
     未读消息只能一条条点开，积压几十条时用户只能放任角标一直挂着。
@@ -2127,6 +2305,15 @@ def main():
             page.wait_for_load_state("networkidle")
             test_dedup_progress_survives_navigation(page)
             test_dedup_state_restored_after_detail(page)
+
+            # HEIC 检查与转换（设置内的工具入口 / 检查 → 全选 → 转换 / 进度跨路由存活）
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_load_state("networkidle")
+            test_heic_tool_entry_from_settings(page)
+            page.goto(f"http://127.0.0.1:{_PORT}/#/heic")
+            page.wait_for_load_state("networkidle")
+            test_heic_page_scan_and_convert(page)
+            test_heic_progress_survives_navigation(page)
 
             # 消息一键已读 / 单元搜索
             test_messages_mark_all_read(page)

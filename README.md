@@ -31,6 +31,9 @@ Media/
 - **一键智能查重** — 自动计算哈希+人脸特征+视频抽帧，多策略匹配：人脸识别 → MD5（精确）→ 视频帧 → pHash（感知）→ dHash（差异），基于杰卡德指数判定单元级重复
 - **人脸识别** — Caffe SSD 检测 + OpenFace 128 维特征提取，同一人物在不同照片中也能识别
 - **缩略图预览** — 图像/视频自动生成缩略图，支持网格浏览、空格键快速预览
+- **HEIC 检查与转换** — 与 Web 端同一套编排：检查全库（含未入库的）HEIC →
+  批量转 JPG → 就地改写媒体库记录（`file_id`/标签保留）→ 重算哈希与人脸；
+  源文件默认进回收站（不可用则保留），同名冲突默认跳过
 - **实时文件监控** — watchdog 监测文件变更，支持去抖合并
 - **Web 前端** — Vue 3 SPA，支持手机/平板/桌面端响应式布局，左右滑动预览、视频播放、手势快进快退
 - **Web 访问密码** — 桌面端设置 4 位 PIN，手机浏览器输入后进入
@@ -198,6 +201,11 @@ PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
 | POST | `/api/dedup/results/{id}/resolve` | 处理查重结果（keep_a/keep_b/whitelist/ignore 等） |
 | POST | `/api/dedup/run` | 触发查重（异步，202 + task_id；与桌面端互斥，跳过已处置/白名单对） |
 | GET | `/api/dedup/run/{task_id}` | 轮询查重任务进度/结果 |
+| GET | `/api/heic/scan` | 检查媒体库里的 HEIC（库内 + 磁盘，含"哈希为空串"的坏行计数） |
+| POST | `/api/heic/convert` | 触发 HEIC → JPG 转换（异步 202 + task_id；路径限定在媒体库根内） |
+| GET | `/api/heic/run/{task_id}` | 轮询 HEIC 任务进度/结果（逐项状态 + 源文件处置说明） |
+| GET | `/api/heic/active-task` | 当前在跑的 HEIC 任务（切页/刷新后重新接上进度） |
+| POST | `/api/heic/cancel` | 请求取消 HEIC 转换（协作式，当前文件完成后停止） |
 | GET | `/api/events/unread` | 未读事件简报（角标轮询） |
 | GET | `/api/messages` | 消息列表 |
 | POST | `/api/messages/{id}/read` | 标记已读 |
@@ -223,6 +231,7 @@ Web 前端是基于 Vue 3 的 SPA，通过桌面端内置的 FastAPI 服务器�
 - 资源单元浏览、文件网格、左右滑动预览
 - 视频播放：播放/暂停、进度拖动、倍速播放、手势快进快退
 - 查重结果查看和处理
+- HEIC 检查与转换（**设置里的工具入口**，不占导航栏目：检查全库 HEIC → 勾选 → 批量转 JPG，进度跨页存活）
 - 消息中心
 - 访问密码锁屏
 
@@ -231,7 +240,8 @@ Web 前端是基于 Vue 3 的 SPA，通过桌面端内置的 FastAPI 服务器�
 - **人脸检测性能** — CPU 上每张图 ~200-300ms，大量文件时请耐心等待索引完成；可考虑 GPU 加速
 - **Web 视频预览** — 依赖浏览器原生解码器，HEVC/Dolby Vision 等编码可能不兼容
 - **桌面端视频预览** — QMediaPlayer 依赖系统解码器，部分编码（HEVC/AV1）可能需额外安装
-- **非视频类型** — RAW 格式依赖 `rawpy`、HEIC 格式依赖 `pillow-heif`
+- **非视频类型** — RAW 格式依赖 `rawpy`；HEIC/HEIF 依赖 `pillow-heif`（pHash/dHash/人脸/缩略图/浏览器预览/转换全链路均已支持，**不需要**先把 HEIC 转成 JPG 才能查重）
+- **AVIF** — 未纳入媒体扩展名清单，不参与扫描与转换
 
 ## 开发
 

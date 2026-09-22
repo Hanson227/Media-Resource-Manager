@@ -283,6 +283,50 @@ The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "reso
    - 全库补扫走显式动作（Web「补扫全部视频人脸」/ 桌面「工具 → 重扫视频人脸」），
      与查询共用互斥门
 
+## HEIC 处理（解码 / 转换 / 数据同步）
+
+- **解码注册只有一个入口** — `app/utils/image_helpers.ensure_heif_support()`（幂等，
+  模块导入即调用一次；`hash_registry` 也显式调一次）。pHash/dHash/缩略图/HEIC 转换
+  都走 `Image.open()`，而 Pillow 原生不认 HEIC：此前注册散落在 `main.py` 与
+  `api/routes/files.py`，换个入口（索引服务、测试、纯 API 进程）就静默降级 ——
+  实测真实库 40 个 HEIC 里 **19 个** `phash`/`dhash` 是失败占位空串、`width/height`
+  为 NULL、`face_vectors` **0 条**。不要在别处再 `import pillow_heif`（会再次分叉）
+- **OpenCV 读不了 HEIC** — `cv2.imdecode` 对 HEIC 直接返回 `None`（实测 OpenCV 5.0.0），
+  所以人脸检测统一走 `image_helpers.read_image_bgr()`：快路径 cv2，HEIC/HEIF 回落
+  PIL（`ImageOps.exif_transpose` → RGB → BGR）。不要在解码路径直接调 `imread_unicode`
+- **Pillow 12 已移除 `Image._getexif`** — 手工读方向标签的老写法会落进 `except: pass`
+  **静默 no-op**（缩略图一直是歪的，日志里什么都看不到；测试用 orientation=6 的图锁定）。
+  统一走 `ImageOps.exif_transpose`（无方向标记时是 no-op，安全）
+- **转换后就地改写记录，不重插** — `queries.update_file_after_convert` 更新
+  `path/filename/extension/size_bytes`，并把 md5/phash/dhash/width/height 置 NULL、
+  删人脸向量/视频帧、`face_scan_version=0`，随后 `refresh_unit_stats` +
+  `CleanupService.invalidate_thumbnail`。保留 `file_id` 才能保住 `file_tag_mappings`；
+  "删旧行让扫描重插"会把标签一起丢掉。并发兜底：若新 `.jpg` 路径已被别处插入记录，
+  改为删旧 HEIC 行、保留新行（不因唯一约束炸掉）
+- **源文件处置遵守与删除同一套纪律** — 默认 `trash`；回收站不可用（网络盘 / 无回收站
+  分区）时**保留源文件**并在逐项结果里写 `source_kept_reason`，绝不静默降级成永久删除
+  （`delete` 只能由用户显式选择，桌面端还会二次确认）
+- **同名冲突默认跳过** — 已存在的同名 JPG 很可能就是这个 HEIC 的历史转换产物：
+  改名会凭空多出重复图（本应用本身是查重工具），覆盖可能毁掉有价值的那张
+- **冲突判定要把数据库也算上** — `on_conflict='rename'` 时若只查磁盘，改出来的路径
+  可能撞 `media_files.path` 唯一约束（库里可能有一条指向已删除文件的 JPG 记录）。
+  服务层 `_load_known_target_paths()` 把磁盘与库合并判断
+- **"哈希为空串"是永久坏行** — 索引侧把计算失败写成 `''`，而 `get_unindexed_files`
+  只认 NULL，因此这类行**永远不会自愈**（实测 19 条 HEIC）。必须用
+  `count_files_with_empty_hash` / `heal_broken_heic_hashes` 显式重置后再重算
+- **取消是协作式的** — `convert_batch(cancelled=...)` 在每个文件前检查；旧实现只在循环
+  结束后检查一次中断标志，"取消"按钮其实不生效。Web 端用任务登记表
+  （`app/api/task_registry.py`）里的 `cancel_requested`，是同一个开关
+- **HEIC 与查重/人脸重扫共用同一道互斥门** — 转换后会重算哈希/人脸，与查重并发会互相
+  干扰；`/api/heic/convert` 在门被占时返回 409
+- **任务登记表已收敛** — 查重 / 人脸重扫 / HEIC 转换共用 `app/api/task_registry.py`；
+  各路由的 `/active-task` 必须按 kind 过滤，否则 HEIC 转换会被查重页显示成"查重中"
+- **Web 端 HEIC 不占导航栏目** — 它是**设置页里的一个工具入口**
+  （`.setting-item.heic-entry` → `/heic`）：路由与整页都保留，但侧边栏/底部 Tab
+  没有它，`currentTab` 对 `/heic` 返回 `settings`（高亮跟随入口所在的设置）；
+  入口在服务端有转换任务时显示「转换中…」（mount 时查一次 `/api/heic/active-task`）。
+  加入口/撤入口都要同步 `web/index.html` 与 `sw.js` 的 CACHE 版本
+
 ## Database
 
 SQLite with WAL mode + foreign keys enabled. Single-file at `desktop/data/media_manager.db` (configurable via `config.json`). 12 tables with CHECK constraints enforcing enum values. `expire_on_commit=False` so ORM objects survive session close.
@@ -293,6 +337,15 @@ Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desk
 
 ## Current State
 
+- **HEIC 全链路** — 解码注册统一收敛到 `image_helpers.ensure_heif_support()`，
+  `cv2` 读不了 HEIC 的部分由 `read_image_bgr()` 走 PIL 兜底；pHash/dHash/宽高/
+  人脸/缩略图/浏览器预览/批量转换都已可用。`/api/heic/*` 与桌面端
+  「工具 → HEIC 检查与转换」（文件夹右键「HEIC 转 JPG」、文件右键「转换为 JPG」
+  都进同一个对话框）共用 `services/heic_service.py`；转换后就地改写记录并重算
+  哈希/人脸；"哈希为空串"的旧坏行可用「修复旧版无法解码的哈希」显式重置重算
+  （实测真实库 40 个 HEIC：39 个可转换 + 1 个是改名的 JPEG，19 个坏哈希）。
+  **Web 端不占导航栏目**：设置页里的「HEIC 检查与转换」入口（`/heic`），
+  有任务在跑时入口显示「转换中…」
 - **Face detection** — 模型在 `desktop/models/`：`face_detection_yunet_2023mar.onnx`（YuNet 检测）
   + `face_recognition_sface_2021dec.onnx`（SFace 128 维特征），均来自 OpenCV Zoo 并经官方
   LFS sha256 校验。走 `cv2.FaceDetectorYN`/`cv2.FaceRecognizerSF`，**不依赖** OpenCV 5 已移除的
@@ -356,8 +409,9 @@ Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desk
   电脑上不必再点屏幕键盘；输入框聚焦时与 Ctrl/Cmd 组合键一律放行；
   精细指针设备额外显示一行键盘提示（`.pin-hint-kb`）
 - **Web 应用壳双 CDN** — `index.html` 引导块给 vue / vue-router 各备
-  jsdelivr + unpkg 两个镜像并串行加载本地脚本；`sw.js` CACHE 升到 v6。
+  jsdelivr + unpkg 两个镜像并串行加载本地脚本；`sw.js` CACHE 升到 v8。
   起因：实测 unpkg 整段 `ERR_CONNECTION_CLOSED`，写死单 CDN 时整个 SPA 白屏
+  （v7 = 加 HEIC 导航栏目，v8 = 又撤掉它改成设置里的入口 —— 改应用壳就必须 bump）
 - **Config** — 设置对话框支持 web_pin、缩略图、API 等全部字段
 
 

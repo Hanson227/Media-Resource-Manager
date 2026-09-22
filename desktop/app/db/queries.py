@@ -7,6 +7,7 @@
 """
 
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Sequence, Any
 
 from sqlalchemy import func, and_, or_
@@ -401,6 +402,151 @@ def get_file_count_by_unit_ids(session: Session, unit_ids: list[int]) -> dict[in
         func.count(MediaFile.id),
     ).filter(MediaFile.resource_unit_id.in_(unit_ids)).group_by(MediaFile.resource_unit_id).all()
     return {unit_id: count for unit_id, count in results}
+
+
+def get_files_by_extensions(session: Session,
+                            extensions: Sequence[str]) -> list[MediaFile]:
+    """按扩展名集合取活跃单元内的媒体文件（如 HEIC/HEIF 检查）。
+
+    只查扩展名、不分页：HEIC 这类需要整体检查的格式在真实库里量级很小
+    （实测 40 个），一次性取回比让上层自己拼分页简单且不会漏。
+    """
+    exts = [e.lower() for e in extensions]
+    if not exts:
+        return []
+    return session.query(MediaFile).join(
+        ResourceUnit, MediaFile.resource_unit_id == ResourceUnit.id
+    ).filter(
+        ResourceUnit.status == UnitStatus.ACTIVE.value,
+        MediaFile.extension.in_(exts),
+    ).order_by(MediaFile.path).all()
+
+
+def count_files_with_empty_hash(session: Session,
+                                extensions: Optional[Sequence[str]] = None) -> int:
+    """统计哈希为"失败占位空串"的文件数。
+
+    空串不是 NULL：索引侧把计算失败写成 ''，`get_unindexed_files` 就再也不会
+    取到它 —— 这类行是**永久坏行**，必须由显式的修复动作重置回 NULL
+    （实测真实库 40 个 HEIC 里 19 个 phash/dhash 为空串，改规则后不会自愈）。
+    """
+    query = session.query(MediaFile).filter(or_(
+        MediaFile.md5_hash == "",
+        MediaFile.phash == "",
+        MediaFile.dhash == "",
+    ))
+    if extensions:
+        query = query.filter(MediaFile.extension.in_([e.lower() for e in extensions]))
+    return query.count()
+
+
+def get_files_with_empty_hash(session: Session,
+                              extensions: Optional[Sequence[str]] = None
+                              ) -> list[MediaFile]:
+    """取哈希为"失败占位空串"的文件行（供显式修复使用，见 count_files_with_empty_hash）。"""
+    query = session.query(MediaFile).filter(or_(
+        MediaFile.md5_hash == "",
+        MediaFile.phash == "",
+        MediaFile.dhash == "",
+    ))
+    if extensions:
+        query = query.filter(MediaFile.extension.in_([e.lower() for e in extensions]))
+    return query.order_by(MediaFile.id).all()
+
+
+def reset_file_hashes(session: Session, file_ids: Sequence[int]) -> int:
+    """把文件的哈希/宽高重置为 NULL，并清掉派生数据，使其重新进入待索引队列。
+
+    同时删除人脸向量与视频帧、把 face_scan_version 归零：转换后的文件是新的
+    编码产物，旧的派生数据（尤其"从 HEIC 解不出来"的空结果）没有保留价值。
+    """
+    ids = [int(i) for i in file_ids]
+    if not ids:
+        return 0
+    session.query(FaceVector).filter(FaceVector.file_id.in_(ids)).delete(
+        synchronize_session=False)
+    session.query(VideoFrame).filter(VideoFrame.file_id.in_(ids)).delete(
+        synchronize_session=False)
+    return session.query(MediaFile).filter(MediaFile.id.in_(ids)).update({
+        "md5_hash": None,
+        "phash": None,
+        "dhash": None,
+        "width": None,
+        "height": None,
+        "face_scan_version": 0,
+        "updated_at": datetime.now(),
+    }, synchronize_session=False)
+
+
+def update_file_after_convert(session: Session, file_id: int, *, path: str,
+                              filename: str, extension: str, size_bytes: int) -> bool:
+    """HEIC → JPG 转换后就地改写文件行（保留 file_id，从而保留标签/星标）。
+
+    为什么不"删旧行 + 让扫描重新插入"：file_id 会变，`file_tag_mappings`
+    随之丢失。就地改写 + 重置哈希（交给索引管线重算）语义更干净。
+
+    返回:
+        True 表示确实更新了一行。
+    """
+    updated = session.query(MediaFile).filter(MediaFile.id == file_id).update({
+        "path": path,
+        "filename": filename,
+        "extension": extension,
+        "size_bytes": int(size_bytes),
+        "md5_hash": None,
+        "phash": None,
+        "dhash": None,
+        "width": None,
+        "height": None,
+        "face_scan_version": 0,
+        "updated_at": datetime.now(),
+    }, synchronize_session=False)
+    if updated:
+        session.query(FaceVector).filter(FaceVector.file_id == file_id).delete(
+            synchronize_session=False)
+        session.query(VideoFrame).filter(VideoFrame.file_id == file_id).delete(
+            synchronize_session=False)
+    return bool(updated)
+
+
+def delete_video_frames_for_file(session: Session, file_id: int) -> int:
+    """删除某个文件的全部视频帧哈希（转换/重索引时清理派生数据用）。"""
+    return session.query(VideoFrame).filter(VideoFrame.file_id == file_id).delete(
+        synchronize_session=False)
+
+
+def refresh_unit_stats(session: Session, unit_ids: Sequence[int]) -> int:
+    """按当前文件行重算单元的 file_count / total_size / content_modified_at。
+
+    与 scan_worker 清理失效文件后的算法一致（内容日期 = 单元内文件的
+    max(st_mtime)，文件夹自身时间戳会因移动而失真），但这里额外允许把
+    content_modified_at 清成 NULL —— `update_unit_stats(None)` 是"不更新"，
+    单元被清空时会留下过期日期。
+
+    返回:
+        实际刷新的单元数。
+    """
+    refreshed = 0
+    for uid in list(dict.fromkeys(int(i) for i in unit_ids)):
+        files = get_files_by_unit(session, uid)
+        total_size = sum(int(f.size_bytes or 0) for f in files)
+        latest: Optional[float] = None
+        for f in files:
+            try:
+                m = Path(f.path).stat().st_mtime
+            except OSError:
+                continue
+            latest = m if latest is None else max(latest, m)
+        session.query(ResourceUnit).filter(ResourceUnit.id == uid).update({
+            "file_count": len(files),
+            "total_size": total_size,
+            "content_modified_at": (
+                datetime.fromtimestamp(latest) if latest is not None else None
+            ),
+            "updated_at": datetime.now(),
+        }, synchronize_session=False)
+        refreshed += 1
+    return refreshed
 
 
 # ============================================================

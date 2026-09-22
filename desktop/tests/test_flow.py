@@ -3401,6 +3401,490 @@ def test_heic_converter():
     check("HEIC 导入正常", True)
 
 
+# ============================================================
+# HEIC 专项（真实 HEIC 夹具 + 全链路：解码 → 转换 → 入库 → 重索引）
+# ============================================================
+
+def make_heic_file(path: Path, size=(120, 90), color=(10, 200, 30)) -> bool:
+    """写一个真实 HEIC 文件（pillow_heif 支持编码）。
+
+    返回 False 表示环境缺 pillow-heif（调用方应打印说明并跳过相关断言）。
+    """
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+        from PIL import Image as _Img
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _Img.new("RGB", size, color).save(path, format="HEIF")
+        return path.is_file()
+    except Exception as e:
+        print(f"      [INFO] 无法生成 HEIC 夹具（{type(e).__name__}: {e}）")
+        return False
+
+
+def seed_heic_unit(tmp: Path, count: int = 2, folder: str = "heic单元"):
+    """造 count 个真实 HEIC 并入库（返回 (单元目录, 路径列表, root_id)）。
+
+    直接写库而不走 scanner：单元识别有启发式（叶子单元需 ≥2 个文件），
+    夹具数量为 1 时会被当成"零散文件"跳过，测试就会莫名其妙没有数据。
+    """
+    unit_dir = tmp / folder
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for i in range(count):
+        p = unit_dir / f"img{i}.HEIC"
+        if not make_heic_file(p, (100 + i * 10, 80), (i * 40 % 255, 120, 200)):
+            return unit_dir, [], None
+        paths.append(p)
+
+    with DatabaseManager.session() as session:
+        root = (q.get_root_by_path(session, str(tmp))
+                or q.add_library_root(session, str(tmp)))
+        unit_row = q.get_unit_by_path(session, str(unit_dir))
+        total = sum(p.stat().st_size for p in paths)
+        if unit_row is None:
+            unit_row = q.create_unit(session, str(unit_dir), unit_dir.name, root.id,
+                                     file_count=len(paths), total_size=total)
+        for p in paths:
+            if q.get_file_by_path(session, str(p)) is None:
+                q.insert_media_file(
+                    session, path=str(p), filename=p.name,
+                    extension=p.suffix.lower(), media_type="image",
+                    size_bytes=p.stat().st_size, resource_unit_id=unit_row.id)
+        root_id = root.id
+    return unit_dir, paths, root_id
+
+
+def cleanup_heic_unit(tmp: Path, root_id=None) -> None:
+    """清掉测试造出来的根/单元/文件记录。"""
+    import shutil
+    with DatabaseManager.session() as session:
+        root = q.get_root_by_path(session, str(tmp))
+        if root is not None:
+            for u in q.get_units_by_root(session, root.id):
+                q.delete_resource_unit(session, u.id)
+            session.delete(root)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heic_decode_registration():
+    """T33: HEIC 能被 pHash/dHash/人脸解码路径读到（不依赖调用方先注册）。
+
+    回归背景：pHash/dHash 走 `Image.open()`、人脸走 `cv2.imdecode`，而
+    `pillow_heif.register_heif_opener()` 此前只在 main.py / api/routes/files.py 里调 ——
+    换入口（索引服务/测试/纯 API 进程）HEIC 就静默解不开：实测真实库 40 个 HEIC
+    里 19 个的 phash/dhash 是失败占位空串、width/height 为 NULL、人脸 0 条。
+    """
+    section("T33: HEIC 解码注册（pHash/dHash/人脸读取路径）")
+    import tempfile
+    from app.utils import image_helpers
+    from app.registry.hash_registry import create_default_registry
+
+    tmp = Path(tempfile.mkdtemp(prefix="heic_decode_"))
+    try:
+        heic = tmp / "decode.HEIC"
+        if not make_heic_file(heic, (160, 120), (200, 40, 40)):
+            check("HEIC 夹具不可用（跳过）", True)
+            return
+
+        check("pillow-heif 支持已注册", image_helpers.ensure_heif_support() is True)
+
+        reg = create_default_registry()
+        phash = reg.get("phash").compute(heic)
+        dhash = reg.get("dhash").compute(heic)
+        check(f"HEIC pHash 非空（{phash[:8]}）", bool(phash))
+        check(f"HEIC dHash 非空（{dhash[:8]}）", bool(dhash))
+
+        from app.core.hash_engine import HashEngine
+        engine = HashEngine(face_detection_enabled=False,
+                            model_dir=AppConfig().face_model_dir)
+        w, h = engine._get_image_dimensions(heic)
+        check(f"HEIC 宽高可读（{w}x{h}）", w == 160 and h == 120)
+
+        # 人脸检测路径：cv2.imdecode 读不了 HEIC，必须走 PIL 兜底（read_image_bgr）
+        bgr = image_helpers.read_image_bgr(heic)
+        check("HEIC 可转为 OpenCV BGR（人脸检测前置条件）",
+              bgr is not None and bgr.shape[:2] == (120, 160))
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_exif_orientation_transposed():
+    """T34: EXIF 方向必须被烘焙进缩略图（Pillow 12 已移除 Image._getexif）。
+
+    回归背景：`_fix_orientation` 原来手工调 `img._getexif()`，Pillow 12 里这个
+    私有方法已被删除 —— 异常被 `except: pass` 吞掉，带方向的照片缩略图
+    一直是歪的，且日志里看不出任何异常。
+    """
+    section("T34: EXIF 方向修正（缩略图）")
+    import tempfile
+    from PIL import Image as _Img
+
+    tmp = Path(tempfile.mkdtemp(prefix="heic_exif_"))
+    try:
+        # 60x40 横图 + orientation=6（顺时针旋转 90°）→ 正确显示应为 40x60 竖图
+        img = _Img.new("RGB", (60, 40), (30, 90, 200))
+        for x in range(0, 20):
+            for y in range(0, 20):
+                img.putpixel((x, y), (255, 255, 255))  # 左上角白块，便于辨识方向
+        exif = _Img.Exif()
+        exif[0x0112] = 6
+        src = tmp / "rotated.jpg"
+        img.save(src, "JPEG", exif=exif.tobytes())
+
+        check("Pillow 已无 Image._getexif（旧的实现方式必然静默失效）",
+              not hasattr(_Img.Image, "_getexif"))
+
+        gen = ThumbnailGenerator(max_size=256, quality=80)
+        cache = tmp / "thumbs"
+        cache.mkdir()
+        info = gen.generate(src, cache)
+        with _Img.open(info.thumbnail_path) as thumb:
+            tw, th = thumb.size
+        check(f"缩略图按 EXIF 方向渲染为竖图（实际 {tw}x{th}）", th > tw)
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heic_convert_syncs_db():
+    """T35: 转换后就地改写记录（file_id/标签保留）+ 重算哈希。"""
+    section("T35: HEIC 转换 → 数据库同步")
+    import tempfile
+    from app.services import heic_service as hs
+    from app.core.heic_converter import HEIC_EXTENSIONS
+
+    tmp = Path(tempfile.mkdtemp(prefix="heic_sync_"))
+    root_id = None
+    try:
+        unit_dir, paths, root_id = seed_heic_unit(tmp, count=2)
+        if not paths:
+            check("HEIC 夹具不可用（跳过）", True)
+            return
+
+        with DatabaseManager.session() as session:
+            rows = [q.get_file_by_path(session, str(p)) for p in paths]
+            file_ids = [r.id for r in rows if r]
+            tag = q.create_tag(session, "HEIC测试标签", "#123456")
+            q.set_file_tags(session, file_ids[0], [tag.id])
+        check("转换前 2 条 HEIC 记录已入库", len(file_ids) == 2)
+
+        options = hs.HeicConvertOptions(
+            source_action=hs.SOURCE_KEEP, on_conflict="skip",
+            reindex=True, fix_broken=True)
+        outcome = hs.run_heic_pipeline(AppConfig(), [str(p) for p in paths],
+                                       options, notify=False)
+
+        check(f"全部转换成功（实际 {outcome.converted}/{outcome.total}）",
+              outcome.converted == 2)
+        check("源文件按设置为保留", outcome.sources_kept == 2)
+        check(f"记录就地改写 2 条（实际 {outcome.db_updated}）", outcome.db_updated == 2)
+        jpgs = sorted(p.name for p in unit_dir.glob("*.jpg"))
+        check(f"生成了 2 个 JPG（实际 {jpgs}）", len(jpgs) == 2)
+
+        with DatabaseManager.session() as session:
+            for fid in file_ids:
+                row = q.get_file_by_id(session, fid)
+                check(f"file_id={fid} 仍存在（标签/星标不丢）", row is not None)
+                if row:
+                    check(f"记录已指向 .jpg（实际 {row.extension}）",
+                          row.extension == ".jpg")
+                    check(f"记录路径已更新（实际 {Path(row.path).name}）",
+                          Path(row.path).suffix.lower() == ".jpg")
+                    check(f"记录哈希已重算（md5={bool(row.md5_hash)}, "
+                          f"phash={bool(row.phash)}）",
+                          bool(row.md5_hash) and bool(row.phash))
+                    check("记录宽高已填（不再是 NULL）",
+                          bool(row.width) and bool(row.height))
+            # 标签关联仍在
+            tags = q.get_file_tags(session, file_ids[0])
+            check("标签关联保留", any(t.name == "HEIC测试标签" for t in tags))
+
+            unit = q.get_unit_by_path(session, str(unit_dir))
+            check(f"单元统计已刷新（file_count={unit.file_count}）",
+                  unit is not None and unit.file_count == 2)
+            check("单元内已无 HEIC 记录",
+                  not [f for f in q.get_files_by_unit(session, unit.id)
+                       if f.extension in HEIC_EXTENSIONS])
+    finally:
+        cleanup_heic_unit(tmp, root_id)
+
+
+def test_heic_conflict_policies():
+    """T36: 同名冲突三策略（skip 两边都留 / rename 加序号 / overwrite 覆盖）。"""
+    section("T36: HEIC 同名冲突策略")
+    import tempfile
+    from app.core.heic_converter import convert_single
+
+    tmp = Path(tempfile.mkdtemp(prefix="heic_conflict_"))
+    try:
+        src = tmp / "same.HEIC"
+        if not make_heic_file(src, (80, 60), (10, 10, 10)):
+            check("HEIC 夹具不可用（跳过）", True)
+            return
+        existing = tmp / "same.jpg"
+        from PIL import Image as _Img
+        _Img.new("RGB", (8, 8), (255, 0, 0)).save(existing)
+
+        # skip：不动任何一边
+        r1 = convert_single(src, on_conflict="skip", delete_source=False)
+        check("skip: 判为跳过", r1.skipped and not r1.success)
+        check("skip: 源文件仍在", src.is_file())
+        check("skip: 目标文件未被覆盖",
+              _Img.open(existing).size == (8, 8))
+
+        # rename：新名字，两边都在
+        r2 = convert_single(src, on_conflict="rename", delete_source=False)
+        check(f"rename: 成功（{r2.target and r2.target.name}）", r2.success)
+        check("rename: 生成 'same (1).jpg'",
+              r2.target is not None and r2.target.name == "same (1).jpg")
+        check("rename: 原同名文件未被动", _Img.open(existing).size == (8, 8))
+
+        # overwrite：目标被替换（且不是 8x8 的那个假图）
+        r3 = convert_single(src, on_conflict="overwrite", delete_source=False)
+        check("overwrite: 成功", r3.success)
+        check("overwrite: 目标已被替换为 80x60",
+              _Img.open(existing).size == (80, 60))
+
+        # delete_source=True 时才删源
+        r4 = convert_single(src, on_conflict="overwrite", delete_source=True)
+        check("delete_source=True: 源文件被删除", r4.success and not src.is_file())
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heic_cancel_stops_early():
+    """T37: 取消是真的会停（旧实现只在全部转换完才检查中断标志）。"""
+    section("T37: HEIC 批量取消")
+    import tempfile
+    from app.core.heic_converter import convert_batch
+
+    tmp = Path(tempfile.mkdtemp(prefix="heic_cancel_"))
+    try:
+        sources = []
+        for i in range(4):
+            p = tmp / f"c{i}.HEIC"
+            if not make_heic_file(p, (60, 40), (i * 50, 0, 0)):
+                check("HEIC 夹具不可用（跳过）", True)
+                return
+            sources.append(p)
+
+        state = {"n": 0}
+
+        def cancelled() -> bool:
+            return state["n"] >= 1
+
+        def progress(completed, total, result):
+            state["n"] = completed
+
+        summary = convert_batch(sources, progress_callback=progress,
+                                cancelled=cancelled, delete_source=False)
+        check("标记为已取消", summary.cancelled is True)
+        check(f"只处理了 1 个（实际 {len(summary.results)}）", len(summary.results) == 1)
+        check("未处理的文件没有被转换", len(list(tmp.glob("*.jpg"))) == 1)
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heic_trash_unavailable_keeps_source():
+    """T38: 回收站不可用时保留源文件，绝不静默永久删除。"""
+    section("T38: HEIC 源文件处置（回收站不可用）")
+    import tempfile
+    from app.services import heic_service as hs
+    from app.services import file_ops
+
+    tmp = Path(tempfile.mkdtemp(prefix="heic_trash_"))
+    try:
+        heic = tmp / "keep.HEIC"
+        if not make_heic_file(heic, (70, 50), (5, 5, 200)):
+            check("HEIC 夹具不可用（跳过）", True)
+            return
+
+        original = file_ops.move_to_trash
+        file_ops.move_to_trash = lambda path: (False, "无法移至回收站: 模拟网络盘")
+        try:
+            options = hs.HeicConvertOptions(source_action=hs.SOURCE_TRASH,
+                                            reindex=False)
+            outcome = hs.run_heic_pipeline(AppConfig(), [str(heic)], options,
+                                           notify=False)
+        finally:
+            file_ops.move_to_trash = original
+
+        check("转换仍然成功", outcome.converted == 1)
+        check("源文件被保留（未永久删除）", heic.is_file())
+        check("保留了原因说明", any(i.source_kept_reason for i in outcome.items))
+        check("JPG 已生成", (tmp / "keep.jpg").is_file())
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_heic_scan_disk_and_db():
+    """T39: 检查同时覆盖库内与磁盘（未入库的也能被找出来）。"""
+    section("T39: HEIC 检查（库内 + 磁盘）")
+    import tempfile
+    from app.services import heic_service as hs
+
+    tmp = Path(tempfile.mkdtemp(prefix="heic_scan_"))
+    root_id = None
+    try:
+        unit_dir, paths, root_id = seed_heic_unit(tmp, count=1)
+        if not paths:
+            check("HEIC 夹具不可用（跳过）", True)
+            return
+        # 再造一个"磁盘上有、库里没有"的 HEIC
+        extra = unit_dir / "disk_only.HEIC"
+        make_heic_file(extra, (90, 60), (0, 200, 200))
+
+        result = hs.scan_candidates(AppConfig(), roots=[tmp], include_disk=True)
+        by_name = {Path(c.path).name: c for c in result.candidates}
+        check(f"检查到 2 个 HEIC（实际 {result.total}）", result.total == 2)
+        check("库内文件标 in_library=True",
+              by_name.get("img0.HEIC") is not None
+              and by_name["img0.HEIC"].in_library is True)
+        check("磁盘独有文件标 in_library=False",
+              by_name.get("disk_only.HEIC") is not None
+              and by_name["disk_only.HEIC"].in_library is False)
+        check("统计到 1 个尚未入库", result.from_disk_only == 1)
+
+        # 只查库（不遍历磁盘）时不应出现磁盘独有文件
+        db_only = hs.scan_candidates(AppConfig(), roots=[tmp], include_disk=False)
+        names = {Path(c.path).name for c in db_only.candidates}
+        check("include_disk=False 时不报磁盘独有文件",
+              "disk_only.HEIC" not in names)
+
+        # 指定文件夹范围时，库内其它目录的 HEIC 不应混进来
+        other = tmp / "另一个目录"
+        other.mkdir(parents=True, exist_ok=True)
+        make_heic_file(other / "other.HEIC", (50, 50), (1, 2, 3))
+        scoped = hs.scan_candidates(AppConfig(), roots=[unit_dir], include_disk=True)
+        scoped_names = {Path(c.path).name for c in scoped.candidates}
+        check("范围限定生效（不含其它目录）", "other.HEIC" not in scoped_names)
+    finally:
+        cleanup_heic_unit(tmp, root_id)
+
+
+def test_heic_broken_hash_heal():
+    """T40: "哈希为空串"的永久坏行必须能显式修复并重算。
+
+    空串不是 NULL：`get_unindexed_files` 只认 NULL，这类行永远不会自愈 ——
+    实测真实库 40 个 HEIC 里 19 个如此。
+    """
+    section("T40: HEIC 坏哈希修复")
+    import tempfile
+    from app.services import heic_service as hs
+    from app.core.heic_converter import HEIC_EXTENSIONS
+
+    tmp = Path(tempfile.mkdtemp(prefix="heic_heal_"))
+    root_id = None
+    try:
+        unit_dir, paths, root_id = seed_heic_unit(tmp, count=1)
+        if not paths:
+            check("HEIC 夹具不可用（跳过）", True)
+            return
+
+        with DatabaseManager.session() as session:
+            row = q.get_file_by_path(session, str(paths[0]))
+            fid = row.id
+            q.update_file_hash(session, fid, md5_hash="", phash="", dhash="")
+            check("坏行计数可见",
+                  q.count_files_with_empty_hash(session, HEIC_EXTENSIONS) >= 1)
+
+        options = hs.HeicConvertOptions(source_action=hs.SOURCE_KEEP,
+                                        reindex=True, fix_broken=True)
+        # 只做修复 + 重算（不真的转换任何文件）
+        outcome = hs.run_heic_pipeline(AppConfig(), [], options, notify=False)
+        check(f"修复了坏行（实际 {outcome.healed}）", outcome.healed >= 1)
+
+        with DatabaseManager.session() as session:
+            row = q.get_file_by_id(session, fid)
+            check(f"哈希已重算（phash={bool(row.phash)}）", bool(row.phash))
+            check("坏行已清零",
+                  q.count_files_with_empty_hash(session, HEIC_EXTENSIONS) == 0)
+    finally:
+        cleanup_heic_unit(tmp, root_id)
+
+
+def test_api_heic_endpoints():
+    """T41: /api/heic 契约（scan / convert / run / active-task / cancel）。"""
+    section("T41: HEIC API 端点")
+    import tempfile
+    import time as _time
+    from app.api.server import create_app
+    from fastapi.testclient import TestClient
+
+    tmp = Path(tempfile.mkdtemp(prefix="heic_api_"))
+    root_id = None
+    try:
+        unit_dir, paths, root_id = seed_heic_unit(tmp, count=2)
+        if not paths:
+            check("HEIC 夹具不可用（跳过）", True)
+            return
+
+        client = TestClient(create_app(AppConfig()))
+
+        scan = client.get("/api/heic/scan")
+        check("scan 返回 200", scan.status_code == 200)
+        data = scan.json()
+        check(f"scan 报告 2 个 HEIC（实际 {data.get('total')}）", data.get("total") == 2)
+        check("scan 项包含 has_perceptual_hash 字段",
+              "has_perceptual_hash" in (data.get("items") or [{}])[0])
+
+        # 越界路径必须拒绝（转换会删源文件，不能变成任意文件处置入口）
+        bad = client.post("/api/heic/convert",
+                          json={"paths": ["C:/Windows/notepad.exe"]})
+        check("越界路径被拒绝（400）", bad.status_code == 400)
+
+        not_heic = client.post("/api/heic/convert",
+                               json={"paths": [str(Path(__file__))]})
+        check("媒体库外的 .py 文件同样被拒绝", not_heic.status_code == 400)
+
+        resp = client.post("/api/heic/convert", json={
+            "paths": [str(p) for p in paths],
+            "options": {"source_action": "keep", "reindex": True},
+        })
+        check("convert 返回 202", resp.status_code == 202)
+        task_id = resp.json().get("task_id")
+        check("convert 返回 task_id", bool(task_id))
+
+        task = None
+        for _ in range(80):
+            task = client.get(f"/api/heic/run/{task_id}").json()
+            if task.get("status") in ("completed", "failed"):
+                break
+            _time.sleep(0.25)
+        check(f"任务完成（实际 {task and task.get('status')}）",
+              task is not None and task.get("status") == "completed")
+        result = (task or {}).get("result") or {}
+        check(f"结果 converted=2（实际 {result.get('converted')}）",
+              result.get("converted") == 2)
+        check("结果包含逐项 items", isinstance(result.get("items"), list))
+        check(f"结果 db_updated=2（实际 {result.get('db_updated')}）",
+              result.get("db_updated") == 2)
+
+        check("任务结束后 active-task 为空",
+              client.get("/api/heic/active-task").json().get("task_id") is None)
+        check("空闲时 cancel 为 no-op",
+              client.post("/api/heic/cancel").json().get("status") == "idle")
+        check("未知 task_id 返回 404",
+              client.get("/api/heic/run/heic-99999").status_code == 404)
+
+        # 转换后记录已指向 .jpg（原 .heic 路径不再是记录的主键）
+        with DatabaseManager.session() as session:
+            exts = set()
+            for p in paths:
+                row = q.get_file_by_path(session, str(p.with_suffix(".jpg")))
+                if row:
+                    exts.add(row.extension)
+        check(f"记录扩展名已改为 .jpg（实际 {exts}）", exts == {".jpg"})
+    finally:
+        cleanup_heic_unit(tmp, root_id)
+
+
+
 def test_thumbnails(root: Path):
     section("测试 6.5: 缩略图生成")
     config = AppConfig()
@@ -6323,6 +6807,15 @@ def main():
         test_thumbnails(temp_root)
         test_thumbnail_generator_formats()
         test_heic_converter()
+        test_heic_decode_registration()
+        test_exif_orientation_transposed()
+        test_heic_convert_syncs_db()
+        test_heic_conflict_policies()
+        test_heic_cancel_stops_early()
+        test_heic_trash_unavailable_keeps_source()
+        test_heic_scan_disk_and_db()
+        test_heic_broken_hash_heal()
+        test_api_heic_endpoints()
         test_dedup_engine()
         test_dedup_one_to_one_matching()
         test_dedup_hash_index_recall()

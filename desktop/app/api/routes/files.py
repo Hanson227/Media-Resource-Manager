@@ -20,13 +20,12 @@ from app.services.file_ops import MODE_PATTERN, MODE_TRASH, apply_mode
 
 logger = logging.getLogger(__name__)
 
-# HEIC/HEIF 浏览器不原生支持，注册 Pillow 插件以便在内存中转为 JPEG
-try:
-    import pillow_heif  # noqa: F401 — registers HEIF opener with Pillow
-    pillow_heif.register_heif_opener()
-except ImportError:
-    logger.warning("pillow_heif 未安装，HEIC 文件无法在浏览器中查看")
-    pillow_heif = None  # type: ignore[assignment]
+# HEIC/HEIF 浏览器不原生支持：注册 Pillow 插件后，在内存中转为 JPEG 传输。
+# 注册实现收敛在 image_helpers（幂等，导入即生效），避免这里漏注册时
+# pHash/dHash/缩略图静默解不开 HEIC。
+from app.utils.image_helpers import ensure_heif_support, open_image_rgb_oriented
+
+_HEIF_OK = ensure_heif_support()
 
 from app.core.thumbnail_generator import ThumbnailGenerator
 from app.db.engine import DatabaseManager
@@ -308,17 +307,22 @@ def stream_file(file_id: int):
         raise HTTPException(status_code=404, detail="文件已在磁盘上移除")
 
     media_type = MIME_MAP.get(f.extension.lower(), "application/octet-stream")
-    # HEIC 浏览器不原生支持，转为 JPEG 传输
-    if media_type == "image/heic":
-        if pillow_heif is None:
+    # HEIC/HEIF 浏览器不原生支持，转为 JPEG 传输。
+    # 注意 .heif 必须走同一分支：此前只判 "image/heic"，.heif 被原样返回，
+    # 浏览器直接打不开（列表里显示成裂图）。
+    if media_type in ("image/heic", "image/heif"):
+        if not _HEIF_OK:
             raise HTTPException(status_code=415, detail="HEIC 支持未安装（缺少 pillow_heif）")
         try:
-            from PIL import Image
-            with Image.open(path) as img:
-                rgb_img = img.convert("RGB")
+            rgb_img = open_image_rgb_oriented(path)
+            if rgb_img is None:
+                raise ValueError("无法解码 HEIC/HEIF")
+            try:
                 buf = io.BytesIO()
                 rgb_img.save(buf, "JPEG", quality=90)
                 buf.seek(0)
+            finally:
+                rgb_img.close()
             return Response(content=buf.read(), media_type="image/jpeg",
                             headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(f.filename + '.jpg')}"})
         except Exception as e:

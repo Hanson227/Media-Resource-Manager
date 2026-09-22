@@ -6,7 +6,6 @@
 避免长任务（run_dedup）阻塞事件循环；查重入口经 dedup_gate 与 GUI 互斥。
 """
 
-import itertools
 import logging
 import threading
 import time
@@ -16,6 +15,7 @@ from fastapi import APIRouter, Query, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 
+from app.api import task_registry as registry
 from app.api.schemas import (
     DedupResultItem, DedupListResponse, DedupResolveRequest, DedupGroupItem,
     DedupGroupListResponse, DedupFaceScanRequest, StatusResponse,
@@ -28,6 +28,9 @@ from app.services.dedup_service import run_dedup_pipeline
 from app.utils.constants import DEDUP_RESULT_VERSION, FACE_SCAN_VERSION, MatchType
 
 logger = logging.getLogger(__name__)
+
+DEDUP_TASK_KINDS = ("dedup", "face")
+"""本路由负责的任务类型（HEIC 转换走自己的路由，不能混进 active-task）。"""
 
 
 class DedupRunRequest(BaseModel):
@@ -53,29 +56,8 @@ class DedupRunRequest(BaseModel):
 # ============================================================
 # 查重任务后台执行 + 轮询（POST /run 立即返回 task_id）
 # ============================================================
-_TASK_CAP = 20          # 保留的任务记录上限
-_TASK_TTL_SECONDS = 3600  # 已完成任务的保留时间
-_task_counter = itertools.count(1)
-_tasks_lock = threading.Lock()
-_dedup_tasks: dict[str, dict] = {}
-
-
-def _prune_tasks(now: float) -> None:
-    """清理超期已完成任务；超额时先淘汰最旧已完成任务。"""
-    with _tasks_lock:
-        expired = [
-            tid for tid, t in _dedup_tasks.items()
-            if t.get("finished_at") and now - t["finished_at"] > _TASK_TTL_SECONDS
-        ]
-        for tid in expired:
-            _dedup_tasks.pop(tid, None)
-        finished = sorted(
-            (tid for tid, t in _dedup_tasks.items()
-             if t.get("status") in ("completed", "failed")),
-            key=lambda tid: _dedup_tasks[tid]["finished_at"],
-        )
-        while len(_dedup_tasks) > _TASK_CAP and finished:
-            _dedup_tasks.pop(finished.pop(0), None)
+# 任务登记表统一在 app.api.task_registry：与 /api/heic 路由共用，
+# 避免各路由各写一份字典导致字段名/清理策略/取消语义漂移。
 
 
 def _run_dedup_task(task_id: str, unit_ids: list[int], threshold: float,
@@ -90,9 +72,7 @@ def _run_dedup_task(task_id: str, unit_ids: list[int], threshold: float,
         refine_faces: 比对后对候选视频做多帧人脸精查并重新比对。
     """
     def update(**kw) -> None:
-        with _tasks_lock:
-            if task_id in _dedup_tasks:
-                _dedup_tasks[task_id].update(kw)
+        registry.update(task_id, **kw)
 
     update(status="running", started_at=time.time())
     try:
@@ -403,24 +383,9 @@ def run_dedup(body: DedupRunRequest, request: Request):
     """触发查重任务（异步）：立即返回 task_id，客户端轮询
     GET /api/dedup/run/{task_id} 获取进度/结果。与 GUI 入口共用互斥门。"""
     cfg = request.app.state.config
-    task_id = f"dedup-{next(_task_counter)}"
-
-    now = time.time()
-    _prune_tasks(now)
-    entry = {
-        "task_id": task_id,
-        "kind": "dedup",
-        "status": "queued",
-        "phase": None,
-        "created_at": now,
-        "started_at": None,
-        "finished_at": None,
-        "progress": None,
-        "result": None,
-        "error": None,
-    }
-    with _tasks_lock:
-        _dedup_tasks[task_id] = entry
+    task_id = registry.next_task_id("dedup")
+    registry.prune()
+    registry.register(task_id, "dedup")
 
     cfg_fields = {
         "phash_hamming_threshold": cfg.phash_hamming_threshold,
@@ -456,9 +421,7 @@ def _run_face_scan_task(task_id: str, scope: str, run_dedup: bool,
     与查重共用互斥门：重扫会改动 face_vectors，必须避免与查重读向量并发。
     """
     def update(**kw) -> None:
-        with _tasks_lock:
-            if task_id in _dedup_tasks:
-                _dedup_tasks[task_id].update(kw)
+        registry.update(task_id, **kw)
 
     update(status="running", started_at=time.time(), phase="faces")
     try:
@@ -553,23 +516,9 @@ def run_face_scan(body: DedupFaceScanRequest, request: Request):
     cfg = request.app.state.config
     if not cfg.face_detection_enabled:
         raise HTTPException(status_code=409, detail="人脸识别未启用（config.json）")
-    task_id = f"face-{next(_task_counter)}"
-    now = time.time()
-    _prune_tasks(now)
-    entry = {
-        "task_id": task_id,
-        "kind": "face",
-        "status": "queued",
-        "phase": "faces",
-        "created_at": now,
-        "started_at": None,
-        "finished_at": None,
-        "progress": None,
-        "result": None,
-        "error": None,
-    }
-    with _tasks_lock:
-        _dedup_tasks[task_id] = entry
+    task_id = registry.next_task_id("face")
+    registry.prune()
+    registry.register(task_id, "face", phase="faces")
 
     threading.Thread(
         target=_run_face_scan_task,
@@ -583,9 +532,8 @@ def run_face_scan(body: DedupFaceScanRequest, request: Request):
 @router.get("/run/{task_id}")
 def get_dedup_task(task_id: str):
     """查询查重任务状态（轮询用）。"""
-    _prune_tasks(time.time())
-    with _tasks_lock:
-        task = dict(_dedup_tasks.get(task_id) or {})
+    registry.prune()
+    task = registry.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail=f"查重任务不存在: {task_id}")
     return task
@@ -598,16 +546,11 @@ def get_active_task():
     客户端据此在"整页刷新 / 换设备 / 刚打开页面"时重新接上进度：
     任务跑在服务端后台线程里，页面丢了 task_id 就只能靠风扇判断在不在跑
     （实测报障：切走再回来进度条消失）。
+
+    只看 dedup/face 两类：HEIC 转换是另一条路由的任务，
+    混进来会让查重页误显示"查重中"。
     """
-    now = time.time()
-    _prune_tasks(now)
-    with _tasks_lock:
-        active = [
-            dict(t) for t in _dedup_tasks.values()
-            if t.get("status") in ("queued", "running")
-        ]
-    if not active:
+    task = registry.active(DEDUP_TASK_KINDS)
+    if not task:
         return {"task_id": None, "status": None, "kind": None}
-    # 理论上互斥门保证同时只有一个；真出现多个就返回最新的那个
-    active.sort(key=lambda t: t.get("created_at") or 0, reverse=True)
-    return active[0]
+    return task

@@ -27,7 +27,7 @@ from app.utils.constants import (
     FACE_VIDEO_MAX_FRAMES,
     VIDEO_MIN_FRAME_BRIGHTNESS,
 )
-from app.utils.image_helpers import imread_unicode, VideoCapture_unicode
+from app.utils.image_helpers import imread_unicode, read_image_bgr, VideoCapture_unicode
 from app.utils.media_types import is_perceptual_image_extension, is_video_extension
 from app.registry.hash_registry import HashAlgorithmRegistry, create_default_registry
 from app.core.exceptions import HashComputationError, FaceDetectionError
@@ -515,7 +515,9 @@ class HashEngine:
 
         try:
             # 读取图片（兼容中文路径）。YuNet 直接吃 BGR 原图，无需 blob 预处理。
-            image = imread_unicode(image_path)
+            # HEIC/HEIF 不能走 cv2（实测 imdecode 返回 None），read_image_bgr
+            # 内部会用 PIL + pillow-heif 兜底 —— 否则整个库的 HEIC 人脸恒为 0 条。
+            image = read_image_bgr(image_path)
             if image is None:
                 return []
             return self.detect_faces_array(image, source=image_path)

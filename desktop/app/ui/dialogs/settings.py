@@ -15,7 +15,7 @@ from PySide6.QtCore import Signal, Slot
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QTabWidget, QWidget, QFormLayout,
-    QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
+    QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox,
     QDialogButtonBox, QFileDialog, QPushButton, QHBoxLayout,
     QGroupBox,
 )
@@ -145,6 +145,40 @@ class SettingsDialog(QDialog):
 
         tabs.addTab(preview_tab, "预览")
 
+        # ==== HEIC 选项卡 ====
+        heic_tab = QWidget()
+        heic_form = QFormLayout(heic_tab)
+
+        self._heic_quality_spin = QSpinBox()
+        self._heic_quality_spin.setRange(1, 100)
+        self._heic_quality_spin.setSuffix(" %")
+        heic_form.addRow("JPG 输出质量:", self._heic_quality_spin)
+
+        self._heic_source_combo = QComboBox()
+        for value, label in (
+            ("trash", "移至回收站（推荐）"),
+            ("delete", "永久删除（不可恢复）"),
+            ("keep", "保留源 HEIC"),
+        ):
+            self._heic_source_combo.addItem(label, value)
+        self._heic_source_combo.setToolTip(
+            "回收站不可用（网络盘 / 无回收站分区）时一律保留源文件，绝不静默永久删除")
+        heic_form.addRow("转换后源文件:", self._heic_source_combo)
+
+        self._heic_conflict_combo = QComboBox()
+        for value, label in (
+            ("skip", "跳过（推荐：两边都保留）"),
+            ("rename", "自动改名（name (1).jpg）"),
+            ("overwrite", "覆盖同名 JPG"),
+        ):
+            self._heic_conflict_combo.addItem(label, value)
+        heic_form.addRow("同名 JPG 冲突:", self._heic_conflict_combo)
+
+        self._heic_reindex_check = QCheckBox("转换后立即重算哈希与人脸")
+        heic_form.addRow(self._heic_reindex_check)
+
+        tabs.addTab(heic_tab, "HEIC")
+
         layout.addWidget(tabs)
 
         # ==== 按钮 ====
@@ -169,6 +203,15 @@ class SettingsDialog(QDialog):
         self._watcher_enabled_check.setChecked(cfg.watcher_enabled)
         self._watcher_debounce_spin.setValue(cfg.watcher_debounce_ms)
         self._seek_percent_spin.setValue(cfg.preview_seek_percent)
+        self._heic_quality_spin.setValue(int(getattr(cfg, "heic_jpeg_quality", 95)))
+        idx = self._heic_source_combo.findData(
+            getattr(cfg, "heic_source_action", "trash"))
+        self._heic_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        idx = self._heic_conflict_combo.findData(
+            getattr(cfg, "heic_on_conflict", "skip"))
+        self._heic_conflict_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._heic_reindex_check.setChecked(
+            bool(getattr(cfg, "heic_reindex_after_convert", True)))
 
     @Slot()
     def _on_save(self) -> None:
@@ -184,6 +227,10 @@ class SettingsDialog(QDialog):
             watcher_debounce_ms=self._watcher_debounce_spin.value(),
             preview_seek_percent=self._seek_percent_spin.value(),
             web_pin=self._web_pin_edit.text(),
+            heic_jpeg_quality=self._heic_quality_spin.value(),
+            heic_source_action=self._heic_source_combo.currentData(),
+            heic_on_conflict=self._heic_conflict_combo.currentData(),
+            heic_reindex_after_convert=self._heic_reindex_check.isChecked(),
         )
         self.settings_saved.emit(new_config)
         self.accept()

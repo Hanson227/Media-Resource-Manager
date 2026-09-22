@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import AppConfig
-from app.api.routes import files, units, dedup, messages, events, tags
+from app.api.routes import files, units, dedup, messages, events, tags, heic
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +169,7 @@ def create_app(config: AppConfig) -> FastAPI:
     app.include_router(messages.router)
     app.include_router(events.router)
     app.include_router(tags.router)
+    app.include_router(heic.router)
 
     # 健康检查
     @app.get("/api/health")

@@ -2475,6 +2475,401 @@ const DedupDetailPage = {
   }
 };
 
+/* ========== Heic Page ========== */
+/* ========== HEIC 页跨路由状态（模块级） ==========
+   与查重页同理：转换跑在**服务端后台线程**，页面组件却会随路由卸载重建。
+   检查结果、勾选、选项、运行进度放模块级，切走再回来（或整页刷新）都能接上，
+   否则用户只能靠风扇判断"还在不在转"。 */
+let _heicScan = null;                       // 上次检查结果（含 items）
+let _heicSelected = {};                     // { '小写路径': true }
+let _heicOpts = null;                       // 上次选的转换选项
+let _heicRun = {                            // 服务端任务在本页的镜像
+  taskId: null, phase: '', progress: null, running: false, summary: '', cancelled: false,
+};
+
+/* ========== HEIC 检查与转换页 ========== */
+const HeicPage = {
+  template: `
+    <div class="page">
+      <div class="dedup-run">
+        <div class="dedup-run-text">
+          <div class="run-title">HEIC 检查与转换</div>
+          <div class="run-sub">{{ runSub }}</div>
+        </div>
+        <button class="btn btn-secondary heic-scan-btn" :disabled="running"
+          @click="scan()">
+          <span class="mdi" :class="scanning ? 'mdi-loading mdi-spin' : 'mdi-file-search-outline'"></span>
+          {{ scanning ? '检查中…' : '检查媒体库' }}
+        </button>
+        <button class="btn btn-primary dedup-run-btn" :disabled="running || selectedCount === 0"
+          @click="startConvert">
+          <span class="mdi" :class="running ? 'mdi-loading mdi-spin' : 'mdi-image-sync-outline'"></span>
+          {{ running ? '转换中…' : '转换选中 (' + selectedCount + ')' }}
+        </button>
+      </div>
+
+      <div v-if="warnings.length" class="heic-warn">
+        <span class="mdi mdi-alert-outline"></span>
+        <div class="heic-warn-text">
+          <div v-for="(w, i) in warnings" :key="i">{{ w }}</div>
+        </div>
+      </div>
+
+      <div v-if="running && runProgress" class="run-progress">
+        <div class="run-progress-bar" :style="{ width: runPercent + '%' }"></div>
+      </div>
+
+      <div class="dedup-opts">
+        <label class="dedup-opt">
+          <span>JPG 质量</span>
+          <select v-model.number="opts.quality" :disabled="running">
+            <option :value="95">95 推荐</option>
+            <option :value="90">90</option>
+            <option :value="85">85 体积更小</option>
+            <option :value="100">100 最大</option>
+          </select>
+        </label>
+        <label class="dedup-opt">
+          <span>源文件</span>
+          <select v-model="opts.source_action" :disabled="running">
+            <option value="trash">移至回收站（推荐）</option>
+            <option value="delete">永久删除（不可恢复）</option>
+            <option value="keep">保留源 HEIC</option>
+          </select>
+        </label>
+        <label class="dedup-opt">
+          <span>同名冲突</span>
+          <select v-model="opts.on_conflict" :disabled="running">
+            <option value="skip">跳过（两边都保留）</option>
+            <option value="rename">自动改名</option>
+            <option value="overwrite">覆盖</option>
+          </select>
+        </label>
+        <label class="dedup-opt dedup-opt-check">
+          <input type="checkbox" v-model="opts.reindex" :disabled="running">
+          <span>转换后重算哈希/人脸</span>
+        </label>
+        <label class="dedup-opt dedup-opt-check">
+          <input type="checkbox" v-model="opts.fix_broken" :disabled="running">
+          <span>修复旧版无法解码的哈希</span>
+        </label>
+      </div>
+
+      <div v-if="running" class="heic-actions">
+        <button class="btn btn-primary" :disabled="cancelling" @click="cancel()">
+          <span class="mdi mdi-stop-circle-outline"></span>取消转换
+        </button>
+      </div>
+
+      <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
+      <template v-else-if="!items.length">
+        <div class="empty-state">
+          <span class="mdi mdi-image-check-outline"></span>
+          <p>还没有检查结果<br>点「检查媒体库」找出全部 HEIC 文件</p>
+        </div>
+      </template>
+      <template v-else>
+        <div class="heic-toolbar">
+          <span class="heic-count">共 {{ items.length }} 个 · 已选 {{ selectedCount }}</span>
+          <span class="spacer"></span>
+          <button class="sort-btn" @click="selectAll(true)">全选</button>
+          <button class="sort-btn" @click="selectAll(false)">全不选</button>
+        </div>
+        <div v-for="it in items" :key="it.path" class="card heic-row"
+          :data-path="it.path" :data-status="statusOf(it)">
+          <div class="card-row">
+            <div class="heic-check">
+              <input type="checkbox" :checked="!!selected[it.key]"
+                :disabled="!it.exists || !it.volume_ok" @change="toggle(it)">
+            </div>
+            <div class="card-body">
+              <div class="card-title">{{ it.filename }}</div>
+              <div class="card-sub">
+                <span class="lvl-badge" :class="statusClass(it)">{{ statusText(it) }}</span>
+                <span>{{ it.unit_name || parentOf(it.path) }}</span>
+              </div>
+            </div>
+            <div class="card-meta">
+              <div class="count">{{ fmtSize(it.size_bytes) }}</div>
+              <div class="label">{{ it.has_perceptual_hash ? '哈希正常' : '哈希缺失' }}</div>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  `,
+  props: ['serverUrl'],
+  emits: ['loading'],
+  data() { return {
+    loading: false,
+    scanning: false,
+    items: [],
+    selected: {},
+    selectedCount: 0,
+    warnings: [],
+    opts: { quality: 95, source_action: 'trash', on_conflict: 'skip',
+            reindex: true, fix_broken: true },
+    running: false,
+    cancelling: false,
+    runPhase: '',
+    runProgress: null,
+    runSummary: '',
+    status: {},
+  };},
+  computed: {
+    runPercent() {
+      if (!this.runProgress || !this.runProgress[1]) return 0;
+      return Math.min(100, Math.round(this.runProgress[0] / this.runProgress[1] * 100));
+    },
+    runSub() {
+      if (this.running) {
+        if (this.runPhase && this.runProgress) {
+          return this.phaseLabel(this.runPhase) + ' ' + this.runProgress[0]
+            + ' / ' + this.runProgress[1];
+        }
+        return this.phaseLabel(this.runPhase) || '任务已提交，等待开始…';
+      }
+      return this.runSummary || '找出媒体库里全部 HEIC 并批量转换为 JPG';
+    },
+  },
+  methods: {
+    phaseLabel(phase) {
+      const map = { converting: '正在转换', source: '正在处理源文件',
+                    db: '正在同步媒体库', indexing: '正在重算哈希/人脸' };
+      return map[phase] || '';
+    },
+    parentOf(path) {
+      const parts = String(path || '').split(/[\\\\/]/);
+      parts.pop();
+      return parts.join('/') || path;
+    },
+    fmtSize(n) {
+      let size = Number(n || 0);
+      if (size < 1024) return size + ' B';
+      size = size / 1024;
+      if (size < 1024) return size.toFixed(1) + ' KB';
+      size = size / 1024;
+      if (size < 1024) return size.toFixed(1) + ' MB';
+      return (size / 1024).toFixed(2) + ' GB';
+    },
+    statusText(it) {
+      const st = this.statusOf(it);
+      if (st === 'converted') return '已转换';
+      if (st === 'skipped') return '已跳过';
+      if (st === 'failed') return '失败';
+      if (!it.volume_ok) return '磁盘未连接';
+      if (!it.exists) return '文件已丢失';
+      if (!it.has_perceptual_hash) return '待重算哈希';
+      return it.in_library ? '待转换' : '未入库';
+    },
+    statusOf(it) {
+      return this.status[it.key] || '';
+    },
+    statusClass(it) {
+      const st = this.statusOf(it);
+      if (st === 'converted') return 'duplicate';
+      if (st === 'failed') return 'duplicate';
+      if (st === 'skipped') return 'related';
+      if (!it.volume_ok || !it.exists) return 'related';
+      return 'face';
+    },
+    toggle(it) {
+      const next = Object.assign({}, this.selected);
+      if (next[it.key]) delete next[it.key];
+      else next[it.key] = true;
+      this.selected = next;
+      this.selectedCount = Object.keys(next).length;
+      _heicSelected = next;
+    },
+    selectAll(checked) {
+      const next = {};
+      if (checked) {
+        this.items.forEach(it => {
+          if (it.exists && it.volume_ok) next[it.key] = true;
+        });
+      }
+      this.selected = next;
+      this.selectedCount = Object.keys(next).length;
+      _heicSelected = next;
+    },
+    applyScan(data) {
+      const items = (data.items || []).map(it => Object.assign({}, it, {
+        key: String(it.path).toLowerCase(),
+      }));
+      this.items = items;
+      this.warnings = [];
+      if (data.skipped_volume_roots && data.skipped_volume_roots.length) {
+        this.warnings.push('磁盘未连接，已跳过：' + data.skipped_volume_roots.join('、')
+          + '（插回磁盘后重新检查）');
+      }
+      if (data.broken_hash_count) {
+        this.warnings.push(data.broken_hash_count + ' 个 HEIC 的感知哈希/人脸是空的'
+          + '（旧版解不开 HEIC），勾选「修复旧版无法解码的哈希」可一并修复');
+      }
+      if (data.invalid_header) {
+        this.warnings.push(data.invalid_header + ' 个文件扩展名是 HEIC 但内容不是'
+          + '（多为改名的 JPEG），已跳过');
+      }
+      if (data.missing_count) {
+        this.warnings.push(data.missing_count + ' 条库记录在磁盘上已找不到');
+      }
+      // 默认全选可转换项；沿用上次勾选（返回页面时不该丢掉用户的勾选）
+      const saved = _heicSelected || {};
+      const next = {};
+      items.forEach(it => {
+        if (it.exists && it.volume_ok && saved[it.key]) next[it.key] = true;
+      });
+      if (Object.keys(next).length === 0) {
+        items.forEach(it => {
+          if (it.exists && it.volume_ok) next[it.key] = true;
+        });
+      }
+      this.selected = next;
+      this.selectedCount = Object.keys(next).length;
+      _heicSelected = next;
+      _heicScan = data;
+    },
+    async scan() {
+      if (this.scanning || this.running) return;
+      this.scanning = true;
+      this.$emit('loading', true);
+      try {
+        const data = await api(this.serverUrl, '/api/heic/scan');
+        this.applyScan(data);
+      } catch (e) {
+        alert('检查失败：' + e.message);
+      } finally {
+        this.scanning = false;
+        this.$emit('loading', false);
+      }
+    },
+    async startConvert() {
+      if (this.running || this.selectedCount === 0) return;
+      if (this.opts.source_action === 'delete'
+          && !confirm('你选择了「永久删除」源 HEIC 文件，删除后无法从回收站恢复。\\n确定继续吗？')) {
+        return;
+      }
+      const paths = this.items.filter(it => this.selected[it.key]).map(it => it.path);
+      if (!paths.length) return;
+      this.$emit('loading', true);
+      try {
+        const res = await api(this.serverUrl, '/api/heic/convert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: paths, options: this.opts }),
+        });
+        _heicOpts = Object.assign({}, this.opts);
+        this.running = true;
+        this.cancelling = false;
+        this.runSummary = '';
+        this.pollTask(res.task_id);
+      } catch (e) {
+        alert('转换启动失败：' + e.message);
+      } finally {
+        this.$emit('loading', false);
+      }
+    },
+    async cancel() {
+      if (!this.running || this.cancelling) return;
+      this.cancelling = true;
+      try {
+        await api(this.serverUrl, '/api/heic/cancel', { method: 'POST' });
+      } catch (e) { this.cancelling = false; }
+    },
+    pollTask(taskId) {
+      if (this._timer) clearInterval(this._timer);
+      _heicRun.taskId = taskId;
+      _heicRun.running = true;
+      const tick = async () => {
+        let t;
+        try {
+          t = await api(this.serverUrl, '/api/heic/run/' + taskId);
+        } catch (e) {
+          // 服务端重启后任务表丢了（404）→ 停止轮询；网络抖动留给下一轮
+          if (/不存在|404/.test(e.message || '')) this.stopPolling();
+          return;
+        }
+        this.runPhase = t.phase || '';
+        this.runProgress = t.progress || null;
+        this.syncRunState();
+        if (t.status === 'completed') {
+          this.stopPolling();
+          const r = t.result || {};
+          this.applyItems(r.items || []);
+          this.runSummary = '完成：成功 ' + (r.converted || 0) + ' · 跳过 '
+            + (r.skipped || 0) + ' · 失败 ' + (r.failed || 0)
+            + '；源文件移除 ' + (r.sources_removed || 0) + ' / 保留 '
+            + (r.sources_kept || 0)
+            + (r.reindexed ? '；重算 ' + r.reindexed : '')
+            + (r.cancelled ? '（已取消）' : '')
+            + '（耗时 ' + (r.elapsed_seconds || 0) + 's）';
+          this.syncRunState();
+          await this.scan();
+        } else if (t.status === 'failed') {
+          this.stopPolling();
+          alert('HEIC 转换失败：' + (t.error || '未知错误'));
+        }
+      };
+      tick();
+      this._timer = setInterval(tick, 1000);
+    },
+    applyItems(list) {
+      const next = Object.assign({}, this.status);
+      list.forEach(i => { next[String(i.path).toLowerCase()] = i.status; });
+      this.status = next;
+    },
+    stopPolling() {
+      if (this._timer) { clearInterval(this._timer); this._timer = null; }
+      this.running = false;
+      this.cancelling = false;
+      this.runProgress = null;
+      this.runPhase = '';
+      this.syncRunState();
+    },
+    syncRunState() {
+      _heicRun.phase = this.runPhase;
+      _heicRun.progress = this.runProgress;
+      _heicRun.running = this.running;
+      _heicRun.summary = this.runSummary;
+    },
+    applyRunState() {
+      this.running = !!_heicRun.running;
+      this.runPhase = _heicRun.phase || '';
+      this.runProgress = _heicRun.progress || null;
+      this.runSummary = _heicRun.summary || '';
+      if (_heicRun.taskId && this.running) this.pollTask(_heicRun.taskId);
+    },
+    async adoptRunState() {
+      if (_heicRun.taskId && _heicRun.running) {
+        this.applyRunState();
+        return;
+      }
+      try {
+        const t = await api(this.serverUrl, '/api/heic/active-task');
+        if (!t || !t.task_id) return;
+        _heicRun.taskId = t.task_id;
+        _heicRun.running = true;
+        _heicRun.phase = t.phase || '';
+        _heicRun.progress = t.progress || null;
+        this.applyRunState();
+      } catch (e) { /* 旧版服务端没有该端点：忽略 */ }
+    },
+  },
+  async mounted() {
+    if (_heicOpts) this.opts = Object.assign({}, this.opts, _heicOpts);
+    await this.adoptRunState();
+    if (_heicScan) {
+      // 返回页面：先渲染上次结果，再按服务端最新状态刷新一遍
+      this.applyScan(_heicScan);
+    }
+    await this.scan();
+  },
+  beforeUnmount() {
+    // 只停本地轮询：任务在服务端继续跑，_heicRun 保留运行态供返回时接手
+    if (this._timer) { clearInterval(this._timer); this._timer = null; }
+  },
+};
+
 /* ========== Messages Page ========== */
 const MessagesPage = {
   template: `
@@ -2597,6 +2992,13 @@ const SettingsPage = {
         <span class="label"><span class="mdi mdi-lock-open-outline" style="font-size:16px;margin-right:6px"></span>设置访问密码</span>
         <span class="mdi mdi-chevron-right"></span>
       </div>
+      <!-- HEIC 检查与转换：属于"工具"而不是导航目的地，所以不占底部 Tab，
+           从设置里进（正在转换时这里会提示，免得用户不知道风扇为什么在转） -->
+      <div class="setting-item heic-entry" @click="openHeic">
+        <span class="label"><span class="mdi mdi-image-sync-outline" style="font-size:16px;margin-right:6px"></span>HEIC 检查与转换<span
+          v-if="heicRunning" class="heic-running">转换中…</span></span>
+        <span class="mdi mdi-chevron-right"></span>
+      </div>
       <div class="setting-item" @click="showAbout = !showAbout">
         <span class="label">关于</span>
         <span class="mdi mdi-chevron-right"></span>
@@ -2645,11 +3047,13 @@ const SettingsPage = {
     pinConfirm: '',
     pinChanging: false,
     pinChangeError: '',
+    heicRunning: false,
   };},
   computed: {
     hasPin() { return this.pinEnabled; }
   },
   methods: {
+    openHeic() { this.$router.push('/heic'); },
     disconnect() {
       if (confirm('确定断开连接？')) this.$emit('disconnected');
     },
@@ -2693,6 +3097,14 @@ const SettingsPage = {
       const auth = await api(this.serverUrl, '/api/auth/status');
       this.pinEnabled = auth.pin_required || false;
     } catch (e) { this.pinEnabled = false; }
+    // 服务端可能正在转换（本页只是入口）：先看本会话镜像，再问一次服务端
+    this.heicRunning = !!_heicRun.running;
+    if (!this.heicRunning) {
+      try {
+        const t = await api(this.serverUrl, '/api/heic/active-task');
+        this.heicRunning = !!(t && t.task_id);
+      } catch (e) { /* 旧版服务端无该端点：忽略 */ }
+    }
   }
 };
 
