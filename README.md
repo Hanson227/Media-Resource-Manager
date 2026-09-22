@@ -16,20 +16,26 @@ Media/
 ├── desktop/             # Windows 桌面应用（Python/PySide6）
 │   ├── main.py
 │   ├── app/
-│   ├── models/          # OpenCV DNN 人脸模型文件
+│   ├── models/          # OpenCV Zoo ONNX 人脸模型（YuNet 检测 + SFace 特征）
 │   ├── tests/
 │   └── config.json
 ├── web/                 # Web 前端 SPA（Vue 3）
+├── docs/                # 参考文档（查重口径 / HEIC / Web 前端 / 踩坑速查），按需读
 ├── API.md               # HTTP API 契约
 ├── README.md
-└── .gitignore
+└── CLAUDE.md            # 仓库约定与铁律（模块职责、命令、纪律的唯一来源）
 ```
+
+> 桌面端分层与各模块职责、Web 前端的加载顺序（js-core → js-gesture → js-pages →
+> js-app，不可调换）都在 [CLAUDE.md](CLAUDE.md) 的 `## Repo Structure` /
+> `## Architecture (desktop/)`。**那里是单一来源**，本文件不复述——两份文档写同一件事，
+> 迟早各自腐烂（README 曾长期停留在 Caffe/OpenFace 时代）。
 
 ## 功能
 
 - **文件夹级资源管理** — 自动扫描本地文件夹，将包含媒体文件的目录识别为"资源单元"，支持嵌套场景
-- **一键智能查重** — 自动计算哈希+人脸特征+视频抽帧，多策略匹配：人脸识别 → MD5（精确）→ 视频帧 → pHash（感知）→ dHash（差异），基于杰卡德指数判定单元级重复
-- **人脸识别** — Caffe SSD 检测 + OpenFace 128 维特征提取，同一人物在不同照片中也能识别
+- **一键智能查重** — 自动计算哈希+人脸特征+视频抽帧，多策略匹配：MD5（精确）→ 视频帧 → pHash（感知）→ dHash（差异），按杰卡德指数 + 包含度判定单元级重复（完整口径见 [docs/dedup-pipeline.md](docs/dedup-pipeline.md)）
+- **人脸识别** — OpenCV Zoo ONNX 模型：YuNet 检测 + SFace 128 维特征。人脸**不参与**重复判定（回答的是"是不是同一个人"，不是"是不是同一个文件"），只作为「同演员」线索展示
 - **缩略图预览** — 图像/视频自动生成缩略图，支持网格浏览、空格键快速预览
 - **HEIC 检查与转换** — 与 Web 端同一套编排：检查全库（含未入库的）HEIC →
   批量转 JPG → 就地改写媒体库记录（`file_id`/标签保留）→ 重算哈希与人脸；
@@ -40,59 +46,7 @@ Media/
 - **局域网 API** — 内置 FastAPI 服务（默认 `127.0.0.1:19527` 仅本机；将 `api_host` 改为 `0.0.0.0` 即可局域网/手机访问），含认证端点
 - **深色主题** — Slate-Indigo 设计体系，全局 QSS + QPalette 统一渲染
 
-## 桌面应用架构
-
-```
-desktop/main.py          # 入口：配置 → 数据库 → API → GUI → 文件监控
-desktop/config.py        # frozen dataclass，从 config.json 加载
-desktop/app/
-  core/                  # 纯业务逻辑（无 UI/DB 依赖）
-    scanner.py           #   递归扫描，自动识别资源单元
-    hash_engine.py       #   协调 MD5/pHash/dHash 计算
-    dedup_engine.py      #   多策略匹配（人脸→MD5→视频帧→pHash→dHash）+ 切片索引
-    thumbnail_generator.py  # Pillow(图片) + OpenCV(视频)，磁盘缓存
-    watcher.py           #   watchdog 实时监控 + 去抖
-  db/
-    engine.py            #   DatabaseManager 单例（SQLite WAL 模式）
-    models.py            #   12 张 ORM 表
-    queries.py           #   所有持久化查询（session 注入）
-    migrations.py        #   Schema 版本管理与迁移
-  ui/                    # PySide6 桌面界面
-    main_window.py       #   QMainWindow 信号中枢
-    left_panel/          #   文件夹树 + 右键菜单（合并/拆分/标记）
-    right_panel/         #   缩略图网格 + 自定义委托
-    dialogs/             #   设置、查重对比、消息中心、预览等
-    widgets/             #   状态栏、进度面板、缩略图加载器
-    workers/             #   QThread 工作线程（扫描/哈希/查重）
-    style.qss            #   深色样式表
-  api/                   # FastAPI HTTP 接口
-    server.py            #   守护线程运行，内嵌 Web 前端静态文件服务
-    routes/              #   /api/files, /api/units, /api/dedup, /api/messages
-    schemas.py           #   Pydantic 响应模型
-  registry/              # 注册器 + HashAlgorithm 抽象
-  services/              # 消息中心、清理服务
-  utils/                 # 枚举常量、文件辅助函数
-desktop/tests/
-  test_flow.py           # 后端 + API 端到端测试（465 项断言，含 PIN 鉴权）
-  test_web_playwright.py # Web 前端浏览器测试（47 项）
-```
-
-### Web 前端
-
-```
-web/
-├── index.html           # Vue 3 SPA 入口
-├── js-core.js           # API/令牌等基础工具（最先加载）
-├── js-pages.js          # 全部页面组件与滚动辅助
-├── js-app.js            # 路由 + 根组件 + 挂载（最后加载）
-├── style.css            # Slate-Indigo 设计体系
-├── manifest.json        # PWA 清单
-├── sw.js                # Service Worker（离线缓存）
-├── icon-192.png
-└── icon-512.png
-```
-
-### 数据库
+## 数据库
 
 SQLite + WAL 模式，12 张表：
 
@@ -111,16 +65,20 @@ SQLite + WAL 模式，12 张表：
 | `file_tags` | 文件分类标签 |
 | `file_tag_mappings` | 文件-标签多对多映射 |
 
-### 查重流程
+## 查重流程
 
 ```
 点击 [查重] → 自动检测未索引文件 → 有则先计算 MD5/pHash/dHash/人脸/视频抽帧
-  → 逐对单元进行多策略贪婪匹配：人脸 → MD5 → 视频帧 → pHash → dHash
-  → pHash/dHash 使用鸽巢切片索引加速（零漏配）
-  → 视频按抽帧 pHash 集合比对，匹配帧数 ≥ 较短视频帧数 50% 判为同一视频
-  → 杰卡德相似度 = |匹配| / (|A| + |B| - |匹配|)
-  → ≥ 阈值（默认 0.80）→ 创建 dedup_alert 消息
+  → 逐对单元多策略贪婪匹配：MD5 → 视频帧 → pHash → dHash（人脸只作线索，不参与判定）
+  → pHash/dHash 与视频帧用鸽巢切片索引加速（零漏配）
+  → 杰卡德 = |匹配| / (|A| + |B| - |匹配|)；另算包含度 = |匹配| / min(|A|,|B|)
+  → 分级：疑似重复（杰卡德 ≥ 0.80，或包含度 ≥ 0.85 的子集重复）
+        / 疑似相关（有文件重叠，仅提醒不建议删除）/ 同演员（只有人脸线索）
+  → 创建 dedup_alert 消息；「相关」合并成一条汇总提醒而不是逐条刷屏
 ```
+
+完整口径（阈值常量、视频同一性判据、人脸匹配语义、旧结论的处理）见
+[docs/dedup-pipeline.md](docs/dedup-pipeline.md)。
 
 ## 快速开始
 
@@ -172,10 +130,12 @@ PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
   "thumbnail_max_size": 256,
   "watcher_enabled": true,
   "watcher_debounce_ms": 2000,
-  "web_pin": "",
   "face_detection_enabled": true
 }
 ```
+
+> Web 访问密码（`web_pin`）**不放在这个文件里**：它持久化在 gitignore 的
+> `desktop/data/.web_pin`。旧版本 config.json 里若有明文 `web_pin`，启动时会一次性迁移过去。
 
 也可以在 GUI "工具 → 设置"中修改。
 
@@ -253,12 +213,12 @@ cd desktop && python tests/test_flow.py
 PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
 ```
 
-### 设计原则
+### 设计原则与开发纪律
 
-- **不可变结果类型** — `ScanResult`、`FileHashes`、`UnitComparisonResult` 等使用 frozen dataclass
-- **Session 注入** — 所有查询函数以 `session: Session` 为首参数
-- **注册器模式** — 哈希算法通过 `HashAlgorithmRegistry` 可插拔注册
-- **工作线程** — 耗时操作（扫描/哈希/查重）运行在 `QThread` 中，通过信号与主线程通信
+见 [CLAUDE.md](CLAUDE.md) 的 `## Key Design Patterns`、`## 铁律速查`、`## Bug Fix 纪律`，
+以及 `docs/` 下的参考文档（查重口径、HEIC、Web 前端、踩坑速查）。不在本文件重复。
+
+**改完代码必须跑测试**，命令见上文「测试」。
 
 ## 许可
 

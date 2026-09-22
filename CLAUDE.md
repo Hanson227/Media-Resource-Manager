@@ -3,6 +3,21 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 代码修改后请运行 `python desktop/tests/test_flow.py` 验证确认无误。涉及 web 前端修改 (`web/` 下的文件) 还需额外运行 `PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py` 验证浏览器测试全通过。请使用中文进行回答，代码、文件名、API 名等保持英文。
 
+## 文档地图
+
+本文件只放**每轮都需要**的规则。下面这些**按需读取，不要预读**（先看"什么时候读"）：
+
+| 什么时候读 | 读哪个 |
+|---|---|
+| 改查重 / 比对 / 人脸 / 阈值 / 分类规则 / 查重 UI | `docs/dedup-pipeline.md` |
+| 改 HEIC 解码 / 转换 / 缩略图或哈希的解码路径 | `docs/heic.md` |
+| 改 `web/` 下任何文件（含 `index.html` / `sw.js`） | `docs/web-frontend.md` |
+| 改扫描 / 单元生命周期 / 缩略图缓存 / 删除语义 / 回收站 / OpenCV 日志 / Qt 信号 | `docs/pitfalls.md` |
+| 需要 HTTP 字段级契约 | `API.md` |
+| 想了解某次评审的背景（**不是规范**） | `docs/2026-*.md` |
+
+`docs/` 里是详细复盘与实测数据，读完不必背下来 —— 需要时再读。
+
 ## Repo Structure
 
 ```
@@ -13,7 +28,8 @@ Media/                          # Git root — monorepo
 │   ├── tests/
 │   ├── models/                 # 人脸模型（OpenCV Zoo ONNX: YuNet + SFace）
 │   └── config.json             # 运行时配置
-├── web/                        # Web 前端 SPA (Vue 3, 无构建; js-core→js-pages→js-app 顺序加载)
+├── web/                        # Web 前端 SPA (Vue 3, 无构建; js-core→js-gesture→js-pages→js-app 顺序加载)
+├── docs/                       # 参考文档（按需读，见上方文档地图）
 ├── API.md                      # HTTP API 契约
 ├── README.md
 └── CLAUDE.md
@@ -108,41 +124,14 @@ desktop/app/
     media_types.py       #   Extension-to-type mapping, is_media_file() helper
 ```
 
-## Web 前端陷阱（Vue 3 全局构建，无打包）
+## Resource Unit Auto-Detection
 
-- **模板不能调用 `_` 开头的方法** — Vue 3 渲染代理不暴露下划线 key，模板里的
-  `_deleteFile(f)` 会在点击时抛 `ReferenceError: _deleteFile is not defined`
-  （方法体完全不执行）。历史上 `_toggleStar`、`_deleteFile` 都踩过。
-  `web/js-*.js` 里的模板调用必须用无前缀名字；`test_dedup_web_js_no_underscore_method_calls`
-  做静态拦截
-- **模板字符串里不能再用反引号** — 组件 `template` 本身就是 JS 模板字面量，
-  内部只能用字符串拼接（如 `'确定删除「' + f.filename + '」？'`）
-- **`<img>`/`<video>` 的请求带不了 Authorization 头** — 缩略图/视频流走
-  `mediaUrl()` 拼 `?token=` 回退（服务端两种方式等价）
-- **JS/CSS 走网络优先，index.html 走缓存优先** — 改 `index.html`（或应用壳）必须
-  bump `sw.js` 的 `CACHE` 版本号，否则 PWA 永远拿到旧壳
-- **index.html 里不再有 `<script src>`** — 脚本由页尾引导块动态加载：vue / vue-router
-  各有 **jsdelivr + unpkg 双镜像**（前一个 onerror 就换下一个），本地脚本按
-  js-core → js-gesture → js-pages → js-app **串行**加载。实测 unpkg 会整段
-  `net::ERR_CONNECTION_CLOSED`，写死单 CDN 时浏览器里 `window.Vue === undefined`、
-  `#app` 空着 —— **打开就是白屏，连锁屏都没有**。动这段必须保证顺序（js-core 第一行
-  就是 `const { createApp } = Vue`，抢跑整页崩）。Vue 挂载前 `#app` 已是原始 HTML，
-  用 `v-cloak` 藏住（Vue 挂载时自动移除；引导失败时 `fail()` 要先 `removeAttribute`
-  再写错误提示，否则提示自己被藏住）
-- **给分组加 `data-*` 钩子** — 分组收起后组内文字会从 DOM 消失，Playwright 的
-  `has_text` 定位会失效；`:data-root="group.name"` 这类稳定属性才是可测的锚点
+The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "resource unit" if it directly contains media files. If a parent also contains media files directly, both become units. Sub-folders without media files don't create separate units.
 
-## PySide6 Signal 陷阱
-
-- **`selectionChanged.connect()` 会累积** — 每次 `connect` 都新增一个 handler。切换 model 后必须先 `disconnect` 再 `reconnect`，否则同一次点击会触发 N 次
-- **`blockSignals(True)` 不只是阻止信号** — 在 `QTreeView` 上会连带阻止选中状态的视觉刷新。防信号循环优先用 guard flag（`_syncing: bool`）而不是 `blockSignals`
-- **`setAnimated(True)` + `scrollTo` 不兼容** — 展开动画期间 `scrollTo` 定位到错误位置。程序化展开选中前先 `setAnimated(False)`，完事再恢复
-- **`rglob()` 在 Windows 不区分大小写** — `rglob("*.HEIC")` 和 `rglob("*.heic")` 匹配相同文件。多 pattern 扫描需要用 `set()` 去重
-
-## 历史重写注意事项
-
-- `git filter-branch` 可能复活遗留的合并冲突标记（`<<<<<<<` / `>>>>>>>`）。跑完后必须 `grep -rn "<<<<<<"` 检查所有文件，否则 SyntaxError 潜伏在代码中
-- 受影响文件可能通过 `ast.parse()` 语法检查但 JS 文件需要额外验证
+**单元的产生与清理必须同源** — 产生判据是"目录直接含媒体文件"，清理就不能只看目录还在不在，
+否则会留下 "0 个 · 0 B" 的空壳单元。由 `scan_worker._save_to_database`（唯一扫描入口）双向校正：
+`queries.exclude_empty_units`（在删除失效文件记录**之后**）+ `queries.restore_units_produced_by_scan`
+（在单元统计写入**之前**）。顺序错了会误删或让回来的内容看不见。→ `docs/pitfalls.md`
 
 ## Key Design Patterns
 
@@ -151,269 +140,43 @@ desktop/app/
 - **Session injection** for DB queries — every query function takes `session: Session` as first arg; `DatabaseManager.session()` context manager handles commit/rollback
 - **Worker threads** for long operations — scanning, hashing, and dedup run in `QThread` subclasses emitting signals to the main window
 - **Debounced file watcher** — `MediaFileEventHandler` uses `threading.Timer` with configurable `watcher_debounce_ms` (default 2000ms)
-- **缩略图缓存必须校验归属** — 缓存名是 `{file_id}_thumb.jpg`，而 file_id 会被复用
-  （「重置数据库」后从 1 重新分配；删除最大 id 的记录后下一条也拿到同一 id）。
-  任何"直接返回缓存文件"的地方都必须先过 `ThumbnailGenerator.is_cache_valid()`
-  （读 sidecar meta：先比归属路径，可比时再比 mtime/size；源不可达时只验归属，
-  保证离线媒体库仍能显示缓存）。否则新文件会显示上一个文件/上一个库的图。
-  清理同样要成对处理：`CleanupService` 的失效/孤儿清理/重置清空都同时处理
-  `.jpg` 与 `.jpg.meta`（只删图会留下永远回收不掉的碎 meta）
 
-- **查重"相关"必须区分证据来源** — `dedup_results.evidence_kind`
-  （`file`=有文件重叠 / `face`=只有人脸线索）。人脸不计入杰卡德，所以"只有人脸线索"
-  的行杰卡德恒为 0；两类混在一起时实测 380 条 related 里 373 条是 0% 的同演员噪音，
-  真正值得看的 7 条被淹没。`/api/dedup/results?evidence=file|face` 分开取，
-  `/counts` 返回 `{duplicate, related, face_only, total}` 供三个 Tab 显示角标。
+## 铁律速查
 
-- **分类规则变化后必须清理陈旧结果** — `queries.prune_stale_dedup_results`：
-  只删"两单元都在本轮比对范围内 + 未处置 + 本轮未再命中"的行。upsert 只更新仍命中的
-  单元对，不清理的话旧的 380 条 related 会永远留在列表里（规则改了、结论没变）。
+每条都有详细复盘在 `docs/` 里（见文档地图）。**写下这段代码之前先读对应文档。**
 
-- **升级不重算，必须能认出"旧结论"** — `dedup_results.computed_version`
-  （`DEDUP_RESULT_VERSION`）：迁移只能搬分类，重算需要哈希/人脸向量与引擎，
-  只能在应用里跑。所以旧行标 `0`，列表/详情/分组都用 `stale` 标记并**不要展示旧数字**。
-  双保险判据：`computed_version` 落后 **或** `match_count > min(|A|,|B|)`
-  （新口径下不可能）。实测踩到：旧行 `match_count=46` 配 33 个文件的单元，
-  界面渲染成"46/33 个文件重叠"，用户以为界面递归了。`/counts` 的 `stale`
-  与列表项的 `stale` 必须同口径，否则角标与卡片对不上。
-
-- **删除必须区分"文件没了"与"磁盘没连"** — `file_ops.volume_available()`：
-  媒体库常在可移动盘/网络盘上（本库是 `G:\Guofu`）。盘没插时 `Path.exists()` 为
-  False，若按"文件已不存在"处理就会**删掉库记录而磁盘文件还在** ——
-  插回盘一重扫文件又全回来，用户看到的就是"删不掉"（实测报障）。
-  现在：卷不可达 → `409` + 原因含"未连接" + 记录保留；卷可达但文件真没了 →
-  仍算成功（终态已满足）。
-
-- **回收站不可用绝不静默降级成永久删除** — 网络盘 / exFAT 等没有 `$RECYCLE.BIN`
-  的卷上 `send2trash` 必然失败，`mode=trash` 恒回 `409`。
-  `DELETE_MODES = (trash, record, delete)` 是唯一来源（API 的 `pattern` 由它拼出），
-  `delete`（`shutil.rmtree` / `unlink`，不可恢复）只能由**用户明确选择**；
-  客户端把 409 变成"永久删除 / 仅从媒体库移除"的弹层（`showDeleteFallback`），
-  失败时保留选中状态以便重试。桌面 GUI 仍是"提示手动处理"，未接这个出口。
-
-- **服务端长任务的"运行态"不能存在组件 data 里** — 查重/人脸重扫跑在服务端后台
-  线程，页面组件却随路由卸载重建：运行态/进度/当前 Tab/已展开分组放在组件里，
-  切走再回来就全丢（实测报障：进度条消失但风扇还在转；看完详情返回跳回默认 Tab）。
-  Web 端统一放**模块级**：`_dedupRun`（任务镜像）+ `_dedupLevel` / `_dedupExpanded`
-  / `_dedupScrollTop`（`js-pages.js`），mount 时恢复、`beforeUnmount` 只停本地轮询；
-  再配 `GET /api/dedup/active-task`，整页刷新/换设备也能重新接上进度。
-  改这些逻辑时注意：**同一个 URL 的 `page.goto` 是同文档导航**，模块级状态不会重置
-  （测试里要显式点 Tab，或 `reload()` 才会回到默认档）。
-
-- **Windows 上 `os.environ` 改不到 cv2 的环境** — `OPENCV_FFMPEG_LOGLEVEL` /
-  `OPENCV_LOG_LEVEL` 这类变量是 OpenCV 的 `opencv_videoio_ffmpeg*.dll` 用 CRT 的
-  `getenv` 读的，而 `os.environ[k]=v` / `os.putenv` / `SetEnvironmentVariableW` 都只改
-  进程环境块，改不到 UCRT 缓存的那份 —— 抑制会**静默失效**（实测：三种写法解码损坏
-  视频仍打 9~396 行 `[h264 @ ...]`，只有 `ctypes.CDLL("msvcrt")._putenv_s` 能静音）。
-  统一走 `app/utils/image_helpers.silence_ffmpeg_logs()`（模块导入即调用，早于任何
-  延迟 `import cv2`）；QtMultimedia 预览另有自己的一套 ffmpeg（`avutil-*.dll`），
-  用 `av_log_set_level(8)` 关（`preview_dialog._silence_qt_ffmpeg_logs`）。
-  噪音只是表象：这些告警说明**视频文件本身损坏/截断**（解码到一半就报错），
-  静音不等于文件没问题。
-
-## Resource Unit Auto-Detection
-
-The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "resource unit" if it directly contains media files. If a parent also contains media files directly, both become units. Sub-folders without media files don't create separate units.
-
-## Dedup Pipeline (一键查重)
-
-1. 点击「查重」→ 自动检测未索引文件 → 有则先计算哈希+人脸
-   - 索引按 `INDEX_BATCH_SIZE`(1000) **分批循环取到取空**。`get_unindexed_files`
-     有 limit，只取一批会让未索引文件多于该值时"提前收工"，而查重紧接着就会拿这份
-     残缺数据出结论（实测真实库 1362 个待索引只算了 1000，剩 362 个完全不可见且无提示）
-2. Hash → compute MD5 (exact), pHash (perceptual), dHash (difference), face vectors (128-d),
-   video key-frame pHashes (every `video_frame_interval_sec`)
-   - 人脸走 OpenCV 自带 ONNX 接口：**YuNet** 检测 + **SFace** 128 维特征
-     (`cv2.FaceDetectorYN` / `cv2.FaceRecognizerSF`，需 OpenCV ≥ 4.5.4，4.x/5.x 通用）。
-     比对度量为**余弦相似度**，阈值 `face_similarity_threshold`（默认 **0.45**）。
-     官方 SFace 值是 0.363，但它面向"同一人的两张正脸照片"的身份验证，而这里是在
-     两个单元的全部文件间两两比对（数万次），0.363 会把大量"长得像"的人凑成对。
-     实测本库：0.363→380 对 / 0.45→57 对 / 0.50→19 对。
-   - **视频人脸按定间隔多帧检测**（`plan_video_face_timestamps`：最小间距
-     `video_frame_interval_sec`、上限 `face_video_max_frames`(10)、均匀铺满全片，
-     长视频自动放大间距）。旧实现只取"中间那一帧"：正脸不在中点就整片漏检
-     （实测 1142 个视频只有 198 个检出人脸）、且同一视频重扫结果不可复现。
-     每行向量带 `source_ms`，用于"多帧吻合"可信度。检测长边仍用 1280
-     （`FACE_DETECT_MAX_SIDE_VIDEO`）：640 会掉约 22% 召回，而多帧抽帧的目的正是提召回
-3. Compare → for each unit pair, run multi-strategy greedy matching: MD5 → video frames → pHash → dHash
-   - 精确身份优先：MD5 排在模糊策略之前。matched 集合跨策略共享，顺序错了会让
-     字节级一致的铁证被记成模糊匹配，甚至抢占到错误的对手方
-   - 人脸不计入杰卡德：人脸向量回答的是"是不是同一个人"，不是"是不是同一个文件"，
-     只在 `UnitComparisonResult.face_hints` 里作为线索返回并显示在对比弹窗
-     - 人脸匹配用 **numpy 余弦矩阵**（`rows_a @ rows_b.T`）做文件对级比对：多帧后每个
-       文件可能有 10 条向量，原来的 Python 双层循环会变成 10×10 次纯 Python 点积。
-       匹配语义（按 A 顺序、全局取最大、文件级一对一、≥阈值）由
-       `test_face_matching_semantics_and_support` 用独立参考实现差分锁定
-     - 每条人脸线索带 `frame_support`（A 侧多少个采样帧都能找到 B 的同一张脸）：
-       ≥2 帧吻合远比单帧偶然相似可信，界面显示"多帧吻合 N 帧"
-   - pHash/dHash 使用鸽巢切片索引（切 threshold+1 段，任一段完全相同才进候选），零漏配
-   - 视频帧级匹配：抽帧 pHash 一对一贪心配对 + 帧级鸽巢切片索引（与暴力比对等价，
-     由 `test_dedup_video_frame_index_equivalence` 差分验证）。判为同一视频需同时满足：
-     匹配帧数 ≥ `VIDEO_FRAME_MIN_MATCHES`(3)、匹配比例 ≥ `VIDEO_FRAME_MATCH_RATIO`(0.75，
-     分母为较短视频帧数)、匹配对时序同序（LIS ≥ 比例的帧数）；抽帧数 <
-     `VIDEO_FRAME_MIN_FRAMES`(3) 的视频不参与判定（精确重复仍由 MD5 兜住）
-   - 匹配严格一对一（A/B 两侧各最多出现一次），保证杰卡德指数 ≤ 1.0
-   - 文件数比例 ≥ 20x 的单元对自动跳过
-4. Score → Jaccard = matches / (|A| + |B| - matches)；**包含度** overlap = matches / min(|A|, |B|)
-   - 只认杰卡德会漏掉"一边是另一边的子集"这种最常见的真重复：实测 29 个文件 MD5
-     完全一致、另一侧多 12 个文件时杰卡德只有 0.644（够不到 0.80），包含度却是 0.879
-5. Classify → 两级命中（`MatchLevel`）+ 证据来源（`EvidenceKind`）：
-   - **duplicate**：杰卡德 ≥ `jaccard_threshold`(0.80)，或
-     **子集重复**（包含度 ≥ `CONTAINMENT_MATCH_THRESHOLD`(0.85) 且匹配数 ≥ 5
-     且杰卡德 ≥ 0.10 且至少一条匹配是 md5/video 强证据）→ 建议保留一份，
-     逐条发 `dedup_alert` + 弹对比框
-     - 杰卡德下限挡住"9 个文件的目录被 200 个文件的目录完全包含"这种伪重复；
-       强证据门槛挡住纯 pHash 近似图（截图/相似构图）触发"建议保留一份"
-   - **related（有文件重叠）**：文件匹配数 ≥ max(`related_min_matches`(2),
-     ceil(`RELATED_MIN_OVERLAP`(0.02) × min(|A|,|B|))) → 部分重叠，**仅提醒不建议删除**。
-     比例地板是必需的：大单元里凑巧相近的 2 个文件（0.2%）不该算"相关"
-   - **related + evidence_kind='face'（同演员）**：0 个文件匹配、人脸线索 ≥ 2。
-     杰卡德恒为 0，因此单独归入「同演员」，不混进"疑似相关"
-   - 实测本库 373 对同演员 + 7 对重叠，故不逐条发消息，而是合并成一条汇总提醒
-     （`MessageCenter.create_related_digest(pairs, face_pairs)`，两段分开陈述）；
-     逐条明细仍落库供查询。落库后调用 `prune_stale_dedup_results` 清理陈旧行
-6. Alert → `dedup_alert` 消息 + DedupCompareDialog。related 的弹窗不提供"保留 A/B"，
-   只给"加入白名单/暂时忽略"（避免暗示要删掉另一侧）
-7. Refine（可选，`refine_faces=true` / 桌面端默认开启）→ 对"上一轮出现人脸线索的视频"
-   做主间隔多帧重扫（`run_face_rescan_pipeline(scope='candidates')`，实测 165 个视频
-   约 2~3 分钟），然后**重新比对一次**。`media_files.face_scan_version` 记录抽帧策略版本：
-   - 只有写入成功后版本号才更新为 `FACE_SCAN_VERSION`(1)，中途取消/失败的文件保持 0，
-     下次补扫会重新处理（幂等）
-   - 候选重扫过之后再次查重会瞬间跳过（不是每次都花这几分钟）
-   - 全库补扫走显式动作（Web「补扫全部视频人脸」/ 桌面「工具 → 重扫视频人脸」），
-     与查询共用互斥门
-
-## HEIC 处理（解码 / 转换 / 数据同步）
-
-- **解码注册只有一个入口** — `app/utils/image_helpers.ensure_heif_support()`（幂等，
-  模块导入即调用一次；`hash_registry` 也显式调一次）。pHash/dHash/缩略图/HEIC 转换
-  都走 `Image.open()`，而 Pillow 原生不认 HEIC：此前注册散落在 `main.py` 与
-  `api/routes/files.py`，换个入口（索引服务、测试、纯 API 进程）就静默降级 ——
-  实测真实库 40 个 HEIC 里 **19 个** `phash`/`dhash` 是失败占位空串、`width/height`
-  为 NULL、`face_vectors` **0 条**。不要在别处再 `import pillow_heif`（会再次分叉）
-- **OpenCV 读不了 HEIC** — `cv2.imdecode` 对 HEIC 直接返回 `None`（实测 OpenCV 5.0.0），
-  所以人脸检测统一走 `image_helpers.read_image_bgr()`：快路径 cv2，HEIC/HEIF 回落
-  PIL（`ImageOps.exif_transpose` → RGB → BGR）。不要在解码路径直接调 `imread_unicode`
-- **Pillow 12 已移除 `Image._getexif`** — 手工读方向标签的老写法会落进 `except: pass`
-  **静默 no-op**（缩略图一直是歪的，日志里什么都看不到；测试用 orientation=6 的图锁定）。
-  统一走 `ImageOps.exif_transpose`（无方向标记时是 no-op，安全）
-- **转换后就地改写记录，不重插** — `queries.update_file_after_convert` 更新
-  `path/filename/extension/size_bytes`，并把 md5/phash/dhash/width/height 置 NULL、
-  删人脸向量/视频帧、`face_scan_version=0`，随后 `refresh_unit_stats` +
-  `CleanupService.invalidate_thumbnail`。保留 `file_id` 才能保住 `file_tag_mappings`；
-  "删旧行让扫描重插"会把标签一起丢掉。并发兜底：若新 `.jpg` 路径已被别处插入记录，
-  改为删旧 HEIC 行、保留新行（不因唯一约束炸掉）
-- **源文件处置遵守与删除同一套纪律** — 默认 `trash`；回收站不可用（网络盘 / 无回收站
-  分区）时**保留源文件**并在逐项结果里写 `source_kept_reason`，绝不静默降级成永久删除
-  （`delete` 只能由用户显式选择，桌面端还会二次确认）
-- **同名冲突默认跳过** — 已存在的同名 JPG 很可能就是这个 HEIC 的历史转换产物：
-  改名会凭空多出重复图（本应用本身是查重工具），覆盖可能毁掉有价值的那张
-- **冲突判定要把数据库也算上** — `on_conflict='rename'` 时若只查磁盘，改出来的路径
-  可能撞 `media_files.path` 唯一约束（库里可能有一条指向已删除文件的 JPG 记录）。
-  服务层 `_load_known_target_paths()` 把磁盘与库合并判断
-- **"哈希为空串"是永久坏行** — 索引侧把计算失败写成 `''`，而 `get_unindexed_files`
-  只认 NULL，因此这类行**永远不会自愈**（实测 19 条 HEIC）。必须用
-  `count_files_with_empty_hash` / `heal_broken_heic_hashes` 显式重置后再重算
-- **取消是协作式的** — `convert_batch(cancelled=...)` 在每个文件前检查；旧实现只在循环
-  结束后检查一次中断标志，"取消"按钮其实不生效。Web 端用任务登记表
-  （`app/api/task_registry.py`）里的 `cancel_requested`，是同一个开关
-- **HEIC 与查重/人脸重扫共用同一道互斥门** — 转换后会重算哈希/人脸，与查重并发会互相
-  干扰；`/api/heic/convert` 在门被占时返回 409
-- **任务登记表已收敛** — 查重 / 人脸重扫 / HEIC 转换共用 `app/api/task_registry.py`；
-  各路由的 `/active-task` 必须按 kind 过滤，否则 HEIC 转换会被查重页显示成"查重中"
-- **Web 端 HEIC 不占导航栏目** — 它是**设置页里的一个工具入口**
-  （`.setting-item.heic-entry` → `/heic`）：路由与整页都保留，但侧边栏/底部 Tab
-  没有它，`currentTab` 对 `/heic` 返回 `settings`（高亮跟随入口所在的设置）；
-  入口在服务端有转换任务时显示「转换中…」（mount 时查一次 `/api/heic/active-task`）。
-  加入口/撤入口都要同步 `web/index.html` 与 `sw.js` 的 CACHE 版本
+- **产生与清理必须同源** — 单元如此（见上），缓存/结果同理：判据一变，清理逻辑必须跟着变，
+  否则旧数据永远不消失。→ `docs/pitfalls.md`
+- **缩略图缓存必须校验归属** — 缓存名 `{file_id}_thumb.jpg` 而 file_id 会复用；
+  任何"直接返回缓存"都要先过 `ThumbnailGenerator.is_cache_valid()`，清理时
+  `.jpg` 与 `.jpg.meta` 必须成对处理。→ `docs/pitfalls.md`
+- **删除必须区分"文件没了"与"磁盘没连"** — 先过 `file_ops.volume_available()`；
+  卷不可达 → `409` + 保留记录，绝不按"文件已不存在"删库。→ `docs/pitfalls.md`
+- **回收站不可用绝不静默降级成永久删除** — `DELETE_MODES` 是唯一来源，
+  `delete` 只能由用户明确选择。→ `docs/pitfalls.md`
+- **Windows 上改 `os.environ` 影响不到 cv2** — 必须走
+  `image_helpers.silence_ffmpeg_logs()`（CRT `_putenv_s`），否则静默失效。
+  → `docs/pitfalls.md`
+- **分类规则一变，必须清理陈旧结果** — 例：查重分类规则改了要跑
+  `queries.prune_stale_dedup_results`；升级后旧结论靠 `computed_version` **或**
+  `match_count > min(|A|,|B|)` 识别为 `stale`，**不展示旧数字**。
+  → `docs/dedup-pipeline.md`
+- **"相关"必须区分证据来源** — `dedup_results.evidence_kind`（`file` / `face`），
+  人脸不计杰卡德；两类混在一起会把真重复淹在 0% 的同演员噪音里。
+  → `docs/dedup-pipeline.md`
+- **服务端长任务的运行态不能存组件 data** — 一律放模块级 + 后端 `active-task` 接口，
+  否则切走再回来进度/Tab/展开状态全丢。→ `docs/web-frontend.md`
+- **HEIC 解码注册只有一个入口** — `image_helpers.ensure_heif_support()`；
+  不要在任何别处 `import pillow_heif`。→ `docs/heic.md`
 
 ## Database
 
 SQLite with WAL mode + foreign keys enabled. Single-file at `desktop/data/media_manager.db` (configurable via `config.json`). 12 tables with CHECK constraints enforcing enum values. `expire_on_commit=False` so ORM objects survive session close.
 
-Dedup semantics: a pair marked keep_a/keep_b/whitelist/ignore stays resolved across re-runs (`upsert_dedup_result` does not reset `is_resolved`); re-running dedup skips resolved/whitelisted unit pairs (`queries.build_dedup_skip_pairs`), so user decisions are one-shot. "加入白名单" additionally writes unit-level rows into the `whitelist` table (same transaction).
-
 Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desktop/config.json`, loaded into a frozen `AppConfig` dataclass at startup. `web_pin` is the exception: it is persisted to the gitignored `desktop/data/.web_pin` (never to config.json), with one-shot migration from the legacy plaintext key.
 
-## Current State
-
-- **HEIC 全链路** — 解码注册统一收敛到 `image_helpers.ensure_heif_support()`，
-  `cv2` 读不了 HEIC 的部分由 `read_image_bgr()` 走 PIL 兜底；pHash/dHash/宽高/
-  人脸/缩略图/浏览器预览/批量转换都已可用。`/api/heic/*` 与桌面端
-  「工具 → HEIC 检查与转换」（文件夹右键「HEIC 转 JPG」、文件右键「转换为 JPG」
-  都进同一个对话框）共用 `services/heic_service.py`；转换后就地改写记录并重算
-  哈希/人脸；"哈希为空串"的旧坏行可用「修复旧版无法解码的哈希」显式重置重算
-  （实测真实库 40 个 HEIC：39 个可转换 + 1 个是改名的 JPEG，19 个坏哈希）。
-  **Web 端不占导航栏目**：设置页里的「HEIC 检查与转换」入口（`/heic`），
-  有任务在跑时入口显示「转换中…」
-- **Face detection** — 模型在 `desktop/models/`：`face_detection_yunet_2023mar.onnx`（YuNet 检测）
-  + `face_recognition_sface_2021dec.onnx`（SFace 128 维特征），均来自 OpenCV Zoo 并经官方
-  LFS sha256 校验。走 `cv2.FaceDetectorYN`/`cv2.FaceRecognizerSF`，**不依赖** OpenCV 5 已移除的
-  `readNetFromCaffe`/`readNetFromTorch`，`requirements.txt` 因此不再钉 `<5`。
-  人脸**不参与**查重判定，仅作 `face_hints` 线索展示（见 Dedup Pipeline）。
-  旧的 Caffe/Torch 模型（`deploy.prototxt`、`res10_*.caffemodel`、`nn4.small2.v1.t7`，约 40 MB）
-  已从 `desktop/models/` 删除；`build.spec` 按 `('models/', 'models')` 整目录收集，无需改动
-- **Web PIN auth** — 桌面端设置 4 位密码，Web 端输入验证后进入
-- **API auth** — `/api/auth/status` + `/api/auth/verify` 端点
-- **One-click dedup** — 查重按钮自动衔接哈希索引 → 查重，无需手动分步；
-  Web 端「一键查重」调 `POST /api/dedup/run`（`index_first=true`）走同一编排，
-  进度按 `phase`（indexing/comparing/faces）+ `progress` 轮询展示；
-  `refine_faces=true` 时中间插入"候选视频多帧人脸精查"并重跑一次比对
-- **Web 文件管理** — 文件列表页「管理」进入多选，底部操作栏支持全选 + 批量删除
-  （`POST /api/files/batch-delete`）；单元卡片菜单支持「删除文件夹」
-  （`DELETE /api/units/{id}`）。默认 `mode=trash`：**移至回收站** + 删库记录，
-  与桌面端语义一致（`mode=record` 才只出库不删盘）；删除后重算单元
-  `file_count`/`total_size`
-- **Web 删除补救路径** — 回收站不可用（网络盘 / 无回收站分区）或磁盘未连接时服务端回
-  409，客户端弹出「永久删除（不可恢复）/ 仅从媒体库移除」二选一
-  （`showDeleteFallback` → `mode=delete|record` 重试）；磁盘未连接时只提示插盘。
-  永久删除永远由用户点选，不静默降级
-- **Web 查重分级** — 列表页三个 Tab：**疑似重复**（`level=duplicate`）/ **疑似相关**
-  （`level=related&evidence=file`）/ **同演员**（`level=related&evidence=face`），
-  计数来自 `/api/dedup/counts` 的 `duplicate/related/face_only`
-- **Web 查重二级分组** — 列表按**左侧单元**折叠（`GET /api/dedup/groups`，分组键 =
-  存储时较小的 `unit_a_id`，与卡片左侧一致），展开时才拉该组子项
-  （`/results?...&unit_a_id=<anchor>`）。380 条平铺 → 52 组
-- **Web 查重详情缩略图对比** — 每条匹配/线索渲染左右两张缩略图
-  （`/api/files/{id}/thumbnail`，`loading="lazy"` + 失败占位），点图进 `/preview/{id}`；
-  人脸线索段默认折叠，行内显示"多帧吻合 N 帧"。卡片数字不再显示无意义的 `0%`：
-  重复/相关显示「N/M 个文件重叠」，同演员显示人脸线索条数
-- **Web 人脸重扫** — `GET /api/dedup/face-scan/status` 显示待扫数量，
-  `POST /api/dedup/face-scan {scope}` 精查候选或补扫全部（完成后自动重跑查重）；
-  桌面端对应「工具 → 重扫视频人脸」。查重页还有人脸阈值下拉
-  （0.363/0.45/0.50/0.60，localStorage 记忆）与「精查疑似同演员视频」开关
-- **Web 查重"旧结论"提示** — `counts.stale > 0` 时页面顶部出琥珀色提示条
-  （"有 N 条结果是用旧规则算出来的" + 「立即重算」），卡片显示「旧规则结果 / 待重算」
-  而不是旧口径的数字（旧行 `match_count=46` 配 33 个文件的单元曾被渲染成
-  "46/33 个文件重叠"，用户以为界面递归了）；分组头标"含旧规则结果"
-- **Web 查重进度跨页存活** — 切到别的 Tab 再回来（或整页刷新）时自动接上仍在跑的
-  任务：模块级 `_dedupRun` 镜像 + `GET /api/dedup/active-task`，进度条/「查重中…」/
-  阶段文案立刻恢复（实测报障：进度条消失只剩风扇转）；任务在别处跑完，回来显示
-  完成摘要并刷新列表
-- **Web 查重状态记忆** — 当前 Tab（`_dedupLevel`）、已展开的分组（`_dedupExpanded`，
-  按 Tab 分开记）、列表滚动位置（`_dedupScrollTop`）跨路由保留：看完详情返回仍停在
-  「疑似相关」且原分组是展开的（实测报障：返回跳回「疑似重复」且收起）。
-  分组的子项不缓存，返回时重新拉一次
-- **控制台安静** — OpenCV/Qt 的 FFmpeg 解码日志统一静音
-  （`image_helpers.silence_ffmpeg_logs` / `preview_dialog._silence_qt_ffmpeg_logs`），
-  否则损坏视频会逐帧刷红色 h264 告警；静音只去噪音，不改变"这些文件确实损坏"的事实
-- **Web 消息一键已读** — 消息页顶部工具条显示「N 条未读 / 共 M 条」+「全部已读」
-  （`.msg-read-all`，无未读时置灰），调后端早已存在的 `POST /api/messages/read-all`，
-  完成后整页条目转已读并同步清空顶栏/底栏角标（`$emit('unread', 0)`）
-- **Web 单元搜索** — 单元页顶部搜索框（`.units-search`）按**单元名或所在路径**过滤
-  （`G:\Guofu\9.15\xxx` 这种按日期文件夹找的场景靠 path 匹配），命中时忽略根组折叠
-  状态、整组不命中就隐藏、卡片多显示一行所在目录（同名文件夹靠它区分）；
-  搜索**不改动**用户的折叠状态（清空后该收起的还是收起的）。172 个单元在前端过滤，
-  不额外请求 API
-- **锁屏键盘输入** — 锁屏期间全局接管数字键/退格/回车（`App.onPinKeydown`），
-  电脑上不必再点屏幕键盘；输入框聚焦时与 Ctrl/Cmd 组合键一律放行；
-  精细指针设备额外显示一行键盘提示（`.pin-hint-kb`）
-- **Web 应用壳双 CDN** — `index.html` 引导块给 vue / vue-router 各备
-  jsdelivr + unpkg 两个镜像并串行加载本地脚本；`sw.js` CACHE 升到 v8。
-  起因：实测 unpkg 整段 `ERR_CONNECTION_CLOSED`，写死单 CDN 时整个 SPA 白屏
-  （v7 = 加 HEIC 导航栏目，v8 = 又撤掉它改成设置里的入口 —— 改应用壳就必须 bump）
-- **Config** — 设置对话框支持 web_pin、缩略图、API 等全部字段
-
+查重的已处置/白名单语义（`is_resolved` 跨重跑保留、`build_dedup_skip_pairs`）
+见 `docs/dedup-pipeline.md`。
 
 ## Bug Fix 纪律
 
@@ -432,3 +195,9 @@ Runtime settings (db path, watcher debounce, dedup threshold, etc.) are in `desk
 
 - test_flow.py 测不到 UI 视觉效果（选中状态、滚动定位、刷新延迟）
 - 涉及信号链、选中、动画的改动，必须打开软件人工验证视觉行为
+
+### 文档维护
+
+- 顶部"代码修改后请运行…"约束、`## Commands`、`## Bug Fix 纪律` 是**核心**，不要为了瘦身删掉。
+- 新增踩坑/复盘写进 `docs/` 对应文件，本文件只加**一行铁律 + 指针**；
+  不要在本文件里展开实测数据与事故过程。
