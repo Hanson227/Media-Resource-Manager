@@ -131,6 +131,16 @@ class ScanWorker(QThread):
                 updated_files = 0
                 errors: list[str] = list(result.errors)
 
+                # 本轮实际产出内容的单元路径：既用于恢复被自动排除的空壳记录，
+                # 也用于排除本轮已不再产出内容的单元（见下方收尾清理）。
+                produced_paths = [str(u.path) for u in result.units]
+
+                # 恢复：本轮重新产出内容的"空壳"排除记录（必须赶在单元统计
+                # 写入之前判断，那时 file_count 还是排除时的值 = 0）
+                restored = q.restore_units_produced_by_scan(session, produced_paths)
+                if restored:
+                    logger.info(f"恢复为活跃单元（重新产出内容）: {', '.join(restored)}")
+
                 # ---- 批量预载：IN 查询命中全部扫描路径的既有记录 ----
                 # 取代原先“每个文件一次 get_file_by_path”的 N+1 往返；
                 # 内部分块执行，避免超出 SQLite 绑定变量上限。
@@ -209,12 +219,6 @@ class ScanWorker(QThread):
                 for file_id in heal_ids:
                     q.clear_stale_hash_placeholders(session, file_id)
 
-                # 清理：标记当前根下路径已不存在的单元为 excluded
-                for stale_unit in q.get_units_by_root(session, root.id):
-                    if stale_unit.status == "active" and not Path(stale_unit.path).is_dir():
-                        logger.info(f"单元路径已不存在，标记排除: {stale_unit.name} ({stale_unit.path})")
-                        q.mark_unit_excluded(session, stale_unit.id)
-
                 # 清理：删除所有活跃单元中已不存在的文件记录及对应缩略图缓存
                 stale_file_count = 0
                 stale_ids: list[int] = []
@@ -260,6 +264,14 @@ class ScanWorker(QThread):
                                 if latest is not None else None
                             ),
                         )
+
+                # 清理：排除本根下本轮已无内容的单元。必须在删除失效文件记录之后
+                # 执行；判据也不能退回"只看目录是否存在"—— 目录还在、但已不再直接
+                # 包含媒体文件的文件夹（日期文件夹的零散文件被删/挪走）会因此永远
+                # 留在列表里显示 "0 个 · 0 B"。详见 queries.exclude_empty_units。
+                excluded_units = q.exclude_empty_units(session, root.id, produced_paths)
+                if excluded_units:
+                    logger.info(f"排除已无内容的单元: {', '.join(excluded_units)}")
 
                 # 更新扫描会话
                 q.update_scan_session(session, scan_id,

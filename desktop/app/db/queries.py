@@ -221,6 +221,73 @@ def unmerge_unit(session: Session, unit_id: int) -> None:
     })
 
 
+def restore_units_produced_by_scan(session: Session, unit_paths: Sequence[str]) -> list[str]:
+    """扫描落库前调用：本轮重新产出内容的"空壳"排除记录恢复为活跃。
+
+    背景见 `exclude_empty_units`。判据是"排除时它就是个空壳"（file_count = 0）：
+    只有这类记录才是扫描自动排除的；用户手动「排除此文件夹」的记录仍有文件
+    记录（file_count > 0），必须保持排除，否则下次扫描就把用户的选择抹掉了。
+
+    参数:
+        unit_paths: 本轮扫描实际产出内容的单元路径。
+
+    返回:
+        被恢复为活跃的单元名列表（用于日志）。
+    """
+    restored: list[str] = []
+    for path in unit_paths:
+        unit = get_unit_by_path(session, str(path))
+        if unit is None or unit.status != UnitStatus.EXCLUDED.value:
+            continue
+        if (unit.file_count or 0) > 0:
+            continue
+        unexclude_unit(session, unit.id)
+        restored.append(unit.name)
+    return restored
+
+
+def exclude_empty_units(session: Session, root_id: int,
+                        produced_paths: Sequence[str]) -> list[str]:
+    """扫描落库后调用：把本根下本轮没有产出内容的活跃单元标记为排除。
+
+    旧判据只看目录是否存在（见 `scan_worker._save_to_database` 与
+    `main_window._cleanup_missing_paths`），于是一种情况永远清理不到：
+    **目录还在、里面已经没有任何媒体文件** —— 日期文件夹里的零散文件被删除
+    或挪进子文件夹后就是这样：子文件夹各自成单元，父文件夹自己既不再被扫描器
+    判定为单元、也没被删除，于是行一直留着，界面显示成"0 个 · 0 B"（实测报障）。
+
+    补上第二种情形：
+
+        - 目录已不存在 → 排除（与旧逻辑一致，手动单元也一样）
+        - 目录还在但已无任何文件记录 → 排除（`is_manual` 的单元除外：
+          它是用户显式标记的，允许为空）
+
+    仍有文件记录的单元不动：权限异常、目录暂时不可读等情况下不该让内容消失。
+
+    参数:
+        root_id: 媒体库根目录 ID。
+        produced_paths: 本轮扫描实际产出内容的单元路径。
+
+    返回:
+        被排除的单元名列表（用于日志）。
+    """
+    produced = {str(p) for p in produced_paths}
+    excluded: list[str] = []
+    for unit in get_units_by_root(session, root_id):
+        if unit.status != UnitStatus.ACTIVE.value:
+            continue
+        if str(unit.path) in produced:
+            continue
+        if Path(unit.path).is_dir():
+            if unit.is_manual:
+                continue
+            if get_unit_file_count(session, unit.id) > 0:
+                continue
+        mark_unit_excluded(session, unit.id)
+        excluded.append(unit.name)
+    return excluded
+
+
 def get_unit_file_count(session: Session, unit_id: int) -> int:
     """获取指定资源单元内的文件数量。"""
     return session.query(func.count(MediaFile.id)).filter(

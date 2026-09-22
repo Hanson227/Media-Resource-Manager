@@ -8,7 +8,7 @@
 
     run_index_pipeline(config, progress_callback=..., file_hashed_callback=...)
 
-一键查重的语义（见 CLAUDE.md「Dedup Pipeline」第 1 步）是"先索引再比对"：
+一键查重的语义（见 docs/dedup-pipeline.md「步骤 1 — 索引前置」）是"先索引再比对"：
 不索引就比对，未索引文件对查重完全不可见，却会报告"查重完成"。
 """
 

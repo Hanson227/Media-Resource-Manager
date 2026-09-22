@@ -1083,6 +1083,130 @@ def test_path_revalidation():
         check("原有活跃单元仍在", any(u.id != fake_unit.id for u in active))
 
 
+def test_scan_reconciles_empty_units():
+    """测试 3.6: 扫描后必须校正"空壳单元"状态（排除 / 恢复）。
+
+    回归（实测报障）：`G:\\Guofu\\9.15`、`9.16` 在文件夹树里一直显示
+    "0 个 · 0 B"，磁盘上目录还在、只是里面的零散文件被删掉或挪进了子文件夹。
+    原因是单元清理只看 `Path(unit.path).is_dir()` —— 目录还在就永远不清理；
+    而扫描器只把"直接含媒体文件的文件夹"当候选，这两个目录在扫描结果里
+    根本不出现，于是没有任何一条路径会碰它们：file_count 被"失效文件清理"
+    置 0，行却留着。
+
+    正确判据是"本轮扫描没有产出内容 + 该单元已无任何文件记录"；
+    重新产出内容时自动恢复（仅限排除时就是空壳的记录 —— 用户手动排除的
+    文件夹仍有文件记录，必须保持排除）。
+    """
+    section("测试 3.6: 扫描校正空壳单元状态")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    import tempfile
+    from app.core.scanner import MediaScanner
+    from app.ui.workers.scan_worker import ScanWorker
+
+    tmp = Path(tempfile.mkdtemp(prefix="scan_empty_unit_"))
+    config = AppConfig()
+    worker = ScanWorker(config, tmp)
+
+    # 测试库是全局共享的：W4 断言"初始无扫描会话"，所以先记下基线，
+    # 测试结束后把本轮产生的扫描会话与临时媒体库一起清掉。
+    with DatabaseManager.session() as session:
+        latest = q.get_latest_scan_session(session)
+        baseline_scan_id = latest.id if latest else 0
+
+    def scan_and_save():
+        result = MediaScanner(
+            extensions=config.media_extensions,
+            exclude_patterns=config.exclude_patterns,
+        ).scan_root(tmp)
+        worker._save_to_database(result)
+        return result
+
+    def unit_status(path: Path):
+        with DatabaseManager.session() as session:
+            u = q.get_unit_by_path(session, str(path))
+            return (u.status, u.file_count) if u else (None, None)
+
+    try:
+        # 真实形态：日期文件夹里 1 个零散文件 + 2 个各自独立的子单元
+        date_dir = tmp / "9.15"
+        (date_dir / "可爱女友").mkdir(parents=True, exist_ok=True)
+        (date_dir / "北京情侣").mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (16, 16), (255, 0, 0)).save(date_dir / "散图.jpg")
+        for i in range(2):
+            Image.new("RGB", (16, 16), (0, 200, 0)).save(
+                date_dir / "可爱女友" / f"a{i}.jpg")
+            Image.new("RGB", (16, 16), (0, 0, 255)).save(
+                date_dir / "北京情侣" / f"b{i}.jpg")
+
+        scan_and_save()
+        status, count = unit_status(date_dir)
+        check(f"含零散文件的日期文件夹成为活跃单元 ({status}, {count} 个)",
+              status == "active" and count == 1)
+        status, count = unit_status(date_dir / "可爱女友")
+        check(f"子文件夹各自独立成单元 ({status}, {count} 个)",
+              status == "active" and count == 2)
+
+        # 零散文件被删除/挪走 → 目录还在，但已不再直接包含媒体文件
+        (date_dir / "散图.jpg").unlink()
+        scan_and_save()
+        status, count = unit_status(date_dir)
+        check(f"目录还在但已无内容的单元被排除 (status={status}, files={count})",
+              status == "excluded")
+        status, _ = unit_status(date_dir / "可爱女友")
+        check("同一父目录下的子单元不受影响", status == "active")
+
+        # 重新放回零散文件 → 自动恢复（否则文件扫得到、界面却看不见）
+        Image.new("RGB", (16, 16), (10, 10, 10)).save(date_dir / "新图.jpg")
+        scan_and_save()
+        status, count = unit_status(date_dir)
+        check(f"重新产出内容后自动恢复为活跃 ({status}, {count} 个)",
+              status == "active" and count == 1)
+
+        # 用户"排除此文件夹"（有文件记录）必须保持排除，不被误恢复
+        manual_dir = tmp / "手动排除"
+        manual_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(3):
+            Image.new("RGB", (16, 16), (200, 200, 0)).save(
+                manual_dir / f"m{i}.jpg")
+        scan_and_save()
+        with DatabaseManager.session() as session:
+            u = q.get_unit_by_path(session, str(manual_dir))
+            q.mark_unit_excluded(session, u.id)
+        scan_and_save()
+        status, _ = unit_status(manual_dir)
+        check("用户手动排除的文件夹重扫后仍排除", status == "excluded")
+
+        # 用户手动标记的单元允许为空，不得被当成空壳清掉
+        manual_empty = tmp / "我手动建的"
+        manual_empty.mkdir(parents=True, exist_ok=True)
+        with DatabaseManager.session() as session:
+            root_id = q.get_root_by_path(session, str(tmp)).id
+            created = q.create_unit(
+                session, path=str(manual_empty), name="我手动建的",
+                library_root_id=root_id, is_manual=True,
+                file_count=0, total_size=0,
+            )
+            created_id = created.id
+        scan_and_save()
+        with DatabaseManager.session() as session:
+            kept = q.get_unit_by_id(session, created_id)
+        check("手动标记的空单元不被排除", kept.status == "active")
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+        from app.db.models import ScanSession
+        with DatabaseManager.session() as session:
+            session.query(ScanSession).filter(
+                ScanSession.id > baseline_scan_id
+            ).delete(synchronize_session=False)
+            root_obj = q.get_root_by_path(session, str(tmp))
+            if root_obj is not None:
+                q.remove_library_root(session, root_obj.id)
+
+
 def test_scanner_nested_promotion():
     """测试 3.5: 扫描器嵌套单子目录提升 + .thumbnails 清理。"""
     section("测试 3.5: 扫描器嵌套优化")
@@ -6798,6 +6922,7 @@ def main():
         test_save_to_db(result, temp_root)
         test_scan_worker_path_chunking()
         test_path_revalidation()
+        test_scan_reconciles_empty_units()
         test_scanner_nested_promotion()
         test_scanner_no_file_loss()
         test_zero_byte_file()
