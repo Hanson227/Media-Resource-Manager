@@ -15,12 +15,12 @@ from sqlalchemy.exc import OperationalError
 
 from app.db.engine import DatabaseManager
 from app.db.models import Base
-from app.utils.constants import EvidenceKind, MatchLevel, MatchType
+from app.utils.constants import EvidenceKind, ExcludeReason, MatchLevel, MatchType
 
 logger = logging.getLogger(__name__)
 
 # 当前数据库 Schema 版本号
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 # v4→v5 重建 dedup_file_matches 用的建表语句。
 # SQLite 不支持就地修改 CHECK 约束，只能"新建表 → 拷数据 → 换名"重建；
@@ -290,6 +290,39 @@ def _migrate_v7_to_v8(engine) -> None:
     logger.info("迁移 v7→v8: dedup_results 增加 computed_version（旧结论标记）")
 
 
+def _migrate_v8_to_v9(engine) -> None:
+    """v8→v9: resource_units 增加 exclude_reason（排除起因）。
+
+    为什么必须落库：`status=excluded` 只有一种取值，却有两种恢复语义相反的起因
+    （用户手动排除 vs 扫描判定内容消失）。旧实现只能靠 `file_count == 0` 猜后者，
+    于是"目录不可达 → 自动排除，但文件记录被刻意保留（file_count > 0）"的记录
+    永远无法自动恢复 —— 实测事故：忘插移动盘启动一次，整库进"已忽略"，
+    插回盘刷新也回不来（背景见 `docs/pitfalls.md`）。
+
+    存量 `excluded` 行保持 NULL（起因不可考）：一律**不**自动恢复，避免升级时
+    把用户当年的手动排除悄悄抹掉；要不要恢复由用户在「管理已排除文件夹」里
+    显式决定（对话框提供批量恢复）。
+
+    SQLite 的 ADD COLUMN 支持带 CHECK，schema 与全新建库保持一致。
+    幂等：列已存在时直接返回。
+    """
+    inspector = inspect(engine)
+    if "resource_units" not in inspector.get_table_names():
+        return
+    columns = [c["name"] for c in inspector.get_columns("resource_units")]
+    if "exclude_reason" in columns:
+        return
+
+    reasons = ", ".join(f"'{e.value}'" for e in ExcludeReason)
+    with engine.connect() as conn:
+        conn.execute(text(
+            f"ALTER TABLE resource_units ADD COLUMN exclude_reason VARCHAR(16) "
+            f"CHECK (exclude_reason IS NULL OR exclude_reason IN ({reasons}))"
+        ))
+        conn.commit()
+    logger.info("迁移 v8→v9: resource_units 增加 exclude_reason（排除起因）")
+
+
 def migrate_db() -> None:
     """执行数据库迁移（当 Schema 版本变更时）。"""
     engine = DatabaseManager.get_engine()
@@ -380,6 +413,11 @@ def migrate_db() -> None:
         _migrate_v7_to_v8(engine)
         _set_schema_version(engine, 8)
         current = 8
+
+    if current < 9:
+        _migrate_v8_to_v9(engine)
+        _set_schema_version(engine, 9)
+        current = 9
 
     logger.info(f"数据库迁移完成，当前版本: v{current}")
 

@@ -18,7 +18,26 @@ class UnitStatus(str, Enum):
     """资源单元状态。"""
     ACTIVE = "active"        # 正常活动状态
     MERGED = "merged"        # 已被合并到父单元
-    EXCLUDED = "excluded"    # 用户手动排除
+    EXCLUDED = "excluded"    # 已排除（起因见 ExcludeReason）
+
+
+class ExcludeReason(str, Enum):
+    """资源单元被排除的起因 —— 决定它能否被扫描自动恢复。
+
+    `excluded` 只有一种状态值，却有两种语义相**反**的起因：
+    用户手动排除的必须永远保持排除；扫描判定"内容没了"的要在内容回来时
+    自动恢复。旧实现没有这一列，只能用 `file_count == 0` 猜"这条是自动排除的"
+    （见 `queries.restore_units_produced_by_scan`），于是磁盘掉线导致的自动排除
+    永远恢复不了 —— 那时文件记录被刻意保留着，`file_count > 0`。
+    实测事故：忘插盘启动一次，整库进"已忽略"，插回盘刷新也回不来。
+    """
+    USER = "user"              # 用户「排除此文件夹」→ 绝不自动恢复
+    AUTO_MISSING = "missing"   # 扫描判定：目录已不可达（卷可达）
+    AUTO_EMPTY = "empty"       # 扫描判定：目录还在，但已无媒体文件
+
+
+AUTO_EXCLUDE_REASONS = (ExcludeReason.AUTO_MISSING.value, ExcludeReason.AUTO_EMPTY.value)
+"""扫描自动排除的起因集合（除它之外的（含 NULL）一律不自动恢复）。"""
 
 
 class MatchType(str, Enum):

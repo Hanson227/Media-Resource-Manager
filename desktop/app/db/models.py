@@ -20,8 +20,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 from app.utils.constants import (
-    EvidenceKind, MatchLevel, MatchType, MediaType, MessageType, ResolutionStatus,
-    ScanStatus, UnitStatus, WhitelistMatchType,
+    EvidenceKind, ExcludeReason, MatchLevel, MatchType, MediaType, MessageType,
+    ResolutionStatus, ScanStatus, UnitStatus, WhitelistMatchType,
 )
 
 
@@ -80,6 +80,10 @@ class ResourceUnit(Base):
             f"status IN ({_enum_in(UnitStatus)})",
             name="ck_resource_units_status",
         ),
+        CheckConstraint(
+            f"exclude_reason IS NULL OR exclude_reason IN ({_enum_in(ExcludeReason)})",
+            name="ck_resource_units_exclude_reason",
+        ),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -102,6 +106,13 @@ class ResourceUnit(Base):
 
     status = Column(String(16), nullable=False, default="active")
     """状态：active / merged / excluded。"""
+
+    exclude_reason = Column(String(16), nullable=True, default=None)
+    """被排除的起因：user / missing / empty（NULL = 未排除，或升级前的旧记录）。
+
+    语义见 `constants.ExcludeReason`：只有扫描自动排除（missing / empty）才能
+    被下一次扫描自动恢复，用户手动排除的永远保持。
+    """
 
     file_count = Column(Integer, nullable=False, default=0)
     """该单元内媒体文件总数。"""

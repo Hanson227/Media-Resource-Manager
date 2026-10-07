@@ -150,8 +150,12 @@ The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "reso
 - **缩略图缓存必须校验归属** — 缓存名 `{file_id}_thumb.jpg` 而 file_id 会复用；
   任何"直接返回缓存"都要先过 `ThumbnailGenerator.is_cache_valid()`，清理时
   `.jpg` 与 `.jpg.meta` 必须成对处理。→ `docs/pitfalls.md`
-- **删除必须区分"文件没了"与"磁盘没连"** — 先过 `file_ops.volume_available()`；
-  卷不可达 → `409` + 保留记录，绝不按"文件已不存在"删库。→ `docs/pitfalls.md`
+- **删除与排除都必须区分"文件没了"与"磁盘没连"** — 先过 `file_ops.volume_available()`；
+  卷不可达 → `409` + 保留记录，绝不按"文件已不存在"删库，也绝不把单元标成已排除
+  （忘插盘启动一次 = 整库"消失"）。→ `docs/pitfalls.md`
+- **排除状态必须记录起因** — `resource_units.exclude_reason`（user / missing / empty）；
+  恢复逻辑只看起因，不能拿 `file_count` 猜，否则掉线造成的排除永远回不来。
+  → `docs/pitfalls.md`
 - **回收站不可用绝不静默降级成永久删除** — `DELETE_MODES` 是唯一来源，
   `delete` 只能由用户明确选择。→ `docs/pitfalls.md`
 - **Windows 上改 `os.environ` 影响不到 cv2** — 必须走

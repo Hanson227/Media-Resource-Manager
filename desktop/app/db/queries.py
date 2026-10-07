@@ -6,6 +6,7 @@
 每个函数接收 SQLAlchemy Session 作为第一个参数（依赖注入模式）。
 """
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Sequence, Any
@@ -19,9 +20,14 @@ from app.db.models import (
     Whitelist, ScanSession, FileTag, FileTagMapping,
 )
 from app.utils.constants import (
-    DEDUP_RESULT_VERSION, EvidenceKind, MatchLevel, MatchType, MessageType,
-    ResolutionStatus, UnitStatus, WhitelistMatchType,
+    AUTO_EXCLUDE_REASONS, DEDUP_RESULT_VERSION, EvidenceKind, ExcludeReason,
+    MatchLevel, MatchType, MessageType, ResolutionStatus, UnitStatus,
+    WhitelistMatchType,
 )
+from app.services.file_ops import volume_available
+
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -188,13 +194,29 @@ def get_starred_units(session: Session) -> list[ResourceUnit]:
     ).all()
 
 
-def mark_unit_excluded(session: Session, unit_id: int) -> None:
-    """将资源单元标记为排除状态。"""
+def mark_unit_excluded(session: Session, unit_id: int,
+                       reason: str = ExcludeReason.USER.value) -> None:
+    """将资源单元标记为排除状态，并记下起因。
+
+    参数:
+        reason: `ExcludeReason` 取值。默认 USER（用户显式排除）；
+            扫描自动排除的两处调用必须传 AUTO_MISSING / AUTO_EMPTY，
+            否则它们会被当成用户选择，内容回来了也永远不恢复。
+    """
     unit = session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).first()
     if unit:
         unit.status = UnitStatus.EXCLUDED.value
+        unit.exclude_reason = reason
         unit.updated_at = datetime.now()
         session.flush()
+
+
+def is_auto_excluded(unit: ResourceUnit) -> bool:
+    """该单元是否由扫描自动排除（= 内容回来时可以自动恢复）。
+
+    NULL（升级前的旧记录）不算自动：起因不可考，宁可让用户显式恢复。
+    """
+    return unit.exclude_reason in AUTO_EXCLUDE_REASONS
 
 
 def get_excluded_units(session: Session) -> list[ResourceUnit]:
@@ -205,11 +227,28 @@ def get_excluded_units(session: Session) -> list[ResourceUnit]:
 
 
 def unexclude_unit(session: Session, unit_id: int) -> None:
-    """将已排除的资源单元恢复为活跃状态。"""
+    """将已排除的资源单元恢复为活跃状态（同时清掉排除起因）。"""
     session.query(ResourceUnit).filter(ResourceUnit.id == unit_id).update({
         "status": UnitStatus.ACTIVE.value,
+        "exclude_reason": None,
         "updated_at": datetime.now(),
     })
+
+
+def unexclude_all_units(session: Session) -> int:
+    """取消全部排除（「管理已排除文件夹」的批量恢复入口）。
+
+    返回:
+        被恢复的单元数。
+    """
+    count = session.query(ResourceUnit).filter(
+        ResourceUnit.status == UnitStatus.EXCLUDED.value
+    ).update({
+        "status": UnitStatus.ACTIVE.value,
+        "exclude_reason": None,
+        "updated_at": datetime.now(),
+    }, synchronize_session=False)
+    return int(count or 0)
 
 
 def unmerge_unit(session: Session, unit_id: int) -> None:
@@ -222,11 +261,14 @@ def unmerge_unit(session: Session, unit_id: int) -> None:
 
 
 def restore_units_produced_by_scan(session: Session, unit_paths: Sequence[str]) -> list[str]:
-    """扫描落库前调用：本轮重新产出内容的"空壳"排除记录恢复为活跃。
+    """扫描落库前调用：本轮重新产出内容的自动排除记录恢复为活跃。
 
-    背景见 `exclude_empty_units`。判据是"排除时它就是个空壳"（file_count = 0）：
-    只有这类记录才是扫描自动排除的；用户手动「排除此文件夹」的记录仍有文件
-    记录（file_count > 0），必须保持排除，否则下次扫描就把用户的选择抹掉了。
+    判据是 `exclude_reason`（见 `constants.ExcludeReason`），不是 `file_count`：
+    用户手动「排除此文件夹」的记录起因是 `user`，必须保持排除（否则下次扫描
+    就把用户的选择抹掉了）；扫描自动排除的（missing / empty）在内容回来后
+    必须恢复 —— 包含"目录不可达时被排除、文件记录被刻意保留（file_count > 0）"
+    这一整类，旧判据 `file_count == 0` 对它们永远不成立（实测事故：忘插盘启动
+    一次整库进"已忽略"，插回盘刷新也回不来）。NULL（升级前的旧记录）不自动恢复。
 
     参数:
         unit_paths: 本轮扫描实际产出内容的单元路径。
@@ -239,7 +281,7 @@ def restore_units_produced_by_scan(session: Session, unit_paths: Sequence[str]) 
         unit = get_unit_by_path(session, str(path))
         if unit is None or unit.status != UnitStatus.EXCLUDED.value:
             continue
-        if (unit.file_count or 0) > 0:
+        if not is_auto_excluded(unit):
             continue
         unexclude_unit(session, unit.id)
         restored.append(unit.name)
@@ -250,19 +292,21 @@ def exclude_empty_units(session: Session, root_id: int,
                         produced_paths: Sequence[str]) -> list[str]:
     """扫描落库后调用：把本根下本轮没有产出内容的活跃单元标记为排除。
 
-    旧判据只看目录是否存在（见 `scan_worker._save_to_database` 与
-    `main_window._cleanup_missing_paths`），于是一种情况永远清理不到：
-    **目录还在、里面已经没有任何媒体文件** —— 日期文件夹里的零散文件被删除
-    或挪进子文件夹后就是这样：子文件夹各自成单元，父文件夹自己既不再被扫描器
-    判定为单元、也没被删除，于是行一直留着，界面显示成"0 个 · 0 B"（实测报障）。
+    历史（见 `docs/pitfalls.md` 第 1 节）：旧判据只看目录是否存在，于是
+    **目录还在、里面已经没有任何媒体文件**的文件夹（日期文件夹里的零散文件被
+    删除或挪进子文件夹）永远清理不到，界面一直显示 "0 个 · 0 B"。补上第二种
+    情形后判据是：
 
-    补上第二种情形：
+        - 目录已不存在且**卷可达** → 排除（原因 missing）
+        - 目录还在但已无任何文件记录 → 排除（原因 empty；`is_manual` 的单元
+          除外 —— 它是用户显式标记的，允许为空）
 
-        - 目录已不存在 → 排除（与旧逻辑一致，手动单元也一样）
-        - 目录还在但已无任何文件记录 → 排除（`is_manual` 的单元除外：
-          它是用户显式标记的，允许为空）
+    **卷不可达（移动盘没插 / 网络盘掉线）时一律不动**：路径看不见不等于内容没了，
+    按"目录已不存在"处理会让整个库瞬间"消失"（实测事故：忘插盘启动一次，
+    全部进"已忽略"且刷新无效）。判断入口是 `file_ops.volume_available()`，
+    与删除语义同源。
 
-    仍有文件记录的单元不动：权限异常、目录暂时不可读等情况下不该让内容消失。
+    仍有文件记录的单元也不动：权限异常、目录暂时不可读等情况下不该让内容消失。
 
     参数:
         root_id: 媒体库根目录 ID。
@@ -278,12 +322,21 @@ def exclude_empty_units(session: Session, root_id: int,
             continue
         if str(unit.path) in produced:
             continue
-        if Path(unit.path).is_dir():
-            if unit.is_manual:
+        if not Path(unit.path).is_dir():
+            if not volume_available(unit.path):
+                logger.warning(
+                    f"磁盘未连接，保留单元不排除: {unit.path}")
                 continue
-            if get_unit_file_count(session, unit.id) > 0:
-                continue
-        mark_unit_excluded(session, unit.id)
+            mark_unit_excluded(session, unit.id,
+                               reason=ExcludeReason.AUTO_MISSING.value)
+            excluded.append(unit.name)
+            continue
+        if unit.is_manual:
+            continue
+        if get_unit_file_count(session, unit.id) > 0:
+            continue
+        mark_unit_excluded(session, unit.id,
+                           reason=ExcludeReason.AUTO_EMPTY.value)
         excluded.append(unit.name)
     return excluded
 

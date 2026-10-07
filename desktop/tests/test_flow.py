@@ -732,6 +732,7 @@ def test_db():
     inspector = inspect(engine)
     cols = [c["name"] for c in inspector.get_columns("resource_units")]
     check("cover_path 列已迁移", "cover_path" in cols)
+    check("exclude_reason 列已迁移", "exclude_reason" in cols)
     return db_path
 
 
@@ -1081,6 +1082,219 @@ def test_path_revalidation():
         # 原有活跃单元不受影响
         active = q.get_units_by_root(session, root_id)
         check("原有活跃单元仍在", any(u.id != fake_unit.id for u in active))
+
+
+def test_offline_volume_never_mass_excludes():
+    """测试 3.7: 磁盘未连接时绝不能把整个库丢进"已忽略"。
+
+    实测事故（2026-10-08）：媒体库放在移动盘上，某次开机忘插盘就启动了软件。
+    当时"路径复核"只看 `Path.is_dir()`，于是"卷不可达"被判成"内容没了"：
+    根目录被 `enabled=False`、全部单元 status=excluded。关掉软件、插回盘、
+    重开，界面空无一物，刷新也没用 —— 原因有两层：
+      ① 「刷新全部」只扫 `enabled` 的根，没有任何代码把它改回 True；
+      ② 即使扫到了，自动恢复要求 `file_count == 0`，而这些单元的文件记录
+         被刻意保留着（扫描的失效文件清理同样以 `is_dir()` 为前置条件），
+         所以永远等不到恢复，只能在「管理已排除文件夹」里一个个点"取消排除"。
+
+    与删除语义同源（见 file_ops.volume_available）：判"内容没了"之前先判"盘在不在"。
+    """
+    section("测试 3.7: 磁盘未连接时不得批量排除")
+    from app.ui.main_window import cleanup_missing_paths
+
+    missing = None
+    for letter in "QRSTUVWXYZ":
+        anchor = f"{letter}:\\"
+        if not Path(anchor).exists():
+            missing = anchor
+            break
+    if missing is None:
+        check("找不到可用作'未连接磁盘'的盘符，跳过", True)
+        return
+
+    root_path = missing + "__offline_root__"
+    ids = {}
+    try:
+        with DatabaseManager.session() as session:
+            root = q.add_library_root(session, root_path)
+            u1 = q.create_unit(session, root_path + "\\启动复核单元", "启动复核单元",
+                               root.id, file_count=1, total_size=0)
+            u2 = q.create_unit(session, root_path + "\\扫描收尾单元", "扫描收尾单元",
+                               root.id, file_count=1, total_size=0)
+            for unit in (u1, u2):
+                q.insert_media_file(
+                    session, path=str(Path(unit.path) / "x.mp4"), filename="x.mp4",
+                    extension=".mp4", media_type="video", size_bytes=0,
+                    resource_unit_id=unit.id)
+            ids = {"root": root.id, "u1": u1.id, "u2": u2.id}
+        check("前置条件：该盘符确实不可用", not Path(missing).exists())
+
+        # ① 启动后 100ms 的路径复核（MainWindow.__init__ → cleanup_missing_paths）
+        cleanup_missing_paths(root_ids=[ids["root"]])
+        with DatabaseManager.session() as session:
+            root = next(r for r in q.get_all_roots(session) if r.id == ids["root"])
+            check("根目录必须保持参与扫描（否则『刷新全部』永远扫不到它）",
+                  bool(root.enabled))
+            check("单元必须保持 active（否则界面空无一物、只能手动取消排除）",
+                  q.get_unit_by_id(session, ids["u1"]).status == "active")
+
+        # ② 扫描收尾（scan_worker._save_to_database → exclude_empty_units）。
+        #    先把 u2 复位为 active，把"扫描收尾"这条路径与 ① 隔离开，
+        #    否则 u2 已被 ① 排除，get_units_by_root 只见 active，断言会空转。
+        with DatabaseManager.session() as session:
+            q.unexclude_unit(session, ids["u2"])
+            excluded = q.exclude_empty_units(session, ids["root"], [])
+        check("扫描收尾也不得把不可达卷上的单元排除", excluded == [])
+        with DatabaseManager.session() as session:
+            check("扫描收尾后单元仍为 active",
+                  q.get_unit_by_id(session, ids["u2"]).status == "active")
+    finally:
+        with DatabaseManager.session() as session:
+            root = next((r for r in q.get_all_roots(session)
+                         if r.id == ids.get("root")), None)
+            if root is not None:
+                q.remove_library_root(session, root.id)
+
+
+def test_auto_excluded_unit_recovers_when_path_returns():
+    """测试 3.8: 扫描自动排除的单元，在内容回来后必须能自动恢复。
+
+    事故的第二层：自动排除发生在"目录不可达"时，而那时文件记录是**刻意保留**的
+    （见 scan_worker 的失效文件清理同样先看 `is_dir()`）——于是 `file_count > 0`。
+    旧恢复判据 `file_count == 0` 因此永远不成立：文件夹挪走再挪回来、盘拔了再插回，
+    界面都看不见。正确判据是"这条 exclusion 是不是扫描自己下的"（exclude_reason）。
+    """
+    section("测试 3.8: 自动排除的单元可自动恢复")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+    from app.core.scanner import MediaScanner
+    from app.ui.workers.scan_worker import ScanWorker
+
+    tmp = Path(tempfile.mkdtemp(prefix="auto_exclude_recover_"))
+    config = AppConfig()
+    worker = ScanWorker(config, tmp)
+
+    with DatabaseManager.session() as session:
+        latest = q.get_latest_scan_session(session)
+        baseline_scan_id = latest.id if latest else 0
+
+    def scan_and_save():
+        result = MediaScanner(
+            extensions=config.media_extensions,
+            exclude_patterns=config.exclude_patterns,
+        ).scan_root(tmp)
+        worker._save_to_database(result)
+        return result
+
+    unit_dir = tmp / "整单元"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(2):
+        Image.new("RGB", (16, 16), (30, 30, 30)).save(unit_dir / f"p{i}.jpg")
+    try:
+        scan_and_save()
+
+        # 目录整体不可达（文件夹被移走 / 盘掉线后路径不可见）
+        import shutil as _shutil
+        _shutil.rmtree(unit_dir)
+        scan_and_save()
+        with DatabaseManager.session() as session:
+            u = q.get_unit_by_path(session, str(unit_dir))
+            status, count = u.status, u.file_count
+        check(f"目录不可达时被排除 (status={status}, files={count})",
+              status == "excluded")
+        check("排除时文件记录被保留（不是数据丢失）", count == 2)
+
+        # 内容回到同一路径 → 必须自动恢复
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(2):
+            Image.new("RGB", (16, 16), (60, 60, 60)).save(unit_dir / f"q{i}.jpg")
+        scan_and_save()
+        with DatabaseManager.session() as session:
+            u = q.get_unit_by_path(session, str(unit_dir))
+            status, count = u.status, u.file_count
+        check(f"内容回来后自动恢复为 active (status={status}, files={count})",
+              status == "active" and count == 2)
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+        from app.db.models import ScanSession
+        with DatabaseManager.session() as session:
+            session.query(ScanSession).filter(
+                ScanSession.id > baseline_scan_id
+            ).delete(synchronize_session=False)
+            root_obj = q.get_root_by_path(session, str(tmp))
+            if root_obj is not None:
+                q.remove_library_root(session, root_obj.id)
+
+
+def test_excluded_folders_dialog_bulk_restore():
+    """测试 3.9: 「管理已排除文件夹」必须能批量恢复 + 显示排除起因。
+
+    事故现场整个库都在这个列表里，当时列表只能单选、按钮只有一个"取消排除"，
+    用户只能一条条点。这里锁定：起因文案正确、列表能一次列出全部、批量恢复
+    （`queries.unexclude_all_units`）真的清空排除状态。
+    """
+    section("测试 3.9: 已排除文件夹对话框")
+    from PySide6.QtWidgets import QApplication
+    from app.ui.dialogs.excluded_folders import ExcludedFoldersDialog, _reason_label
+    from app.utils.constants import ExcludeReason
+
+    if QApplication.instance() is None:
+        QApplication([])
+
+    check("手动排除文案可读",
+          "手动" in _reason_label(ExcludeReason.USER.value))
+    check("自动排除（目录不可达）文案可读",
+          "自动" in _reason_label(ExcludeReason.AUTO_MISSING.value))
+    check("升级前的 NULL 记录不冒充自动排除",
+          "自动" not in _reason_label(None))
+
+    tmp = Path(tempfile.mkdtemp(prefix="excluded_dialog_"))
+    root_id = None
+    try:
+        with DatabaseManager.session() as session:
+            root = q.add_library_root(session, str(tmp))
+            root_id = root.id
+            for i in range(3):
+                unit_dir = tmp / f"u{i}"
+                unit_dir.mkdir(parents=True, exist_ok=True)
+                unit = q.create_unit(session, str(unit_dir), f"u{i}", root.id,
+                                     file_count=1, total_size=0)
+                q.insert_media_file(
+                    session, path=str(unit_dir / "a.jpg"), filename="a.jpg",
+                    extension=".jpg", media_type="image", size_bytes=0,
+                    resource_unit_id=unit.id)
+                q.mark_unit_excluded(session, unit.id,
+                                     reason=ExcludeReason.AUTO_MISSING.value)
+
+        dlg = ExcludedFoldersDialog()
+        check(f"对话框列出全部排除项（{dlg._list_widget.count()} 条）",
+              dlg._list_widget.count() >= 3)
+        check("列表里能看到排除起因",
+              any("自动排除" in it.text()
+                  for it in (dlg._list_widget.item(i)
+                             for i in range(dlg._list_widget.count()))))
+        check("提供「全部恢复」按钮",
+              dlg._restore_all_btn.isEnabled())
+        dlg.close()
+
+        with DatabaseManager.session() as session:
+            restored_count = q.unexclude_all_units(session)
+            left = q.get_excluded_units(session)
+        check(f"批量恢复清空排除状态（恢复 {restored_count} 条）",
+              restored_count >= 3 and left == [])
+        with DatabaseManager.session() as session:
+            statuses = [q.get_unit_by_id(session, u.id).status
+                        for u in q.get_units_by_root(session, root_id)]
+        check("恢复后单元都是 active", statuses and all(s == "active" for s in statuses))
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+        with DatabaseManager.session() as session:
+            root = next((r for r in q.get_all_roots(session) if r.id == root_id), None)
+            if root is not None:
+                q.remove_library_root(session, root.id)
 
 
 def test_scan_reconciles_empty_units():
@@ -2400,6 +2614,70 @@ def test_migration_v7_to_v8_computed_version():
         migrate_db()  # 幂等
         check("重复迁移不丢数据",
               _exec("SELECT count(*) FROM dedup_results", fetch=True)[0][0] == 1)
+    finally:
+        DatabaseManager.dispose()
+        DatabaseManager.initialize(main_db)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_migration_v8_to_v9_exclude_reason():
+    """测试 1.10: v8→v9 增加 exclude_reason —— 排除起因必须落库。
+
+    实测事故（2026-10-08）：忘插移动盘启动一次，整个库被"路径复核"判成内容没了，
+    全部单元进 `excluded`，插回盘刷新也回不来 —— 因为"能否自动恢复"当时只能靠
+    `file_count == 0` 猜，而这类排除的文件记录是被刻意保留的。加一列记起因，
+    存量行保持 NULL（起因不可考）→ 一律不自动恢复，由用户在对话框里显式恢复。
+    """
+    section("测试 1.10: 迁移 v8→v9（排除起因）")
+    import shutil
+    import sqlite3
+
+    _BASE = Path(__file__).parent.parent
+    main_db = _BASE / "data" / "test_flow.db"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="mig89_"))
+    tmp_db = tmp_dir / "mig.db"
+
+    def _exec(sql, params=(), fetch=False):
+        con = sqlite3.connect(str(tmp_db))
+        try:
+            cur = con.execute(sql, params)
+            rows = cur.fetchall() if fetch else None
+            con.commit()
+            return rows
+        finally:
+            con.close()
+
+    try:
+        _exec("""
+            CREATE TABLE resource_units (
+                id INTEGER NOT NULL,
+                path VARCHAR(2048) NOT NULL,
+                name VARCHAR(512) NOT NULL,
+                status VARCHAR(16) NOT NULL,
+                file_count INTEGER NOT NULL,
+                total_size BIGINT NOT NULL,
+                PRIMARY KEY (id)
+            )
+        """)
+        # 事故后的典型存量行：状态 excluded 且带文件记录
+        _exec("INSERT INTO resource_units VALUES "
+              "(1,'Q:\\\\__offline_root__\\\\离线单元','离线单元','excluded',12,0)")
+        _exec("PRAGMA user_version=8")
+
+        DatabaseManager.initialize(tmp_db)
+        migrate_db()
+
+        check(f"schema 版本升到 {CURRENT_SCHEMA_VERSION}",
+              _exec("PRAGMA user_version", fetch=True)[0][0] == CURRENT_SCHEMA_VERSION)
+        cols = [r[1] for r in _exec("PRAGMA table_info(resource_units)", fetch=True)]
+        check("exclude_reason 列已添加", "exclude_reason" in cols)
+        check("存量排除记录保持 NULL（起因不可考，不自动恢复）",
+              _exec("SELECT exclude_reason FROM resource_units WHERE id=1",
+                    fetch=True)[0][0] is None)
+
+        migrate_db()  # 幂等
+        check("重复迁移不丢数据",
+              _exec("SELECT count(*) FROM resource_units", fetch=True)[0][0] == 1)
     finally:
         DatabaseManager.dispose()
         DatabaseManager.initialize(main_db)
@@ -6917,11 +7195,15 @@ def main():
         test_migration_v5_to_v6_match_level()
         test_migration_v6_to_v7_columns()
         test_migration_v7_to_v8_computed_version()
+        test_migration_v8_to_v9_exclude_reason()
         test_db_integrity()
         result = test_scanner(temp_root)
         test_save_to_db(result, temp_root)
         test_scan_worker_path_chunking()
         test_path_revalidation()
+        test_offline_volume_never_mass_excludes()
+        test_auto_excluded_unit_recovers_when_path_returns()
+        test_excluded_folders_dialog_bulk_restore()
         test_scan_reconciles_empty_units()
         test_scanner_nested_promotion()
         test_scanner_no_file_loss()

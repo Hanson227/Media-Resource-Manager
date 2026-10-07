@@ -12,7 +12,7 @@
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from PySide6.QtCore import Qt, QSize, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QKeySequence
@@ -37,11 +37,67 @@ from app.ui.widgets.progress_panel import ProgressPanel
 from app.ui.workers.scan_worker import ScanWorker
 from app.ui.workers.hash_worker import HashWorker
 from app.ui.workers.dedup_worker import DedupWorker
-from app.utils.constants import MediaType
+from app.services.file_ops import volume_available, volume_label
+from app.utils.constants import ExcludeReason, MediaType
 from app.utils.file_helpers import format_size
 from app.utils.media_types import is_media_file
 
 logger = logging.getLogger(__name__)
+
+
+def cleanup_missing_paths(root_ids: Optional[Sequence[int]] = None) -> tuple[int, int, int]:
+    """路径复核：把"确实不在了"的根目录/单元关掉或排除。
+
+    参数:
+        root_ids: 只复核这些根目录（None = 全部）。
+
+    返回:
+        (被关闭的根数, 被排除的单元数, 被自愈的根数)。
+
+    与删除语义同源（见 `file_ops.volume_available`）：路径不可达有两种原因，
+    必须区分 ——
+      ① 内容被删/被移走（卷可达）→ 根目录置为不参与扫描、单元标 excluded；
+      ② 磁盘没插 / 网络盘掉线（卷不可达）→ **原样保留**。按 ① 处理会让整个库
+         瞬间"消失"：忘插盘启动一次，全部单元进"已忽略"，插回盘也回不来
+         （实测事故，见 `docs/pitfalls.md`）。
+    另外顺带自愈：之前被 ① 关掉的根，路径回来后重新参与扫描 —— 否则
+    「刷新全部」只扫 `enabled` 的根，没有任何代码会把它改回 True，
+    用户看到的永远是"刷新没用"。
+    """
+    cleaned_roots = 0
+    cleaned_units = 0
+    healed_roots = 0
+    with DatabaseManager.session() as session:
+        roots = q.get_all_roots(session)
+        if root_ids is not None:
+            wanted = set(root_ids)
+            roots = [r for r in roots if r.id in wanted]
+        for root in roots:
+            if not Path(root.path).is_dir():
+                if not volume_available(root.path):
+                    # 整根跳过：单元都在这个不可达的卷上，逐个判也没意义
+                    logger.warning(
+                        f"磁盘{volume_label(root.path)}未连接，保留全部记录: {root.path}")
+                    continue
+                logger.info(f"根目录已不存在，标记不参与扫描: {root.path}")
+                q.set_root_enabled(session, root.id, False)
+                cleaned_roots += 1
+            elif not root.enabled:
+                logger.info(f"根目录已恢复，重新参与扫描: {root.path}")
+                q.set_root_enabled(session, root.id, True)
+                healed_roots += 1
+            for stale in q.get_units_by_root(session, root.id):
+                if stale.status != "active" or Path(stale.path).is_dir():
+                    continue
+                if not volume_available(stale.path):
+                    continue
+                logger.info(f"单元路径已不存在，标记排除: {stale.name}")
+                q.mark_unit_excluded(session, stale.id,
+                                     reason=ExcludeReason.AUTO_MISSING.value)
+                cleaned_units += 1
+    if healed_roots:
+        logger.info(f"根目录自愈: {healed_roots} 个重新参与扫描")
+    return cleaned_roots, cleaned_units, healed_roots
 
 
 class MainWindow(QMainWindow):
@@ -838,10 +894,11 @@ class MainWindow(QMainWindow):
                     QMessageBox.critical(self, "排除失败", f"找不到资源单元 (ID={unit_id})")
                     return
                 name = unit.name
-                unit.status = "excluded"
-                unit.updated_at = datetime.now()
-                session.flush()
-                logger.info(f"已标记排除: {name} (id={unit_id}, status={unit.status})")
+                # 起因必须记成 user：扫描自动排除（missing/empty）才会被自动恢复，
+                # 用户的选择不能被下一次扫描抹掉（见 constants.ExcludeReason）。
+                q.mark_unit_excluded(session, unit_id,
+                                     reason=ExcludeReason.USER.value)
+                logger.info(f"已标记排除: {name} (id={unit_id}, status=excluded)")
             self._grid_view.clear()
             self._breadcrumb.hide()
             self._current_unit_id = None
@@ -1570,24 +1627,14 @@ class MainWindow(QMainWindow):
     # ============================================================
 
     def _cleanup_missing_paths(self) -> None:
-        """检查所有根目录和单元，标记路径已不存在的为 excluded。"""
+        """检查所有根目录和单元，把路径确实不在了的关掉/排除（磁盘没连则不动）。"""
         try:
-            with DatabaseManager.session() as session:
-                cleaned_roots = 0
-                cleaned_units = 0
-                for root in q.get_all_roots(session):
-                    if not Path(root.path).is_dir():
-                        logger.info(f"根目录已不存在，标记排除: {root.path}")
-                        q.set_root_enabled(session, root.id, False)
-                        cleaned_roots += 1
-                    for stale in q.get_units_by_root(session, root.id):
-                        if stale.status == "active" and not Path(stale.path).is_dir():
-                            logger.info(f"单元路径已不存在，标记排除: {stale.name}")
-                            q.mark_unit_excluded(session, stale.id)
-                            cleaned_units += 1
-                if cleaned_roots or cleaned_units:
-                    logger.info(f"清理完成: {cleaned_roots} 个根目录, {cleaned_units} 个单元")
-                    self._tree_view.refresh_model()
+            cleaned_roots, cleaned_units, healed_roots = cleanup_missing_paths()
+            if cleaned_roots or cleaned_units or healed_roots:
+                logger.info(
+                    f"清理完成: {cleaned_roots} 个根目录, {cleaned_units} 个单元, "
+                    f"{healed_roots} 个根目录恢复")
+                self._tree_view.refresh_model()
         except Exception as e:
             logger.error(f"路径清理失败: {e}")
 
@@ -1602,11 +1649,20 @@ class MainWindow(QMainWindow):
         try:
             with DatabaseManager.session() as session:
                 roots = q.get_all_roots(session)
-                paths = [r.path for r in roots if r.enabled]
+                enabled = [r for r in roots if r.enabled]
+                # 卷不可达的根不扫：根目录留着 enabled=True（插回盘就能自动
+                # 恢复），但扫描器对不存在的路径只会抛"目录不存在"。
+                paths = [r.path for r in enabled if volume_available(r.path)]
+                offline = [volume_label(r.path) for r in enabled
+                           if not volume_available(r.path)]
         except Exception as e:
             logger.error(f"获取根目录失败: {e}")
             self._tree_view.refresh_model()
             return
+
+        if offline:
+            logger.warning(f"跳过未连接的磁盘: {'、'.join(offline)}")
+            self._status_bar.set_status(f"已跳过未连接的磁盘: {'、'.join(offline)}")
 
         if not paths:
             self._tree_view.refresh_model()

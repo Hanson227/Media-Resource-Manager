@@ -135,8 +135,9 @@ class ScanWorker(QThread):
                 # 也用于排除本轮已不再产出内容的单元（见下方收尾清理）。
                 produced_paths = [str(u.path) for u in result.units]
 
-                # 恢复：本轮重新产出内容的"空壳"排除记录（必须赶在单元统计
-                # 写入之前判断，那时 file_count 还是排除时的值 = 0）
+                # 恢复：本轮重新产出内容的自动排除记录（必须赶在单元统计写入
+                # 之前判断；判据是 exclude_reason，不是 file_count —— 见
+                # queries.restore_units_produced_by_scan）
                 restored = q.restore_units_produced_by_scan(session, produced_paths)
                 if restored:
                     logger.info(f"恢复为活跃单元（重新产出内容）: {', '.join(restored)}")
