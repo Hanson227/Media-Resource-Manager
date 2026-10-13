@@ -1276,6 +1276,39 @@ def get_units_by_ids(session: Session, unit_ids: list[int]) -> list[ResourceUnit
     return session.query(ResourceUnit).filter(ResourceUnit.id.in_(unit_ids)).all()
 
 
+def mark_dedup_results_stale_for_units(session: Session, unit_ids: Sequence[int],
+                                       exclude_result_id: Optional[int] = None) -> int:
+    """把涉及指定单元的**未处置**查重结果标记为陈旧（computed_version=0）。
+
+    为什么不直接删行：合并后这些"结果"引用的文件匹配关系已经失真
+    （一侧文件被移走/删除），数字不再可信；但删行会丢掉对其它单元对的
+    提示（如 B 曾与 C 也报过重复 —— B 的内容并进了 A，这条线索仍值得看）。
+    computed_version=0 让 `_is_stale` 命中，客户端显示"数据待重算"，
+    重跑查重时由 prune_stale_dedup_results 按现状自然收敛。
+
+    参数:
+        exclude_result_id: 本次合并自身的结果行（处置已完成，无需标 stale）。
+
+    返回:
+        被标记的结果行数。
+    """
+    if not unit_ids:
+        return 0
+    ids = list(unit_ids)
+    query = session.query(DedupResult).filter(
+        DedupResult.is_resolved == False,  # noqa: E712
+        or_(DedupResult.unit_a_id.in_(ids), DedupResult.unit_b_id.in_(ids)),
+    )
+    if exclude_result_id is not None:
+        query = query.filter(DedupResult.id != exclude_result_id)
+    rows = query.all()
+    for dr in rows:
+        dr.computed_version = 0
+        dr.updated_at = datetime.now()
+    session.flush()
+    return len(rows)
+
+
 def resolve_dedup(session: Session, result_id: int, resolution: str) -> None:
     """将查重结果标记为已处理（旧版桩函数，语义见 _apply_dedup_resolution）。"""
     dr = session.query(DedupResult).filter(DedupResult.id == result_id).first()

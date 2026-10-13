@@ -1739,7 +1739,10 @@ const DedupPage = {
               <span class="mdi mdi-folder-outline"></span>
             </div>
             <div class="group-body">
-              <div class="group-name">{{ g.anchor_unit_name }}</div>
+              <div class="group-name">
+                <span class="unit-link" @click.stop="goUnit(g.anchor_unit_id)"
+                  :title="'打开文件夹：' + g.anchor_unit_name">{{ g.anchor_unit_name }}</span>
+              </div>
               <div class="group-sub">
                 {{ g.pair_count }} 对<span v-if="g.match_types"> · {{ typeLabels(g.match_types) }}</span><span
                   v-if="g.stale" class="group-stale"> · 含旧规则结果</span>
@@ -1759,7 +1762,11 @@ const DedupPage = {
                     <span class="mdi" :class="iconName(r)"></span>
                   </div>
                   <div class="card-body">
-                    <div class="card-title">{{ r.unit_a_name }} ↔ {{ r.unit_b_name }}</div>
+                    <div class="card-title">
+                      <span class="unit-link" @click.stop="goUnit(r.unit_a_id)">{{ r.unit_a_name }}</span>
+                      <span class="pair-arrow-text">↔</span>
+                      <span class="unit-link" @click.stop="goUnit(r.unit_b_id)">{{ r.unit_b_name }}</span>
+                    </div>
                     <div class="card-sub">
                       <span class="lvl-badge" :class="badgeClass(r)">{{ badgeLabel(r) }}</span>
                       <span>{{ subLabel(r) }}</span>
@@ -1917,6 +1924,8 @@ const DedupPage = {
       return String(types || '').split(',').filter(Boolean)
         .map(t => map[t] || t).join(' · ');
     },
+    /** 单元名 → 直接进入该单元的文件浏览页（@click.stop 防止触发卡片/折叠） */
+    goUnit(id) { if (id) this.$router.push('/units/' + id); },
     coverUrl(fid) {
       if (this.coverFailed[fid]) return '';
       return fid ? mediaUrl(this.serverUrl, '/api/files/' + fid + '/thumbnail') : '';
@@ -2264,7 +2273,11 @@ const DedupDetailPage = {
           <div class="score" :class="{ related: isRelated }">
             {{ headerScore }}
           </div>
-          <div class="units">{{ detail.unit_a.name }} ↔ {{ detail.unit_b.name }}</div>
+          <div class="units">
+            <span class="unit-link" @click="goUnit(detail.unit_a.id)">{{ detail.unit_a.name }}</span>
+            <span class="pair-arrow-text">↔</span>
+            <span class="unit-link" @click="goUnit(detail.unit_b.id)">{{ detail.unit_b.name }}</span>
+          </div>
           <div class="match-info">
             {{ overlapText }}<span v-if="detail.match_count">
               · 杰卡德 {{ (detail.similarity_score * 100).toFixed(1) }}%</span><span
@@ -2289,6 +2302,10 @@ const DedupDetailPage = {
             仅供了解，<b>不建议删除</b>。
           </div>
           <div v-if="!detail.is_resolved" class="resolve-actions">
+            <button v-if="!isStale" class="btn btn-primary" :disabled="merging"
+              @click="openMergeSheet">
+              <span class="mdi mdi-merge"></span> {{ merging ? '合并中…' : '合并文件夹' }}
+            </button>
             <template v-if="!isRelated">
               <button class="btn btn-success" @click="resolve('keep_a')">保留 A</button>
               <button class="btn btn-primary" @click="resolve('keep_b')">保留 B</button>
@@ -2374,19 +2391,115 @@ const DedupDetailPage = {
             </div>
           </template>
         </template>
+
+        <!-- 两侧独有文件：related / face 级没有"成对"网格可看全貌，
+             这里把两边的文件都摊开，支持多选批量删除（回收站） -->
+        <template v-if="(isRelated || isFaceOnly) && sideFiles.length">
+          <h3 class="section-title side-files-title">
+            <span>两侧文件 {{ sideFiles.length }} 个</span>
+            <button v-if="!manageMode" class="btn btn-secondary manage-btn" @click="startManage">
+              <span class="mdi mdi-check-circle-outline"></span> 管理
+            </button>
+            <button v-else class="btn btn-secondary manage-btn" @click="manageMode = false">取消</button>
+          </h3>
+          <div class="side-grid">
+            <div v-for="f in sideFiles" :key="f.side + '-' + f.file_id" class="side-card"
+              :class="{ selected: manageSelected[f.file_id] }"
+              @click="manageMode ? toggleManage(f.file_id) : openPreview(f.file_id)">
+              <img v-if="!failedThumbs[f.file_id]" class="thumb" :src="thumbUrl(f.file_id)"
+                loading="lazy" decoding="async" @error="onThumbError(f.file_id)">
+              <span v-else class="thumb thumb-empty">
+                <span class="mdi mdi-image-off-outline"></span>
+              </span>
+              <div class="side-name" :title="f.filename">{{ f.filename }}</div>
+              <span v-if="manageMode" class="mdi side-check"
+                :class="manageSelected[f.file_id] ? 'mdi-checkbox-marked-circle' : 'mdi-checkbox-blank-circle-outline'"></span>
+              <span v-else class="side-tag" :class="f.side">{{ f.side === 'a' ? 'A' : 'B' }}</span>
+            </div>
+          </div>
+          <div v-if="manageMode" class="select-bar" style="position:static;margin:10px 0">
+            <span>已选 {{ manageCount }}</span>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-secondary" @click="toggleManageAll">
+                {{ manageCount === sideFiles.length ? '全不选' : '全选' }}
+              </button>
+              <button class="btn btn-success" :disabled="!manageCount" @click="deleteSelectedSide">
+                移入回收站
+              </button>
+            </div>
+          </div>
+          <div class="face-hint-note">
+            这些文件在两侧**没有**匹配对（各只出现一边）。删除走回收站，可恢复；
+            全部处理完后可用上方「暂时忽略」收尾。
+          </div>
+        </template>
       </template>
       <template v-else>
         <div class="empty-state"><p>查重结果不存在</p></div>
       </template>
+
+      <!-- 逐文件微调模态：勾选 = 该文件移入回收站；未勾选的匹配对 = 两份都保留（移动） -->
+      <div v-if="showTune" class="pin-dialog-overlay" @click.self="showTune = false">
+        <div class="pin-dialog tune-dialog">
+          <h3>微调合并（保留 {{ tuneKeepName }}）</h3>
+          <div class="tune-legend">
+            <span><b>勾选</b> = 移入回收站</span>
+            <span><b>不勾</b> = {{ tuneKeep === 'a' ? 'A' : 'B' }} 侧文件将移动到 {{ tuneKeepName }}</span>
+          </div>
+          <div class="tune-list">
+            <label v-for="t in tuneItems" :key="t.file_id" class="tune-item"
+              :class="{ 'is-unmatched': !t.is_matched }">
+              <img v-if="!failedThumbs[t.file_id]" class="thumb" :src="thumbUrl(t.file_id)"
+                loading="lazy" decoding="async" @error="onThumbError(t.file_id)">
+              <span v-else class="thumb thumb-empty"><span class="mdi mdi-image-off-outline"></span></span>
+              <span class="tune-name" :title="t.name">{{ t.name }}</span>
+              <span v-if="!t.is_matched" class="tune-move-tag">将移动</span>
+              <input type="checkbox" :disabled="!t.is_matched" v-model="t.trashed">
+            </label>
+          </div>
+          <div class="tune-stats">回收站 {{ tuneTrashCount }} 个 · 移动 {{ tuneMoveCount }} 个</div>
+          <div v-if="tuneMoveCount !== tuneItems.length" class="tune-warn">
+            独有文件固定移动保留；只想保留两份的<b>重复对</b>，取消勾选即可。
+          </div>
+          <div class="pin-actions">
+            <button class="btn" @click="showTune = false">取消</button>
+            <button class="btn btn-primary" :disabled="merging" @click="submitTune">
+              {{ merging ? '合并中…' : '确认合并' }}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   `,
   props: ['serverUrl'],
   emits: ['loading'],
-  data() { return { loading: true, detail: null, showHints: false, failedThumbs: {} };},
+  data() { return {
+    loading: true, detail: null, showHints: false, failedThumbs: {},
+    merging: false,            // 合并请求执行中（禁用按钮）
+    showTune: false,           // 逐文件微调模态
+    tuneKeep: 'a',             // 微调时选择的保留侧
+    tuneItems: [],             // 被并入侧文件清单（trashed=勾选进回收站）
+    manageMode: false,         // related/face 两侧文件多选模式
+    manageSelected: {},        // { file_id: true }
+  };},
   computed: {
     isRelated() { return !!this.detail && this.detail.match_level === 'related'; },
     /** 只有人脸线索（0 个文件重叠）：杰卡德恒为 0，不能按"相似度"展示 */
     isFaceOnly() { return !!this.detail && this.detail.evidence_kind === 'face'; },
+    /** 两侧独有文件摊平（related/face 的"两侧文件"区用） */
+    sideFiles() {
+      if (!this.detail) return [];
+      const a = (this.detail.unmatched_a || []).map(f => ({ ...f, side: 'a' }));
+      const b = (this.detail.unmatched_b || []).map(f => ({ ...f, side: 'b' }));
+      return a.concat(b);
+    },
+    manageCount() { return Object.keys(this.manageSelected).length; },
+    tuneKeepName() {
+      if (!this.detail) return '';
+      return this.tuneKeep === 'a' ? this.detail.unit_a.name : this.detail.unit_b.name;
+    },
+    tuneTrashCount() { return this.tuneItems.filter(t => t.trashed).length; },
+    tuneMoveCount() { return this.tuneItems.length - this.tuneTrashCount; },
     /** 子集重复：文件几乎全在另一边里，杰卡德被"多出来的文件"压低 */
     isSubset() {
       return !!this.detail && this.detail.match_level === 'duplicate'
@@ -2464,6 +2577,144 @@ const DedupDetailPage = {
         this.detail.is_resolved = true;
         this.detail.resolution = action;
       } catch(e) { alert('操作失败：' + e.message); }
+    },
+    /** 单元名 → 直接进入该单元的文件浏览页 */
+    goUnit(id) { if (id) this.$router.push('/units/' + id); },
+
+    // ---- 一键合并 ----
+    openMergeSheet() {
+      this.$root.showSheet('合并重复单元', [
+        { label: '保留 A（' + this.detail.unit_a.name + '）', icon: 'mdi-folder-move-outline',
+          action: () => this.confirmMerge('a') },
+        { label: '保留 B（' + this.detail.unit_b.name + '）', icon: 'mdi-folder-move-outline',
+          action: () => this.confirmMerge('b') },
+        { label: '逐文件微调…', icon: 'mdi-format-list-checks',
+          action: () => this.openTune('a') },
+      ]);
+    },
+    /** 分级确认文案：duplicate 删"重复"；related 警示"画面相似内容可能不同"；face 纯移动 */
+    mergeSummary(keep, retainCount) {
+      const keptName = keep === 'a' ? this.detail.unit_a.name : this.detail.unit_b.name;
+      const otherName = keep === 'a' ? this.detail.unit_b.name : this.detail.unit_a.name;
+      const unmatched = keep === 'a' ? (this.detail.unmatched_b || []) : (this.detail.unmatched_a || []);
+      const moveCount = unmatched.length + retainCount;
+      if (this.isFaceOnly) {
+        return `将把「${otherName}」中全部 ${moveCount} 个文件移动到「${keptName}」，不会删除任何文件。`;
+      }
+      const trashN = this.countedMatches.length - retainCount;
+      if (this.isRelated) {
+        return `将把「${otherName}」中 ${moveCount} 个独有文件移动到「${keptName}」，` +
+          `${trashN} 个画面相似文件移入回收站。\n\n注意：画面相似 ≠ 内容相同，` +
+          `如不确定请取消后用「逐文件微调」保留两份。`;
+      }
+      return `将把「${otherName}」中 ${moveCount} 个独有文件移动到「${keptName}」，` +
+        `${trashN} 个重复文件移入回收站（可在回收站恢复）。`;
+    },
+    confirmMerge(keep) {
+      const text = this.mergeSummary(keep, 0);
+      if (!confirm(text + '\n\n确认合并？')) return;
+      this.doMerge(keep, []);
+    },
+    /** 微调：被并入侧文件清单。matched 默认勾选（=回收站）；unmatched 固定移动 */
+    openTune(keep) {
+      this.tuneKeep = keep;
+      const otherSide = keep === 'a' ? 'b' : 'a';
+      const items = [];
+      for (const m of this.countedMatches) {
+        const fid = otherSide === 'b' ? m.file_b_id : m.file_a_id;
+        const name = otherSide === 'b' ? m.file_b_name : m.file_a_name;
+        items.push({ file_id: fid, name, is_matched: true, trashed: true });
+      }
+      const unmatched = otherSide === 'b'
+        ? (this.detail.unmatched_b || []) : (this.detail.unmatched_a || []);
+      for (const f of unmatched) {
+        items.push({ file_id: f.file_id, name: f.filename, is_matched: false, trashed: false });
+      }
+      // 去重（同一文件可能出现在多条匹配里？后端一对一配对不会，但防御一下）
+      const seen = {};
+      this.tuneItems = items.filter(t => (seen[t.file_id] ? false : (seen[t.file_id] = true)));
+      this.showTune = true;
+    },
+    submitTune() {
+      // retain_matches = matched 中未勾选的（两份都保留）被并入侧文件 ID
+      const retain = this.tuneItems
+        .filter(t => t.is_matched && !t.trashed)
+        .map(t => t.file_id);
+      this.showTune = false;
+      this.doMerge(this.tuneKeep, retain);
+    },
+    async doMerge(keep, retain) {
+      this.merging = true;
+      try {
+        const res = await api(this.serverUrl,
+          '/api/dedup/results/' + this.$route.params.id + '/merge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keep, retain_matches: retain }),
+        });
+        if (res.success) {
+          let msg = '合并完成：移动 ' + res.moved_count + ' 个文件'
+            + (res.trashed_count ? '，' + res.trashed_count + ' 个移入回收站' : '');
+          if (res.renamed && res.renamed.length) {
+            msg += '；' + res.renamed.length + ' 个因重名自动改名（'
+              + res.renamed.slice(0, 3).map(r => r.original + ' → ' + r.renamed).join('、')
+              + (res.renamed.length > 3 ? ' 等' : '') + '）';
+          }
+          if (res.merged_dir_removed) msg += '；空文件夹已删除';
+          alert(msg);
+        } else {
+          const lines = (res.failed || []).slice(0, 5)
+            .map(f => '· ' + f.filename + '：' + f.reason).join('\n');
+          alert('有 ' + (res.failed || []).length + ' 个文件处理失败（其余已生效，可重试）：\n' + lines);
+        }
+        await this.reload();
+      } catch(e) { alert('合并失败：' + e.message); }
+      finally { this.merging = false; }
+    },
+    async reload() {
+      try {
+        this.detail = await api(this.serverUrl,
+          '/api/dedup/results/' + this.$route.params.id);
+      } catch(e) { /* 保持旧数据 */ }
+    },
+
+    // ---- related / face 两侧文件多选删除 ----
+    startManage() {
+      this.manageMode = true;
+      this.manageSelected = {};
+    },
+    toggleManage(fid) {
+      if (this.manageSelected[fid]) delete this.manageSelected[fid];
+      else this.manageSelected[fid] = true;
+      // 触发响应式：整对象替换
+      this.manageSelected = { ...this.manageSelected };
+    },
+    toggleManageAll() {
+      if (this.manageCount === this.sideFiles.length) this.manageSelected = {};
+      else {
+        const sel = {};
+        for (const f of this.sideFiles) sel[f.file_id] = true;
+        this.manageSelected = sel;
+      }
+    },
+    async deleteSelectedSide() {
+      const ids = Object.keys(this.manageSelected).map(Number);
+      if (!ids.length) return;
+      if (!confirm('将选中的 ' + ids.length + ' 个文件移入回收站？')) return;
+      try {
+        const res = await api(this.serverUrl, '/api/files/batch-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_ids: ids, mode: 'trash' }),
+        });
+        if (res.failed && res.failed.length) {
+          alert('有 ' + res.failed.length + ' 个删除失败：\n'
+            + res.failed.slice(0, 5).map(f => '· ' + f.reason).join('\n'));
+        }
+        this.manageMode = false;
+        this.manageSelected = {};
+        await this.reload();
+      } catch(e) { alert('删除失败：' + e.message); }
     }
   },
   async mounted() {

@@ -119,6 +119,7 @@ desktop/app/
     dedup_service.py     #   查重编排（GUI 线程与 HTTP API 共用唯一实现）
     index_service.py     #   索引编排（哈希/视频帧/人脸；HashWorker 与 API 共用）
     file_ops.py          #   删除语义（移至回收站 / 仅移出媒体库 / 永久删除），API 侧唯一实现
+    merge_service.py     #   查重合并执行（移动/回收/收尾三阶段，先磁盘后库，幂等可重试）
   utils/
     constants.py         #   All enums (MediaType, UnitStatus, MatchType, etc.)
     media_types.py       #   Extension-to-type mapping, is_media_file() helper
@@ -168,6 +169,9 @@ The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "reso
 - **"相关"必须区分证据来源** — `dedup_results.evidence_kind`（`file` / `face`），
   人脸不计杰卡德；两类混在一起会把真重复淹在 0% 的同演员噪音里。
   → `docs/dedup-pipeline.md`
+- **合并必须幂等可重试** — 收尾（空目录删除/标 merged）只在全部成功后执行；
+  重入时"被并入目录不存在"不算错误（库里该单元已无文件即放行收尾），
+  face 线索不算 counted 匹配（纯移动零删除）。→ `docs/dedup-pipeline.md` §4
 - **服务端长任务的运行态不能存组件 data** — 一律放模块级 + 后端 `active-task` 接口，
   否则切走再回来进度/Tab/展开状态全丢。→ `docs/web-frontend.md`
 - **HEIC 解码注册只有一个入口** — `image_helpers.ensure_heif_support()`；

@@ -2970,6 +2970,227 @@ def test_dedup_prune_stale_results():
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+def test_dedup_merge_units():
+    """测试 6.22: 合并重复单元（保留一侧文件夹，另一侧独有文件移入、匹配文件进回收站）。
+
+    覆盖：正常合并（磁盘+库双侧验证）、retain_matches「两份都保留」+ 重名自动改名、
+    face-only 纯移动零删除、部分失败不收尾可幂等重试、收尾语义
+    （merged 标记 / resolution='merge' / 其它结果标 stale / 统计重算）、API 端点
+    （详情 unmatched 字段、200/404/409/422、merge 重入幂等）。
+    """
+    section("测试 6.22: 合并重复单元")
+    import shutil as _shutil
+    from app.db.models import ResourceUnit
+    from app.services.merge_service import perform_merge
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="dedup_merge_"))
+    unit_ids = []
+    try:
+        # ============ 场景1：正常合并（keep='a'，B 匹配文件回收、独有文件移入）============
+        uid_a, ids_a, paths_a = _make_temp_unit(tmp_root, "合并A", ["m1.jpg", "u1.jpg"])
+        uid_b, ids_b, paths_b = _make_temp_unit(tmp_root, "合并B", ["m2.jpg", "u2.jpg"])
+        uid_c, _, _ = _make_temp_unit(tmp_root, "合并C", ["c.jpg"])
+        unit_ids += [uid_a, uid_b, uid_c]
+
+        with DatabaseManager.session() as session:
+            dr1 = q.upsert_dedup_result(
+                session, unit_a_id=uid_a, unit_b_id=uid_b,
+                similarity_score=0.67, match_count=1, total_files_a=2,
+                total_files_b=2, match_types="md5", match_level="duplicate")
+            q.insert_file_match(session, dedup_result_id=dr1.id,
+                                file_a_id=ids_a[0], file_b_id=ids_b[0],
+                                similarity_score=1.0, match_type="md5")
+            # 范围外的另一条未处置结果（涉及 B）：合并后应被标 stale
+            dr_stale = q.upsert_dedup_result(
+                session, unit_a_id=uid_c, unit_b_id=uid_b,
+                similarity_score=0.3, match_count=0, total_files_a=1,
+                total_files_b=2, match_types="", match_level="related",
+                evidence_kind="face")
+            dr1_id, dr_stale_id = dr1.id, dr_stale.id
+
+        with DatabaseManager.session() as session:
+            dr = q.get_dedup_by_id(session, dr1_id)
+            unit_a = q.get_unit_by_id(session, uid_a)
+            unit_b = q.get_unit_by_id(session, uid_b)
+            outcome = perform_merge(session, dr, unit_a, unit_b, "a", set(), None)
+
+        check("场景1: 合并成功（无失败项）", outcome.success)
+        check("场景1: 独有文件 u2 移入 A", outcome.moved_count == 1)
+        check("场景1: 匹配文件 m2 进回收站", outcome.trashed_count == 1)
+        check("场景1: B 空目录已删除", outcome.merged_dir_removed is True)
+        check("场景1: 磁盘上 A 目录含 3 个文件",
+              sorted(p.name for p in paths_a[0].parent.iterdir())
+              == ["m1.jpg", "u1.jpg", "u2.jpg"])
+        check("场景1: 磁盘上 B 目录已不存在", not paths_b[0].parent.exists())
+
+        with DatabaseManager.session() as session:
+            f_u2 = q.get_file_by_id(session, ids_b[1])
+            check("场景1: u2 库记录归入 A 且路径已更新",
+                  f_u2 is not None and f_u2.resource_unit_id == uid_a
+                  and str(paths_a[0].parent) in f_u2.path)
+            check("场景1: m2 库记录已删除（回收成功才删库）",
+                  q.get_file_by_id(session, ids_b[0]) is None)
+            unit_b_row = q.get_unit_by_id(session, uid_b)
+            check("场景1: B 单元标记 merged 且 parent=A",
+                  unit_b_row.status == "merged" and unit_b_row.parent_id == uid_a)
+            dr_row = q.get_dedup_by_id(session, dr1_id)
+            check("场景1: 查重结果 resolution=merge",
+                  dr_row.is_resolved and dr_row.resolution == "merge")
+            stale_row = q.get_dedup_by_id(session, dr_stale_id)
+            check("场景1: 涉及 B 的其它未处置结果被标 stale",
+                  int(stale_row.computed_version or 0) == 0 and not stale_row.is_resolved)
+            check("场景1: A 单元统计重算为 3 个文件",
+                  q.get_unit_by_id(session, uid_a).file_count == 3)
+
+        # ============ 场景2：retain_matches 两份都保留 + 重名自动改名 ============
+        uid_a2, ids_a2, paths_a2 = _make_temp_unit(tmp_root, "保留A", ["same.jpg", "a2.jpg"])
+        uid_b2, ids_b2, paths_b2 = _make_temp_unit(tmp_root, "保留B", ["same.jpg"])
+        unit_ids += [uid_a2, uid_b2]
+        with DatabaseManager.session() as session:
+            dr2 = q.upsert_dedup_result(
+                session, unit_a_id=uid_a2, unit_b_id=uid_b2,
+                similarity_score=0.5, match_count=1, total_files_a=2,
+                total_files_b=1, match_types="md5", match_level="duplicate")
+            q.insert_file_match(session, dedup_result_id=dr2.id,
+                                file_a_id=ids_a2[0], file_b_id=ids_b2[0],
+                                similarity_score=1.0, match_type="md5")
+            dr2_id = dr2.id
+        with DatabaseManager.session() as session:
+            outcome2 = perform_merge(
+                session, q.get_dedup_by_id(session, dr2_id),
+                q.get_unit_by_id(session, uid_a2), q.get_unit_by_id(session, uid_b2),
+                "a", {ids_b2[0]}, None)   # 这对匹配「两份都保留」
+        check("场景2: 零删除（retain_matches 生效）",
+              outcome2.success and outcome2.trashed_count == 0)
+        check("场景2: B 文件改为移动", outcome2.moved_count == 1)
+        check("场景2: 重名自动改名 same.jpg → same (2).jpg",
+              len(outcome2.renamed) == 1
+              and outcome2.renamed[0]["renamed"] == "same (2).jpg")
+        check("场景2: 磁盘上两份都存在",
+              (paths_a2[0].parent / "same.jpg").exists()
+              and (paths_a2[0].parent / "same (2).jpg").exists())
+        with DatabaseManager.session() as session:
+            f2 = q.get_file_by_id(session, ids_b2[0])
+            check("场景2: 库记录指向改名后的新路径",
+                  f2 is not None and f2.filename == "same (2).jpg"
+                  and f2.resource_unit_id == uid_a2)
+
+        # ============ 场景3：face-only 纯移动零删除 ============
+        uid_a3, ids_a3, paths_a3 = _make_temp_unit(tmp_root, "同演A", ["fa.jpg"])
+        uid_b3, ids_b3, paths_b3 = _make_temp_unit(tmp_root, "同演B", ["fb.jpg"])
+        unit_ids += [uid_a3, uid_b3]
+        with DatabaseManager.session() as session:
+            dr3 = q.upsert_dedup_result(
+                session, unit_a_id=uid_a3, unit_b_id=uid_b3,
+                similarity_score=0.0, match_count=0, total_files_a=1,
+                total_files_b=1, match_types="", match_level="related",
+                evidence_kind="face")
+            dr3_id = dr3.id
+        with DatabaseManager.session() as session:
+            outcome3 = perform_merge(
+                session, q.get_dedup_by_id(session, dr3_id),
+                q.get_unit_by_id(session, uid_a3), q.get_unit_by_id(session, uid_b3),
+                "a", set(), None)
+        check("场景3: face-only 合并=纯移动（1 移 0 删）",
+              outcome3.success and outcome3.moved_count == 1
+              and outcome3.trashed_count == 0)
+        with DatabaseManager.session() as session:
+            check("场景3: 两侧文件记录都健在",
+                  q.get_file_by_id(session, ids_a3[0]) is not None
+                  and q.get_file_by_id(session, ids_b3[0]) is not None)
+
+        # ============ 场景4：部分失败不收尾，可幂等重试 ============
+        uid_a4, ids_a4, paths_a4 = _make_temp_unit(tmp_root, "失败A", ["a4.jpg"])
+        uid_b4, ids_b4, paths_b4 = _make_temp_unit(tmp_root, "失败B", ["b4.jpg", "ghost.jpg"])
+        unit_ids += [uid_a4, uid_b4]
+        paths_b4[1].unlink()   # ghost：库里有记录、磁盘上没有（模拟外部删除）
+        with DatabaseManager.session() as session:
+            dr4 = q.upsert_dedup_result(
+                session, unit_a_id=uid_a4, unit_b_id=uid_b4,
+                similarity_score=0.5, match_count=0, total_files_a=1,
+                total_files_b=2, match_types="", match_level="related",
+                evidence_kind="file")
+            dr4_id = dr4.id
+        with DatabaseManager.session() as session:
+            outcome4 = perform_merge(
+                session, q.get_dedup_by_id(session, dr4_id),
+                q.get_unit_by_id(session, uid_a4), q.get_unit_by_id(session, uid_b4),
+                "a", set(), None)
+        check("场景4: 部分失败被逐条记录", not outcome4.success
+              and len(outcome4.failed) == 1
+              and outcome4.failed[0]["file_id"] == ids_b4[1])
+        check("场景4: 成功项照常生效", outcome4.moved_count == 1)
+        with DatabaseManager.session() as session:
+            check("场景4: 失败时不收尾（B 保持 active、结果未处置）",
+                  q.get_unit_by_id(session, uid_b4).status == "active"
+                  and not q.get_dedup_by_id(session, dr4_id).is_resolved)
+            # 模拟用户清掉幽灵记录后重试（幂等：按 DB 现状重算集合）
+            q.delete_media_file(session, ids_b4[1])
+        with DatabaseManager.session() as session:
+            outcome4b = perform_merge(
+                session, q.get_dedup_by_id(session, dr4_id),
+                q.get_unit_by_id(session, uid_a4), q.get_unit_by_id(session, uid_b4),
+                "a", set(), None)
+        check("场景4: 重试后合并成功并收尾",
+              outcome4b.success and outcome4b.merged_dir_removed
+              and q.get_unit_by_id(session, uid_b4).status == "merged"
+              and q.get_dedup_by_id(session, dr4_id).resolution == "merge")
+
+        # ============ 场景5：API 端点 ============
+        from app.api.server import create_app
+        from fastapi.testclient import TestClient
+        client = TestClient(create_app(AppConfig()))
+
+        uid_a5, ids_a5, _ = _make_temp_unit(tmp_root, "接口A", ["ia.jpg", "ua.jpg"])
+        uid_b5, ids_b5, _ = _make_temp_unit(tmp_root, "接口B", ["ib.jpg", "ub.jpg"])
+        unit_ids += [uid_a5, uid_b5]
+        with DatabaseManager.session() as session:
+            dr5 = q.upsert_dedup_result(
+                session, unit_a_id=uid_a5, unit_b_id=uid_b5,
+                similarity_score=0.5, match_count=1, total_files_a=2,
+                total_files_b=2, match_types="md5", match_level="duplicate")
+            q.insert_file_match(session, dedup_result_id=dr5.id,
+                                file_a_id=ids_a5[0], file_b_id=ids_b5[0],
+                                similarity_score=1.0, match_type="md5")
+            dr5_id = dr5.id
+
+        resp = client.get(f"/api/dedup/results/{dr5_id}")
+        check("接口: 详情含 unmatched_a/unmatched_b",
+              resp.status_code == 200
+              and [f["file_id"] for f in resp.json().get("unmatched_a", [])] == [ids_a5[1]]
+              and [f["file_id"] for f in resp.json().get("unmatched_b", [])] == [ids_b5[1]])
+
+        resp = client.post(f"/api/dedup/results/{dr5_id}/merge", json={"keep": "a"})
+        check("接口: 合并返回 200 且成功",
+              resp.status_code == 200 and resp.json()["success"] is True
+              and resp.json()["trashed_count"] == 1 and resp.json()["moved_count"] == 1)
+        resp = client.post(f"/api/dedup/results/{dr5_id}/merge", json={"keep": "a"})
+        check("接口: merge 重入幂等（再跑一次仍 200、零操作）",
+              resp.status_code == 200 and resp.json()["moved_count"] == 0
+              and resp.json()["trashed_count"] == 0)
+
+        # 已按其它方式处置的结果拒绝合并
+        with DatabaseManager.session() as session:
+            dr6 = q.upsert_dedup_result(
+                session, unit_a_id=uid_a5, unit_b_id=uid_b5,
+                similarity_score=0.5, match_count=0, total_files_a=1,
+                total_files_b=0, match_types="", match_level="related",
+                evidence_kind="face")
+            dr6_id = dr6.id
+        client.post(f"/api/dedup/results/{dr6_id}/resolve", json={"resolution": "keep_a"})
+        resp = client.post(f"/api/dedup/results/{dr6_id}/merge", json={"keep": "a"})
+        check("接口: 已处置（非 merge）返回 409", resp.status_code == 409)
+        resp = client.post("/api/dedup/results/99999999/merge", json={"keep": "a"})
+        check("接口: 不存在的结果返回 404", resp.status_code == 404)
+        resp = client.post(f"/api/dedup/results/{dr6_id}/merge", json={"keep": "x"})
+        check("接口: 非法 keep 返回 422", resp.status_code == 422)
+    finally:
+        with DatabaseManager.session() as session:
+            for uid in unit_ids:
+                q.delete_resource_unit(session, uid)
+        _shutil.rmtree(tmp_root, ignore_errors=True)
+
+
 def test_migration_v6_to_v7_columns():
     """测试 1.8: v6→v7 四个新列 + 两处关键回填。
 
@@ -7239,6 +7460,7 @@ def main():
         test_face_rescan_pipeline_scope()
         test_api_face_scan_status()
         test_dedup_prune_stale_results()
+        test_dedup_merge_units()
         test_hash_worker_indexes_all_batches()
         test_save_dedup_results()
         test_dedup_results_pagination()

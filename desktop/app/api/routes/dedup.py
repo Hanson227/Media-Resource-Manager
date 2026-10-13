@@ -19,6 +19,7 @@ from app.api import task_registry as registry
 from app.api.schemas import (
     DedupResultItem, DedupListResponse, DedupResolveRequest, DedupGroupItem,
     DedupGroupListResponse, DedupFaceScanRequest, StatusResponse,
+    DedupMergeRequest, DedupMergeResponse,
 )
 from app.db.engine import DatabaseManager
 from app.db.models import FaceVector, MediaFile
@@ -325,6 +326,24 @@ def get_dedup_detail(result_id: int):
                 )
                 name_map = {fid: fname for fid, fname in rows}
 
+            # 两侧独有文件（不在任何 counted 匹配对里的文件）：
+            # 合并/逐文件处理的界面需要它们 —— 匹配网格只显示"成对"的文件，
+            # 不显示独有的，用户就看不见合并时会被移动的那部分。
+            # face 线索涉及的两侧行内容本就不同，归入 unmatched（不算重复证据）。
+            counted = [fm for fm in matches if fm.match_type != MatchType.FACE.value]
+            matched_a = {fm.file_a_id for fm in counted}
+            matched_b = {fm.file_b_id for fm in counted}
+
+            def _unmatched(files) -> list[dict]:
+                return [
+                    {"file_id": f.id, "filename": f.filename,
+                     "media_type": f.media_type, "size_bytes": int(f.size_bytes or 0)}
+                    for f in files if f.id not in (matched_a | matched_b)
+                ]
+
+            unmatched_a = _unmatched(q.get_files_by_unit(session, dr.unit_a_id))
+            unmatched_b = _unmatched(q.get_files_by_unit(session, dr.unit_b_id))
+
             return {
                 "id": dr.id,
                 "unit_a": {"id": dr.unit_a_id, "name": unit_a.name if unit_a else ""},
@@ -342,6 +361,8 @@ def get_dedup_detail(result_id: int):
                 "is_resolved": dr.is_resolved,
                 "resolution": dr.resolution,
                 "created_at": dr.created_at.isoformat() if dr.created_at else "",
+                "unmatched_a": unmatched_a,
+                "unmatched_b": unmatched_b,
                 "file_matches": [
                     {"id": fm.id, "file_a_id": fm.file_a_id, "file_b_id": fm.file_b_id,
                      "file_a_name": name_map.get(fm.file_a_id, f"#{fm.file_a_id}"),
@@ -371,6 +392,95 @@ def resolve_dedup(result_id: int, body: DedupResolveRequest):
                 raise HTTPException(status_code=404, detail=f"查重结果不存在: {result_id}")
             q.resolve_dedup(session, result_id, body.resolution)
             return StatusResponse(success=True, message=f"已标记: {body.resolution}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
+
+
+@router.post("/results/{result_id}/merge", response_model=DedupMergeResponse)
+def merge_dedup_result(result_id: int, body: DedupMergeRequest, request: Request):
+    """合并重复单元：保留一侧文件夹，另一侧独有文件移入、匹配文件进回收站。
+
+    与 resolve('merge')（只打标记）不同，本端点是**真正执行文件操作**的入口。
+    所有 match_level 均可合并：
+      - duplicate ：匹配对 = 内容相同 → 回收站（安全默认）
+      - related   ：匹配对 = 画面相似（内容可能不同）→ 回收站，客户端须警示
+      - face-only ：无 counted 匹配 → 纯移动，零删除
+    部分失败返回 200（success=false + failed 明细），成功项照常落库，可重试。
+    """
+    from pathlib import Path as _Path
+
+    from app.services.file_ops import OFFLINE_REASON, volume_available, volume_label
+    from app.services.merge_service import perform_merge
+    from app.utils.constants import ResolutionStatus
+
+    cfg = getattr(request.app.state, "config", None)
+    try:
+        with DatabaseManager.session() as session:
+            dr = q.get_dedup_by_id(session, result_id)
+            if not dr:
+                raise HTTPException(status_code=404, detail=f"查重结果不存在: {result_id}")
+            # resolution='merge' 允许重入（上次收尾失败后的幂等重试）
+            if dr.is_resolved and dr.resolution != ResolutionStatus.MERGE.value:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"该结果已处理（{dr.resolution}），不能执行合并",
+                )
+            unit_a = q.get_unit_by_id(session, dr.unit_a_id)
+            unit_b = q.get_unit_by_id(session, dr.unit_b_id)
+            if not unit_a or not unit_b:
+                raise HTTPException(status_code=404, detail="单元记录不存在（请先重新扫描）")
+
+            kept = unit_a if body.keep == "a" else unit_b
+            other = unit_b if body.keep == "a" else unit_a
+            for unit in (unit_a, unit_b):
+                if not volume_available(unit.path):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"磁盘{OFFLINE_REASON}: {volume_label(unit.path)}"
+                               f"（请先连接该磁盘再合并）",
+                    )
+            if _Path(unit_a.path).anchor != _Path(unit_b.path).anchor:
+                raise HTTPException(
+                    status_code=409,
+                    detail="两个文件夹不在同一磁盘卷，暂不支持跨盘合并（请手动移动文件）",
+                )
+            if not _Path(kept.path).is_dir():
+                raise HTTPException(
+                    status_code=409, detail=f"目标文件夹不存在: {kept.path}")
+            if not _Path(other.path).is_dir():
+                # 重入重试时被并入目录可能已被上次收尾删除（空目录 rmdir）。
+                # 只要该单元在库里已无文件，就没什么可移/可删的，直接进收尾；
+                # 还有文件却找不到目录才是真异常（被外部删除），拒绝并说明。
+                if q.get_files_by_unit(session, other.id):
+                    raise HTTPException(
+                        status_code=409, detail=f"被并入文件夹已不存在: {other.path}")
+
+            if not acquire_dedup_gate():
+                raise HTTPException(
+                    status_code=409, detail="已有查重任务正在运行，请稍后再试")
+            try:
+                outcome = perform_merge(
+                    session, dr, unit_a, unit_b, body.keep,
+                    set(body.retain_matches or []), cfg,
+                )
+            finally:
+                release_dedup_gate()
+
+            return DedupMergeResponse(
+                success=outcome.success,
+                message=("合并完成" if outcome.success
+                         else f"合并部分完成，{len(outcome.failed)} 个文件失败（可重试）"),
+                kept_unit_id=outcome.kept_unit_id,
+                merged_unit_id=outcome.merged_unit_id,
+                moved_count=outcome.moved_count,
+                trashed_count=outcome.trashed_count,
+                renamed=outcome.renamed,
+                failed=outcome.failed,
+                merged_dir_removed=outcome.merged_dir_removed,
+            )
     except HTTPException:
         raise
     except Exception as e:

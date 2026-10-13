@@ -492,7 +492,9 @@ GET /api/dedup/results/{result_id}
       "match_type": "face", "similarity_score": 0.71,
       "is_hint": true, "frame_support": 3
     }
-  ]
+  ],
+  "unmatched_a": [ { "file_id": 105, "filename": "独有A.jpg", "media_type": "image", "size_bytes": 204800 } ],
+  "unmatched_b": [ { "file_id": 106, "filename": "独有B.jpg", "media_type": "image", "size_bytes": 198400 } ]
 }
 ```
 
@@ -502,6 +504,11 @@ GET /api/dedup/results/{result_id}
 > 多个时间点都被判为同一张脸时该值 >1，比单帧偶然相似可信。
 > 缩略图用 `GET /api/files/{file_id}/thumbnail`（`<img>` 无法带 Authorization 头，
 > 用 `?token=` 回退）。
+>
+> `unmatched_a` / `unmatched_b` 是**两侧独有文件**（不在任何 counted 匹配对里，
+> face 线索涉及的两侧行也归入此列）：匹配网格只展示"成对"的文件，用户看不见
+> 合并时会被移动的那部分，客户端应把这两列一并展示。合并端点（见下文）正是
+> 把"被并入侧"的 unmatched 移动到保留侧、counted 匹配对进回收站。
 
 #### 处理查重结果
 
@@ -527,6 +534,71 @@ POST /api/dedup/results/{result_id}/resolve
 
 > `match_level=related` 的记录**不要**提供"保留 A / 保留 B"入口：related 的语义是
 > "仅供参考、不建议删除"，给出保留按钮等于诱导用户删掉另一侧。
+
+#### 合并重复单元（一键合并，真正执行文件操作）
+
+```
+POST /api/dedup/results/{result_id}/merge
+```
+
+与 `resolve` 的 `resolution=merge`（**只打标记、不动文件**）不同，本端点把
+两个重复文件夹真正合并成一个：
+
+- **保留侧**（`keep` 选 `a` 或 `b`）的文件夹原样不动，作为合并目标；
+- **被并入侧**的独有文件（unmatched）**移动**到保留侧文件夹；
+- **counted 匹配对**中被并入侧的文件**进回收站**（可逐文件豁免，见 `retain_matches`）；
+- face 线索（`is_hint=true`）不算 counted 匹配 → **纯移动、零删除**；
+- 全部成功后：删除被并入侧的空目录 → 单元标记 `merged`（`status='merged'`,
+  文件记录挂到保留侧单元下）→ 结果落 `resolution='merge'` → 其它涉及这两个
+  单元的**未处置**结果标记为过期（`computed_version=0`，重跑查重时收敛）。
+
+请求体：
+
+```json
+{"keep": "a", "retain_matches": [104, 108]}
+```
+
+| 字段 | 类型 | 默认 | 说明 |
+|--------|------|--------|------|
+| `keep` | str | 必填 | 保留哪一侧：`a` / `b`。合并目标由用户在界面上选 |
+| `retain_matches` | int[] | `[]` | "两份都保留"豁免清单：填**被并入侧**的文件 ID，这些匹配对文件不进回收站，而是同样移动到保留侧（重名时自动改名 `stem (2).ext`） |
+
+响应（`200`；部分失败也是 200，靠 `success=false` + `failed` 明细表达）：
+
+```json
+{
+  "success": true,
+  "message": "合并完成",
+  "kept_unit_id": 124, "merged_unit_id": 161,
+  "moved_count": 4, "trashed_count": 29,
+  "renamed": [ { "file_id": 106, "original": "same.jpg", "renamed": "same (2).jpg" } ],
+  "failed": [],
+  "merged_dir_removed": true
+}
+```
+
+| 字段 | 说明 |
+|--------|------|
+| `moved_count` | 实际移动到保留侧的文件数（unmatched + retain_matches 豁免） |
+| `trashed_count` | 实际进回收站的文件数 |
+| `renamed` | 重名冲突自动改名的明细（磁盘与库内 `media_files.path` 均已按新名落盘） |
+| `failed` | 逐文件失败明细 `[{"file_id", "filename", "reason"}]`；部分失败时成功项照常落库，**可重试**（幂等：已移走的不再重复算） |
+| `merged_dir_removed` | 被并入侧空目录是否已删除（目录里还有文件时为 false，目录保留） |
+
+错误码：
+
+| 状态 | 场景 |
+|--------|------|
+| `404` | 查重结果不存在 / 单元记录不存在（提示重新扫描） |
+| `409` | 已处置且 `resolution != 'merge'`（merge 允许重入，供收尾失败后的幂等重试） |
+| `409` | 任一侧磁盘离线（请先连接该磁盘） |
+| `409` | 两个文件夹不在同一磁盘卷（暂不支持跨盘合并） |
+| `409` | 目标文件夹不存在 / 被并入文件夹不存在且库中还有该单元的文件 |
+| `409` | 已有查重/人脸任务在跑（互斥门被占，稍后再试） |
+
+> 合并是**同步**端点：文件量小时秒回，量大时客户端应适当放宽超时。
+> 执行期间持有与查重相同的进程内互斥门。磁盘操作策略与单个文件删除一致：
+> **先动磁盘、成功后更新库**，回收站语义（send2trash）。
 
 #### 触发查重（异步）
 

@@ -196,6 +196,36 @@ class DedupFaceScanRequest(BaseModel):
     )
 
 
+class DedupMergeRequest(BaseModel):
+    """合并重复单元请求体：保留一侧文件夹，另一侧独有文件移入、重复文件进回收站。"""
+    keep: str = Field(
+        ...,
+        pattern="^(a|b)$",
+        description="保留哪一侧的文件夹作为合并目标（另一侧的独有文件移动过去）",
+    )
+    retain_matches: list[int] = Field(
+        default=[],
+        description="「两份都保留」的匹配对中，被并入侧的文件 ID 列表 —— "
+                    "这些文件不进回收站，而是同样移动到保留侧（同名时自动重命名）",
+    )
+
+
+class DedupMergeResponse(BaseModel):
+    """合并结果（部分失败也返回 200，失败明细供客户端重试/展示）。"""
+    success: bool = True
+    message: str = "合并完成"
+    kept_unit_id: int
+    merged_unit_id: int
+    moved_count: int = 0
+    trashed_count: int = 0
+    renamed: list[dict] = []
+    """[{"file_id", "original", "renamed"}] 重名冲突自动改名的明细。"""
+    failed: list[dict] = []
+    """[{"file_id", "filename", "reason"}] 逐文件失败明细。"""
+    merged_dir_removed: bool = False
+    """被并入侧的空目录是否已删除（目录非空时保留，不会强删）。"""
+
+
 class DedupResolveRequest(BaseModel):
     """处理查重结果的请求体（可选值以 ResolutionStatus 枚举为单一来源）。"""
     resolution: str = Field(
