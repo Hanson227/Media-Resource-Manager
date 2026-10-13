@@ -1,1 +1,0 @@
-本仓库跑 desktop 代码/测试必须用 conda env 的解释器完整路径 C:\Users\huang\miniconda3\envs\media-manager\python.exe：`conda` CLI 本身报 No module named '_ctypes'，PATH 上的 python(3.14.7) 也没装 PySide6/fastapi/sqlalchemy。跑法：& <该路径> desktop/tests/test_flow.py。

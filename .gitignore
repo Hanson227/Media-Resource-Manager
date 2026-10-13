@@ -5,6 +5,9 @@
 .claude/
 .scripts/
 
+# Mnemon 记忆插件运行时数据（本地状态，不入库）
+.mnemon/
+
 # Bytecode
 __pycache__/
 *.py[cod]
