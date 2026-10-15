@@ -8,7 +8,7 @@
 
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import FrozenSet, Optional, get_type_hints, get_origin
+from typing import FrozenSet, Optional, Union, get_args, get_origin, get_type_hints
 import json
 import warnings
 
@@ -16,27 +16,42 @@ import warnings
 from app.utils.constants import FACE_SIMILARITY_THRESHOLD, FACE_VIDEO_MAX_FRAMES
 
 # 敏感字段不写入 config.json（后者在版本库中被跟踪，明文 PIN 会被提交）。
-# 改为存放在 config.json 同级的 data/.web_pin —— data/ 已被 .gitignore 忽略。
 _SENSITIVE_FIELDS = frozenset({"web_pin"})
 _PIN_FILENAME = ".web_pin"
 
+# 运行档位：完整档（桌面 GUI + 查重）/ 轻量档（便携版：只跑 Web+API，不加载查重）
+PROFILE_FULL = "full"
+PROFILE_LITE = "lite"
+VALID_PROFILES = (PROFILE_FULL, PROFILE_LITE)
 
-def _pin_file(config_path: Path) -> Path:
+# PIN 存放目录覆盖（由 app/utils/paths.resolve_paths 注入）：
+# 启用数据根时 PIN 必须跟着数据盘走，否则"平板上不留数据"这条就破了。
+_pin_override_dir: Optional[Path] = None
+
+
+def configure_pin_dir(directory: Optional[Path]) -> None:
+    """覆盖 PIN 文件存放目录（None = 回退到 config.json 同级的 data/）。"""
+    global _pin_override_dir
+    _pin_override_dir = Path(directory) if directory else None
+
+
+def pin_file_path(config_path: Path) -> Path:
     """返回敏感字段（Web 访问密码）的存放路径。"""
-    return Path(config_path).parent / "data" / _PIN_FILENAME
+    base = _pin_override_dir if _pin_override_dir is not None else (Path(config_path).parent / "data")
+    return Path(base) / _PIN_FILENAME
 
 
 def _read_pin_file(config_path: Path) -> "Optional[str]":
     """读取 Web 访问密码；文件不存在返回 None（区别于“已设置为空”）。"""
     try:
-        return _pin_file(config_path).read_text(encoding="utf-8").strip()
+        return pin_file_path(config_path).read_text(encoding="utf-8").strip()
     except OSError:
         return None
 
 
 def _write_pin_file(config_path: Path, pin: str) -> None:
     """写入 Web 访问密码（空字符串表示不启用密码）。"""
-    target = _pin_file(config_path)
+    target = pin_file_path(config_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(pin or "", encoding="utf-8")
 
@@ -51,9 +66,35 @@ class AppConfig:
     - 使用 Path 对象表示文件系统路径
     """
 
+    # ========== 运行档位 ==========
+    profile: str = PROFILE_FULL
+    """运行档位：full（桌面 GUI + 查重）/ lite（便携版：只跑 Web+API，不加载查重）。
+
+    轻量档不删除任何代码：只是不导入哈希/人脸/查重管线、不注册查重路由，
+    打包时这些模块自然不会被收录。环境变量 MEDIA_PROFILE 可覆盖。
+    """
+
+    # ========== 数据根（便携版） ==========
+    data_root: Optional[Path] = None
+    """数据根目录（数据库 / 缩略图 / PIN 都放这里，可指向移动硬盘）。
+
+    None = 未启用：路径相对应用目录解析（老行为，升级后语义不变）。
+    注意不能用 Path("") 表示"未设置"——`Path("") == Path(".")`，与"当前目录"
+    无法区分，会把路径解析悄悄改成相对 CWD。细节见 `app/utils/paths.resolve_paths`。
+    """
+
+    data_root_id: str = ""
+    """数据根身份（marker 文件里的 uuid），换盘符后据此认出"还是那个数据盘"。"""
+
+    data_root_marker: str = ".media_manager_data.json"
+    """数据根标记文件名：在卷上搜到它才认作数据根，不靠目录名硬编码。"""
+
+    data_root_search_depth: int = 2
+    """换盘符后自动搜索数据根的目录深度（卷根为 0）。"""
+
     # ========== 数据库 ==========
     db_path: Path = Path("data/media_manager.db")
-    """SQLite 数据库文件路径（相对于项目根目录）。"""
+    """SQLite 数据库文件路径（未启用数据根时相对应用目录，启用后相对数据根）。"""
 
     # ========== 扫描 ==========
     media_extensions: FrozenSet[str] = field(default_factory=lambda: frozenset({
@@ -207,8 +248,19 @@ class AppConfig:
 
     @staticmethod
     def _coerce(name: str, value, hint):
-        """将 JSON 值按字段类型注解转换（Path / frozenset / 原样）。"""
-        if hint is Path:
+        """将 JSON 值按字段类型注解转换（Path / Optional[Path] / frozenset / 原样）。
+
+        只有 Optional[Path] 字段接受 None（表示"未设置"）；普通 Path 字段给 None
+        仍按非法处理（回退该项默认值）—— `Path(None)` 抛 TypeError，
+        由 from_file 捕获后剔除该键。这条区分是"数据根未设置"能表达出来的前提。
+        """
+        origin = get_origin(hint)
+        optional_path = origin is Union and type(None) in get_args(hint)
+        if hint is Path or optional_path:
+            if value is None:
+                if not optional_path:
+                    raise TypeError(f"{name} 不接受 None")
+                return None
             return Path(value)
         if get_origin(hint) is frozenset:
             return frozenset(value)
@@ -253,7 +305,7 @@ class AppConfig:
             try:
                 _write_pin_file(path, legacy_pin)
             except OSError as e:
-                warnings.warn(f"Web 访问密码迁移到 {_pin_file(path)} 失败: {e}")
+                warnings.warn(f"Web 访问密码迁移到 {pin_file_path(path)} 失败: {e}")
             secret_pin = legacy_pin
         if secret_pin is not None:
             data["web_pin"] = secret_pin
@@ -275,9 +327,16 @@ class AppConfig:
         # 使用默认配置为底，JSON 配置覆盖
         default = cls()
         merged = {**default.__dict__, **data}
+        # profile 是运行档位开关：拼错时必须显式回退并告警，
+        # 不能因为一个笔误让"轻量档"悄悄变成完整档（或反过来）。
+        if str(merged.get("profile", "")).lower() not in VALID_PROFILES:
+            warnings.warn(
+                f"配置字段 profile 非法: {merged.get('profile')!r}，回退 {PROFILE_FULL}"
+            )
+            merged["profile"] = PROFILE_FULL
         return cls(**merged)
 
-    def to_file(self, path: Path) -> None:
+    def to_file(self, path: Path, omit: "tuple[str, ...]" = ()) -> None:
         """将当前配置保存为 JSON 文件（按 dataclass 字段驱动，避免手抄遗漏）。
 
         敏感字段（web_pin）不写入该文件，单独落到同级的 data/.web_pin，
@@ -285,6 +344,10 @@ class AppConfig:
 
         参数:
             path: 目标 JSON 文件路径。
+            omit: 额外不写入的字段名。给便携版入口用：**没被用户显式写过**
+                `profile` 时不要把它落盘 —— 否则 main_web.py 跑一次就把
+                `profile: lite` 写进共享的 config.json，桌面端下次启动会
+                跟着变成轻量档（查重入口消失，点了就 404）。
         """
         def _to_json(value):
             if isinstance(value, Path):
@@ -293,9 +356,10 @@ class AppConfig:
                 return sorted(value)
             return value
 
+        skip = set(_SENSITIVE_FIELDS) | set(omit)
         data = {
             f.name: _to_json(getattr(self, f.name))
-            for f in fields(self) if f.name not in _SENSITIVE_FIELDS
+            for f in fields(self) if f.name not in skip
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -303,8 +367,20 @@ class AppConfig:
         try:
             _write_pin_file(path, self.web_pin)
         except OSError as e:
-            warnings.warn(f"保存 Web 访问密码失败 ({_pin_file(path)}): {e}")
+            warnings.warn(f"保存 Web 访问密码失败 ({pin_file_path(path)}): {e}")
 
     def with_updates(self, **updates) -> "AppConfig":
         """返回应用部分字段更新后的新实例（frozen dataclass 不可变语义）。"""
         return replace(self, **updates)
+
+    @property
+    def is_lite(self) -> bool:
+        """是否轻量档（**仅表示"这是便携版那个包"，不参与任何功能分支**）。
+
+        功能可用性一律由 `app.utils.capabilities` 的真实探测决定（包里有没有
+        Pillow / cv2 / pillow-heif / rawpy / 人脸模型 / PySide6）。历史教训：曾用
+        这个档位决定"不注册查重路由"，结果同一份代码里长出两套功能语义 ——
+        HTTP 契约、前端导航、测试、文档全部要分叉。体积差异请用打包开关
+        （`MEDIA_BUILD_NO_CV2` / `MEDIA_BUILD_WITH_FACE`）。
+        """
+        return str(self.profile).strip().lower() == PROFILE_LITE

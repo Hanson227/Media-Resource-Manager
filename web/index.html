@@ -11,6 +11,9 @@
 <link rel="manifest" href="manifest.json">
 <link rel="stylesheet" href="style.css">
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
+<!-- 离线优先：本地 vendor 里的 MDI 图标字体先加载（便携版/内网无外网时仍能显示图标）；
+     若部署时没带 vendor，浏览器忽略 404，下面 CDN 那份仍然生效。 -->
+<link rel="stylesheet" href="vendor/mdi/css/materialdesignicons.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7/css/materialdesignicons.min.css">
 </head>
 <body>
@@ -44,6 +47,14 @@
         <span class="mdi mdi-wifi-off"></span> 网络连接已断开，正在重连...
       </div>
 
+      <!-- 数据盘未就绪横幅：便携版插错盘/忘插盘时，必须一眼能看见（否则用户会
+           在空库上重新扫描，以为"数据全没了"） -->
+      <div v-if="dataRootWarning" class="data-root-banner">
+        <span class="mdi mdi-harddisk-remove"></span>
+        <span class="data-root-text">{{ dataRootWarning }}</span>
+        <button class="sort-btn" @click="goTab('/settings')">去设置</button>
+      </div>
+
       <!-- Top Bar -->
       <template v-if="!isConnectPage && !isPreviewPage && serverUrl">
         <div class="top-bar">
@@ -63,7 +74,10 @@
           <button class="sidebar-item" :class="{ active: currentTab === 'units' }" @click="goTab('/units')">
             <span class="mdi mdi-folder-multiple-image"></span><span>单元</span>
           </button>
-          <button class="sidebar-item" :class="{ active: currentTab === 'dedup' }" @click="goTab('/dedup')">
+          <button v-if="showLibrary" class="sidebar-item" :class="{ active: currentTab === 'library' }" @click="goTab('/library')">
+            <span class="mdi mdi-folder-cog-outline"></span><span>媒体库</span>
+          </button>
+          <button v-if="showDedup" class="sidebar-item" :class="{ active: currentTab === 'dedup' }" @click="goTab('/dedup')">
             <span class="mdi mdi-compare"></span><span>查重</span>
           </button>
           <button class="sidebar-item" :class="{ active: currentTab === 'messages' }" @click="goTab('/messages')">
@@ -90,7 +104,11 @@
           <span class="mdi mdi-folder-multiple-image"></span>
           <span>单元</span>
         </button>
-        <button class="tab-item" :class="{ active: currentTab === 'dedup' }" @click="goTab('/dedup')">
+        <button v-if="showLibrary" class="tab-item" :class="{ active: currentTab === 'library' }" @click="goTab('/library')">
+          <span class="mdi mdi-folder-cog-outline"></span>
+          <span>媒体库</span>
+        </button>
+        <button v-if="showDedup" class="tab-item" :class="{ active: currentTab === 'dedup' }" @click="goTab('/dedup')">
           <span class="mdi mdi-compare"></span>
           <span>查重</span>
         </button>
@@ -124,18 +142,21 @@
 </div>
 
 <script>
-/* 脚本引导：CDN 双镜像 + 本地脚本严格按序加载。
-   为什么要这样：Vue 是这个 SPA 的唯一入口，原先 index.html 写死单个 CDN
-   （unpkg），实测它会整段 `net::ERR_CONNECTION_CLOSED` —— 那一下不是"图标没了"，
-   而是**打开就是白屏、连 PIN 界面都没有**（实测复现）。所以：
-   ① vue / vue-router 各备两个镜像，前一个 onerror 就换下一个；
-   ② 本地脚本必须按 js-core → js-gesture → js-pages → js-app 顺序执行
+/* 脚本引导：本地优先 + CDN 双镜像 + 本地脚本严格按序加载。
+   为什么要这样：
+   ① **离线优先**：便携版装在没网的平板/内网机器上时，CDN 必然失败；
+      原先打开就是白屏、连 PIN 界面都没有（实测复现）。因此 vendor/ 里的
+      Vue 与 vue-router 是第一顺位，CDN 只作兜底（部署时没带 vendor 也不崩）。
+   ② CDN 各备两个镜像，前一个 onerror 就换下一个；
+   ③ 本地脚本必须按 js-core → js-gesture → js-pages → js-app 顺序执行
       （js-core 第一行就是 `const { createApp } = Vue`，Vue 未就绪会整页崩）。 */
 (function () {
   var MIRRORS = {
-    vue: ['https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js',
+    vue: ['vendor/vue.global.prod.js',
+          'https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js',
           'https://unpkg.com/vue@3/dist/vue.global.prod.js'],
-    router: ['https://cdn.jsdelivr.net/npm/vue-router@4/dist/vue-router.global.prod.js',
+    router: ['vendor/vue-router.global.prod.js',
+             'https://cdn.jsdelivr.net/npm/vue-router@4/dist/vue-router.global.prod.js',
              'https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js']
   };
   var LOCAL = ['js-core.js', 'js-gesture.js', 'js-pages.js', 'js-app.js'];

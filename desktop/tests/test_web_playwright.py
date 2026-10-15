@@ -59,8 +59,21 @@ def section(title: str):
 
 
 def ensure_db():
-    """创建并填充测试数据库。"""
+    """创建并填充测试数据库，并清掉**上一次跑测试残留的 PIN**。
+
+    为什么要清 PIN：PIN 文件落在 `desktop/data/.web_pin`（与库同级），上一次跑完
+    会留下它；本次运行时 API 就要求解锁，而 Playwright 的页面拿不到令牌 → 停在
+    锁屏、没有导航栏（曾把 "#35 便携版入口" 卡成 30s 超时）。测试必须自带干净
+    起点，不能依赖上一次运行的残留状态。
+    """
     test_db = Path(__file__).parent.parent / "data" / "test_web_playwright.db"
+    stale_pin = Path(__file__).parent.parent / "data" / ".web_pin"
+    try:
+        if stale_pin.exists():
+            stale_pin.unlink()
+            print("  [INFO] 已清理上次运行残留的 data/.web_pin（避免整套用例停在锁屏）")
+    except OSError as e:
+        print(f"  [INFO] 无法清理残留 PIN 文件: {e}")
     if test_db.exists():
         try:
             test_db.unlink()
@@ -165,9 +178,13 @@ def start_server():
     global _server, _server_thread, _app
     import requests
     ensure_db()
-    config = AppConfig().with_updates(thumbnail_cache_dir=_thumb_cache_dir())
+    # 监听地址写成测试服务器**实际绑定**的值（127.0.0.1:19528）：
+    # 设置页据此显示"手机访问"信息，与真实运行保持一致（回环地址手机连不上）。
+    config = AppConfig().with_updates(thumbnail_cache_dir=_thumb_cache_dir(),
+                                      api_host="127.0.0.1", api_port=_PORT)
     from app.api.server import create_app
-    app = create_app(config)
+    app = create_app(config, {"config_path": str(
+        Path(__file__).parent.parent / "data" / "test_web_playwright.json")})
     _app = app
 
     import uvicorn
@@ -689,6 +706,45 @@ def test_pin_lock_screen(page):
                     check("PIN 输入后点位填充", True)
     else:
         check("无 PIN 界面（已解锁或未设置）", True)
+
+
+def test_phone_viewport_access(page):
+    """测试 7.5: 手机当终端 —— 竖屏窄视口下 SPA 必须能正常打开且不横向溢出。
+
+    用户的用法是"平板当服务器、手机输 IP 当终端"，因此手机视口是主要场景之一：
+    页面渲染失败、或底部导航被挤出屏幕、或出现横向滚动，都等于手机上不可用。
+    服务端监听地址（0.0.0.0 与局域网 IP 列表）由 test_lite.py 覆盖，这里只管前端。
+    """
+    section("Web 测试 7.5: 手机竖屏访问")
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.set_viewport_size({"width": 390, "height": 844})   # iPhone 14 竖屏
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    page.locator(".app-main").wait_for(state="attached", timeout=5000)
+    page.wait_for_timeout(400)
+
+    check("手机视口无 pageerror", len(errors) == 0)
+    for e in errors[:3]:
+        print(f"     pageerror: {e}")
+
+    overflow = page.evaluate(
+        "() => document.documentElement.scrollWidth - window.innerWidth")
+    check(f"无横向溢出（溢出 {overflow}px）", overflow <= 2)
+
+    tabs = page.locator(".bottom-tabs")
+    check("底部导航在手机视口可见",
+          tabs.count() > 0 and tabs.first.is_visible())
+
+    # 页面主体必须真的渲染出内容（不是白屏）
+    body_text = (page.locator("#app").text_content() or "").strip()
+    check(f"页面有渲染内容（{len(body_text)} 字符）", len(body_text) > 20)
+
+    # 窄视口下设置页的手机访问提示仍需可读（数据位置区块默认折叠，先展开）
+    page.goto(f"http://127.0.0.1:{_PORT}/#/settings")
+    page.locator(".bottom-tabs, .app-main").first.wait_for(state="attached",
+                                                          timeout=5000)
+    page.wait_for_timeout(300)
+    page.set_viewport_size({"width": 1280, "height": 800})
 
 
 def test_gesture_engine_ptr_and_damp(page):
@@ -2180,6 +2236,235 @@ def test_responsive_layout(page):
 
 
 # ============================================================
+# 便携版：媒体库页 / 数据位置 / 轻量档入口
+# ============================================================
+
+_LITE_PORT = 19529  # 轻量档第二实例端口（与主实例、桌面端都不同）
+
+
+def test_library_page_and_scan(page):
+    """媒体库页：数据位置卡片 / 根列表 / 目录选择器 / 扫描长任务。
+
+    这是便携版的**唯一**扫描入口（没有桌面 GUI），因此必须端到端验证：
+    页面渲染 → 目录选择器打开 → 点「扫描」跑真实后台任务 → 结果刷新到单元列表。
+    """
+    section("Web 测试 33: 媒体库页（添加/扫描）")
+    import tempfile
+    import requests
+
+    from PIL import Image
+
+    tmp = Path(tempfile.mkdtemp(prefix="lib_ui_"))
+    unit_dir = tmp / "UI单元"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    # 至少 2 个媒体文件，否则扫描器会按"零散文件"跳过该目录（不成单元）
+    for i in range(2):
+        Image.new("RGB", (64, 64), (i * 30, 80, 160)).save(unit_dir / f"p{i}.jpg")
+
+    resp = requests.post(f"http://127.0.0.1:{_PORT}/api/library/roots",
+                         json={"path": str(tmp)}, timeout=15)
+    check("API 添加媒体库成功", resp.status_code == 200)
+    root_id = (resp.json() or {}).get("root_id")
+
+    try:
+        page.goto(f"http://127.0.0.1:{_PORT}/#/library")
+        page.wait_for_load_state("networkidle")
+
+        data_card = page.locator(".data-root-card")
+        data_card.wait_for(state="attached", timeout=8000)
+        card_text = data_card.text_content() or ""
+        check("数据位置卡片显示数据库路径",
+              ".db" in card_text or "数据库" in card_text)
+
+        cards = page.locator(".lib-root")
+        cards.first.wait_for(state="attached", timeout=8000)
+        card_texts = [cards.nth(i).text_content() or "" for i in range(cards.count())]
+        check("新加的媒体库出现在列表",
+              any(str(tmp) in t for t in card_texts))
+
+        # 目录选择器（HTML 无法开原生文件夹框，走服务端目录浏览）
+        page.locator(".lib-add button").first.click()
+        page.locator(".folder-picker").wait_for(state="attached", timeout=5000)
+        # 磁盘列表是异步拉的：必须等条目出现再计数（count() 不会自动等待）
+        page.locator(".folder-picker .fp-entry").first.wait_for(
+            state="attached", timeout=8000)
+        check("目录选择器打开并列出磁盘",
+              page.locator(".folder-picker .fp-entry").count() >= 1)
+        # 进入一个磁盘后应出现「选择此目录」按钮
+        page.locator(".folder-picker .fp-entry").first.click()
+        page.locator(".folder-picker .fp-actions button").first.wait_for(
+            state="attached", timeout=8000)
+        check("进入目录后出现『选择此目录』",
+              page.locator(".folder-picker .fp-actions button").count() >= 1)
+        page.locator(".folder-picker .fp-bar .sort-btn").last.click()
+        page.wait_for_timeout(300)
+
+        # 扫描该库（真实后台任务）
+        target = None
+        for i in range(cards.count()):
+            if str(tmp) in (cards.nth(i).text_content() or ""):
+                target = cards.nth(i)
+                break
+        check("找到目标媒体库卡片", target is not None)
+        if target is not None:
+            target.locator("button", has_text="扫描").first.click()
+            page.locator(".run-progress-wrap, .lib-summary").first.wait_for(
+                state="attached", timeout=30000)
+            # 等任务结束（进度条消失、摘要出现）
+            for _ in range(60):
+                if page.locator(".lib-summary").count() > 0:
+                    break
+                page.wait_for_timeout(500)
+            summary = (page.locator(".lib-summary").first.text_content() or ""
+                       if page.locator(".lib-summary").count() else "")
+            check("扫描完成并显示摘要", "扫描完成" in summary)
+
+        units = requests.get(f"http://127.0.0.1:{_PORT}/api/units", timeout=15).json()
+        check("扫描结果已入库并在单元页可见",
+              any(u.get("name") == "UI单元" for u in (units.get("units") or [])))
+    finally:
+        # 清理：删除本次添加的库（级联删单元/文件），避免影响其它用例的计数断言
+        if root_id:
+            requests.delete(
+                f"http://127.0.0.1:{_PORT}/api/library/roots/{root_id}",
+                timeout=15)
+
+
+def test_settings_data_location(page):
+    """设置页「数据位置」：数据目录/数据库/缓存展示 + 迁移入口存在。"""
+    section("Web 测试 34: 设置页数据位置")
+    page.goto(f"http://127.0.0.1:{_PORT}/#/settings")
+    page.wait_for_load_state("networkidle")
+
+    entry = page.locator(".setting-item", has_text="数据位置").first
+    entry.wait_for(state="attached", timeout=8000)
+    entry.click()
+    page.wait_for_timeout(500)
+
+    block = page.locator(".settings-block")
+    block.wait_for(state="attached", timeout=5000)
+    text = block.text_content() or ""
+    check("展示数据目录行", "数据目录" in text)
+    check("展示数据库行", "数据库" in text)
+    check("展示缩略图缓存行", "缩略图缓存" in text)
+    # 手机访问地址：测试服务监听 127.0.0.1，必须如实提示"手机连不上"，
+    # 否则用户会拿着 127.0.0.1 在手机上试（真实报障）。
+    check("展示手机访问行", "手机访问" in text)
+    check("回环监听时提示手机连不上",
+          "只监听本机" in text or "手机连不上" in text)
+    check("提供迁移数据入口",
+          page.locator(".settings-actions button", has_text="迁移数据").count() >= 1)
+    check("提供修改缩略图目录入口",
+          page.locator(".settings-actions button", has_text="缩略图目录").count() >= 1)
+
+
+def test_lite_mode_hides_dedup(page):
+    """便携版 = 与完整档同一套功能：查重入口**保留**，只有真缺能力时才隐藏。
+
+    曾经用 `profile=lite` 决定"不注册查重路由 + 隐藏查重入口"（代码里两套功能
+    语义）。现在 `profile` 只是标签，能力由 `app.utils.capabilities` 探测：查重
+    只要 Pillow 就能跑，所以在任何打包变体里都存在；视频/人脸/HEIC/RAW 才随
+    编译开关（MEDIA_BUILD_NO_CV2 / MEDIA_BUILD_WITH_FACE）变化。
+
+    另起一个 profile=lite 的服务实例（模拟便携版打包产物），与主实例共用测试库。
+    必须放在 PIN 相关用例之前：create_app 会吊销模块级令牌表。
+    """
+    section("Web 测试 35: 便携版（能力驱动，非档位驱动）")
+    import requests
+    import threading
+    import uvicorn
+
+    from app.api.server import create_app
+
+    lite_app = create_app(
+        AppConfig().with_updates(profile="lite", thumbnail_cache_dir=_thumb_cache_dir()),
+        {"data_root_status": "configured", "data_root": ""})
+    server = uvicorn.Server(uvicorn.Config(
+        lite_app, host="127.0.0.1", port=_LITE_PORT, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        for _ in range(50):
+            if getattr(server, "started", False):
+                break
+            time.sleep(0.1)
+        base = f"http://127.0.0.1:{_LITE_PORT}"
+        try:
+            features = requests.get(f"{base}/api/features", timeout=5).json()
+        except Exception as e:  # noqa: BLE001
+            check(f"便携版实例启动失败: {e}", False)
+            return
+        check("便携版 features.dedup=true（与完整档同功能）",
+              features.get("dedup") is True)
+        check("便携版查重路由可用（200）",
+              requests.get(f"{base}/api/dedup/results", timeout=5).status_code == 200)
+        check("便携版说明里给出降级原因",
+              isinstance(features.get("capability_notes"), list))
+
+        # 模拟"便携版打包产物"：编译期排除了 PySide6 与人脸模型。
+        # 能力快照必须如实反映 —— 这正是"同一套代码 + 编译开关"的验收点。
+        from app.utils import capabilities as caps_mod
+        probe, resolver = caps_mod._has_module, caps_mod.resolve_face_model_dir
+        try:
+            caps_mod._has_module = lambda name: name in ("PIL", "cv2")
+            caps_mod.resolve_face_model_dir = lambda configured=None: None
+            caps_mod.reset_cache()
+            packaged = requests.get(f"{base}/api/features", timeout=5).json()
+            caps = packaged.get("capabilities") or {}
+            check("便携版无 Qt（qt=false）", caps.get("qt") is False)
+            check("便携版无模型（face_models=false）", caps.get("face_models") is False)
+            check("便携版仍保留查重能力（dedup=true）",
+                  packaged.get("dedup") is True)
+            check("人脸线索随模型缺席而关闭", packaged.get("face") is False)
+        finally:
+            caps_mod._has_module, caps_mod.resolve_face_model_dir = probe, resolver
+            caps_mod.reset_cache()
+
+        page.goto(f"{base}/")
+        page.evaluate(f"() => localStorage.setItem('media_server_url', '{base}')")
+        page.goto(f"{base}/#/units")
+        page.wait_for_load_state("networkidle")
+        page.locator(".app-main").wait_for(state="attached", timeout=8000)
+
+        # 能力开关是异步拉取的：轮询等导航按 features 重渲染。
+        # 用 count() 判存在（不等待），否则元素缺席时会各自空等 30s 才报错。
+        def nav_text() -> str:
+            sidebar = page.locator(".sidebar-nav")
+            if sidebar.count():
+                return sidebar.first.text_content() or ""
+            tabs = page.locator(".bottom-tabs")
+            if tabs.count():
+                return tabs.first.text_content() or ""
+            return ""
+
+        nav_updated = False
+        for _ in range(40):
+            text = nav_text()
+            if "媒体库" in text and "查重" in text:
+                nav_updated = True
+                break
+            page.wait_for_timeout(250)
+        final_nav = nav_text()
+        if not final_nav:
+            body = (page.locator("#app").text_content() or "")[:120]
+            print(f"     [诊断] url={page.url} 页面首段={body!r}")
+        check("导航里保留「查重」（便携版功能同步）", nav_updated)
+        check("导航里保留「媒体库」", "媒体库" in final_nav)
+
+        # 直连查重页必须正常打开（不再被重定向掉）
+        page.goto(f"{base}/#/dedup")
+        page.wait_for_timeout(900)
+        check("直连 #/dedup 正常（未被重定向）", "/dedup" in page.url)
+
+        # 恢复默认服务器地址，避免影响后续用例
+        page.evaluate(f"() => localStorage.setItem('media_server_url', "
+                      f"'http://127.0.0.1:{_PORT}')")
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+# ============================================================
 # 主入口
 # ============================================================
 
@@ -2253,6 +2538,7 @@ def main():
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
             page.wait_for_load_state("networkidle")
             test_navigation_tabs(page)
+            test_phone_viewport_access(page)
 
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
             page.wait_for_load_state("networkidle")
@@ -2321,6 +2607,12 @@ def main():
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
             page.wait_for_load_state("networkidle")
             test_units_search(page)
+
+            # 便携版：媒体库页（添加/扫描）、设置页数据位置、轻量档入口
+            # 注意顺序：轻量档用例会 create_app → 吊销令牌，必须排在 PIN 用例之前
+            test_library_page_and_scan(page)
+            test_settings_data_location(page)
+            test_lite_mode_hides_dedup(page)
 
             # 取消访问密码不锁死（会临时改动服务端 web_pin，放在最后）
             test_cancel_pin_does_not_lock_out(page)

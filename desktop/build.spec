@@ -14,23 +14,21 @@ import os
 import sys
 from pathlib import Path
 
-_root = Path(SPECPATH).parent.resolve()  # desktop/
+# SPECPATH = 本 spec 所在目录（desktop/）；所有源都用绝对路径拼出来，
+# 避免"_root 上溯到仓库根"以及"必须从 desktop/ 执行 pyinstaller"这两个坑。
+_root = Path(SPECPATH).resolve()          # desktop/
+_web = _root.parent / "web"               # 仓库根的 web/
 
 a = Analysis(
-    ['main.py'],
+    [str(_root / 'main.py')],
     pathex=[str(_root)],
     binaries=[],
     datas=[
-        # Web 前端（SPA 文件）
-        ('../web/index.html', 'web'),
-        ('../web/app.js', 'web'),
-        ('../web/style.css', 'web'),
-        ('../web/sw.js', 'web'),
-        ('../web/manifest.json', 'web'),
-        ('../web/icon-192.png', 'web'),
-        ('../web/icon-512.png', 'web'),
-        # 人脸检测模型
-        ('models/', 'models'),
+        # Web 前端（SPA 文件，含 web/vendor 下的离线 Vue/vue-router）。
+        # 整个目录一起打包：逐个列文件曾漏过 vendor/ 与后续新增资源。
+        (str(_web), 'web'),
+        # 人脸检测模型（完整档需要；便携版见 build_web.spec）
+        (str(_root / 'models'), 'models'),
     ],
     hiddenimports=[
         'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets',
@@ -84,5 +82,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='../web/icon-512.png',
+    icon=str(_web / 'icon-512.png'),
 )

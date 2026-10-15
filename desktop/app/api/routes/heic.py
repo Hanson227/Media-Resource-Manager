@@ -26,6 +26,7 @@ from app.db import queries as q
 from app.services import file_ops
 from app.services import heic_service as svc
 from app.services.dedup_gate import is_dedup_busy
+from app.utils import capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -220,12 +221,20 @@ def convert_heic(body: HeicConvertRequest, request: Request):
     registry.prune()
     registry.register(task_id, "heic", phase="converting", progress=[0, len(accepted)])
 
+    # "转换后重算哈希 / 修破损"依赖哈希管线能真正解码 HEIC。包里没有 pillow-heif
+    # 时解码必然失败（能力探测），显式关掉比"即传即炸"更好；有 HEIC 能力时一律
+    # 尊重请求参数 —— 不再按运行档位关（便携版与桌面档是同一套功能）。
+    reindex = bool(body.options.reindex)
+    fix_broken = bool(body.options.fix_broken)
+    if not capabilities.detect(getattr(cfg, "face_model_dir", None)).pillow_heif:
+        reindex = False
+        fix_broken = False
     options = svc.HeicConvertOptions(
         quality=int(body.options.quality),
         source_action=body.options.source_action,
         on_conflict=body.options.on_conflict,
-        reindex=bool(body.options.reindex),
-        fix_broken=bool(body.options.fix_broken),
+        reindex=reindex,
+        fix_broken=fix_broken,
     )
     threading.Thread(
         target=_run_heic_task,

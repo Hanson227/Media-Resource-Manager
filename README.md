@@ -14,13 +14,16 @@
 ```
 Media/
 ├── desktop/             # Windows 桌面应用（Python/PySide6）
-│   ├── main.py
+│   ├── main.py          # 桌面完整档入口（GUI + 内嵌 API）
+│   ├── main_web.py      # 便携版入口（只有 Web/API，不导入 Qt；功能与桌面档一致）
+│   ├── build.spec       # 桌面档打包
+│   ├── build_web.spec   # 便携版打包（onedir；体积/能力由 MEDIA_BUILD_* 开关决定）
 │   ├── app/
 │   ├── models/          # OpenCV Zoo ONNX 人脸模型（YuNet 检测 + SFace 特征）
 │   ├── tests/
 │   └── config.json
-├── web/                 # Web 前端 SPA（Vue 3）
-├── docs/                # 参考文档（查重口径 / HEIC / Web 前端 / 踩坑速查），按需读
+├── web/                 # Web 前端 SPA（Vue 3，vendor/ 内含离线 Vue，无需外网）
+├── docs/                # 参考文档（查重口径 / HEIC / Web 前端 / 便携版 / 踩坑速查），按需读
 ├── API.md               # HTTP API 契约
 ├── README.md
 └── CLAUDE.md            # 仓库约定与铁律（模块职责、命令、纪律的唯一来源）
@@ -111,12 +114,50 @@ python main.py
 ### 测试
 
 ```bash
-# 后端 + API 端到端测试
+# 后端 + API 端到端测试（桌面完整档）
 cd desktop && python tests/test_flow.py
+
+# 便携版（能力降级 / 数据根 / 盘符改库 / 数据迁移 / 无 Qt 断言）
+cd desktop && python tests/test_lite.py
 
 # Web 前端浏览器测试（自带 19528 测试服务与独立数据库；无系统 Chrome 时自动回退 Playwright Chromium）
 PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
 ```
+
+### 便携版（无桌面 GUI）
+
+系统盘紧张、主要用手机/平板浏览器访问时，用便携版：**不含桌面 GUI（不打包 PySide6）**，
+功能与桌面档**完全一致**，并可以把数据放在移动硬盘上。
+
+```bash
+# 直接运行（源码）
+cd desktop && python main_web.py
+cd desktop && python main_web.py --data-root E:\MediaData
+
+# 打包成便携包（onedir）。体积按需要开关：
+pip install -r requirements-web.txt pyinstaller
+cd desktop && pyinstaller build_web.spec               # dist/影视资源管理器-便携版/
+$env:MEDIA_BUILD_NO_CV2="1";    pyinstaller build_web.spec   # 再省 111MB（视频/人脸能力关闭）
+$env:MEDIA_BUILD_WITH_FACE="1"; pyinstaller build_web.spec   # +38MB（人脸线索可用）
+```
+
+**一套代码，功能同步，体积靠编译开关**：某个功能能不能用，由
+[`app/utils/capabilities.py`](desktop/app/utils/capabilities.py) 在运行时探测
+（包里有没有 OpenCV / pillow-heif / rawpy / 人脸模型 / PySide6），并如实报进
+`/api/features`；查重路由在任何打包组合下都存在（文件级查重只需要 Pillow）。
+详见 [docs/portable-lite.md](docs/portable-lite.md)。
+
+- 数据（数据库 / 缩略图 / Web 密码）可全部放在 `--data-root` 指定的目录
+  （建议移动硬盘），程序目录不存数据；换机器后**即使盘符变了也会自动找到**它；
+- 盘符变化导致媒体库路径失效时，Web「媒体库」页会列出候选位置，确认后一键改库
+  （改前自动备份，不动磁盘文件）；
+- 便携版没有桌面界面，添加媒体库与扫描都在 Web「媒体库」页完成；
+- 手机/平板当终端：默认监听 `0.0.0.0`，启动时控制台会打印
+  `手机/平板访问: http://<局域网IP>:19527`，手机连同一 WiFi 直接输入即可；
+- 打包产物内置本地 Vue/vue-router，**断网也能打开页面**。
+
+完整说明（数据根解析规则、改库边界、手机访问与防火墙、ARM 平板注意事项、排障表）见
+[docs/portable-lite.md](docs/portable-lite.md)。
 
 ### 配置
 
@@ -125,6 +166,8 @@ PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
 ```json
 {
   "db_path": "data/media_manager.db",
+  "data_root": null,
+  "profile": "full",
   "api_port": 19527,
   "jaccard_threshold": 0.80,
   "thumbnail_max_size": 256,
@@ -133,6 +176,12 @@ PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
   "face_detection_enabled": true
 }
 ```
+
+> `data_root` 为 `null` 表示不启用数据根（路径相对程序目录，与旧版本一致）。
+> 设成移动硬盘上的目录（如 `"E:\\MediaData"`）后，数据库/缩略图/Web 密码都跟着它走，
+> 换盘符也能自动定位 —— 见 [docs/portable-lite.md](docs/portable-lite.md)。
+> `profile` 只是"这是哪个包"的展示标签，**不影响功能**：功能可用性由
+> `app/utils/capabilities.py` 的能力探测决定（见 [docs/portable-lite.md](docs/portable-lite.md)）。
 
 > Web 访问密码（`web_pin`）**不放在这个文件里**：它持久化在 gitignore 的
 > `desktop/data/.web_pin`。旧版本 config.json 里若有明文 `web_pin`，启动时会一次性迁移过去。
@@ -175,6 +224,16 @@ PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
 | POST/DELETE | `/api/tags` `/api/tags/{id}` | 标签 CRUD |
 | GET/PUT | `/api/tags/by-file/{id}` | 文件标签查询 / 全量替换 |
 | GET | `/api/tags/mapped-files` | 标签-文件批量映射 |
+| GET | `/api/features` | 运行档位与能力开关（轻量档 `dedup=false`，前端据此隐藏查重入口） |
+| GET | `/api/library/volumes` | 就绪卷（盘符/卷标/可用空间） |
+| GET | `/api/library/browse` | 服务端目录浏览（便携版"选媒体库目录"用） |
+| GET/POST | `/api/library/roots` | 媒体库根列表（含不可达原因与候选位置）/ 添加 |
+| DELETE | `/api/library/roots/{id}` | 移除媒体库（不动磁盘文件） |
+| POST | `/api/library/remap` | 盘符变化后路径改库（dry-run + 冲突检测 + 备份 + 幂等） |
+| POST | `/api/library/scan` | 触发扫描（异步 202 + task_id） |
+| GET | `/api/library/scan/{task_id}` / `active-task` | 轮询扫描进度 / 接上跨页任务 |
+| GET/POST | `/api/settings` `/api/settings/data-root` | 数据位置 / 迁移数据根（copy\|move） |
+| POST | `/api/settings/thumbnail-cache` | 切换缩略图缓存目录（热切换，无需重启） |
 
 > 鉴权：桌面端设置 4 位 Web 密码后，除 `/api/health`、`/api/auth/*` 外
 > 所有 `/api/*` 请求必须携带 `Authorization: Bearer <token>`
@@ -189,11 +248,15 @@ Web 前端是基于 Vue 3 的 SPA，通过桌面端内置的 FastAPI 服务器�
 
 - 响应式布局：手机底部导航、平板/桌面侧边栏
 - 资源单元浏览、文件网格、左右滑动预览
+- **媒体库管理**：卷列表 + 服务端目录浏览 + 添加媒体库 + 扫描（便携版的唯一入口）
+- **数据位置**：查看数据目录占用、迁移数据根 / 缩略图缓存目录（便携版）
+- **路径修复**：盘符变化后列候选位置并一键改库
 - 视频播放：播放/暂停、进度拖动、倍速播放、手势快进快退
-- 查重结果查看和处理
+- 查重结果查看和处理（轻量档下自动隐藏）
 - HEIC 检查与转换（**设置里的工具入口**，不占导航栏目：检查全库 HEIC → 勾选 → 批量转 JPG，进度跨页存活）
 - 消息中心
 - 访问密码锁屏
+- 离线可用：本地 `web/vendor/` 内置 Vue/vue-router 与图标字体，断网也能打开
 
 ## 已知限制
 

@@ -22,7 +22,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import AppConfig
-from app.api.routes import files, units, dedup, messages, events, tags, heic
+from app.utils import capabilities
+from app.utils import paths as app_paths
+from app.api.routes import files, units, messages, events, tags, heic
 
 logger = logging.getLogger(__name__)
 
@@ -127,11 +129,52 @@ class ChangePinBody(BaseModel):
     new_pin: str = Field(default="", max_length=16)
 
 
-def create_app(config: AppConfig) -> FastAPI:
+def _features_payload(request: Request) -> dict:
+    """能力开关（/api/health、/api/features 共用一份口径）。
+
+    前端只认这里返回的开关来显示/隐藏导航，避免"服务端其实没有这个能力、
+    前端却仍把入口摆出来"。
+
+    **这些开关来自真实能力探测（`app.utils.capabilities`），不是运行档位**：
+    同一份代码里不允许出现"轻量档 → 不注册查重路由"这种功能分叉（会让 HTTP
+    契约分叉、前端按档位分支、测试与文档写两遍）。体积差异一律由打包开关决定。
+    `profile` 仅作"这是哪个包"的展示标签，不参与任何功能判断。
+    """
+    cfg = getattr(request.app.state, "config", None)
+    runtime = getattr(request.app.state, "runtime", None) or {}
+    caps = capabilities.detect(getattr(cfg, "face_model_dir", None) if cfg else None)
+    face_on = bool(getattr(cfg, "face_detection_enabled", False)) and caps.face
+    return {
+        "app": "media-manager",
+        "version": "0.1.0",
+        "profile": getattr(cfg, "profile", "full") if cfg else "full",
+        "dedup": caps.dedup,
+        "dedup_video": caps.dedup_video,
+        "hash_index": caps.dedup,
+        "face": face_on,
+        "video": caps.video_thumbnail,
+        "heic": caps.pillow_heif,
+        "raw": caps.rawpy,
+        "scan": True,
+        "desktop": caps.qt,
+        "capabilities": caps.as_dict(),
+        "capability_notes": caps.notes(),
+        "data_root": str(runtime.get("data_root") or (cfg.data_root if cfg and cfg.data_root else "")),
+        "data_root_status": str(runtime.get("data_root_status") or ""),
+        "expected_data_root": str(runtime.get("expected_data_root") or ""),
+        "data_root_candidates": [str(c) for c in (runtime.get("candidates") or [])],
+        "db_path": str(cfg.db_path) if cfg else "",
+        "thumbnail_cache_dir": str(cfg.thumbnail_cache_dir) if cfg else "",
+    }
+
+
+def create_app(config: AppConfig, runtime: Optional[dict] = None) -> FastAPI:
     """创建并配置 FastAPI 应用。
 
     参数:
-        config: 应用配置。
+        config: 应用配置（`profile` 只是"这是哪个包"的展示标签，不参与功能判断；
+            功能可用性一律由 `app.utils.capabilities` 的真实探测决定）。
+        runtime: 运行时信息（数据根状态等），供 /api/features 与 /api/health 透出。
 
     返回:
         配置好的 FastAPI 应用实例。
@@ -141,7 +184,7 @@ def create_app(config: AppConfig) -> FastAPI:
 
     app = FastAPI(
         title="影视资源管理器 API",
-        description="本地影视资源管理查重工具的 HTTP API，供 Web 前端与局域网移动端访问。",
+        description="本地影视资源管理工具的 HTTP API，供 Web 前端与局域网移动端访问。",
         version="0.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
@@ -161,8 +204,12 @@ def create_app(config: AppConfig) -> FastAPI:
 
     # 将配置存入 app.state，路由可通过 request.app.state.config 访问
     app.state.config = config
+    app.state.runtime = dict(runtime or {})
 
     # 注册路由
+    # 查重路由**总是**注册：一套代码不允许按运行档位分叉。包里没有 cv2 / 模型时
+    # 由能力探测降级（视频帧与人脸线索不可用），端点本身依然在（契约稳定）。
+    from app.api.routes import dedup
     app.include_router(files.router)
     app.include_router(units.router)
     app.include_router(dedup.router)
@@ -170,11 +217,19 @@ def create_app(config: AppConfig) -> FastAPI:
     app.include_router(events.router)
     app.include_router(tags.router)
     app.include_router(heic.router)
+    from app.api.routes import library, settings as settings_routes
+    app.include_router(library.router)
+    app.include_router(settings_routes.router)
 
-    # 健康检查
+    # 健康检查（含运行档位与数据根状态：便携版排障第一入口）
     @app.get("/api/health")
-    def health():
-        return {"status": "ok"}
+    def health(request: Request):
+        return {"status": "ok", **_features_payload(request)}
+
+    # 前端启动时拉取：决定导航显示哪些页面、隐藏哪些入口
+    @app.get("/api/features")
+    def features(request: Request):
+        return _features_payload(request)
 
     # ============================================================
     # Web 访问认证
@@ -231,7 +286,22 @@ def create_app(config: AppConfig) -> FastAPI:
         # 更新配置（frozen dataclass 仅替换 web_pin 字段）
         try:
             new_config = cfg.with_updates(web_pin=new_pin)
-            new_config.to_file(Path("config.json"))
+            runtime = getattr(request.app.state, "runtime", None) or {}
+            # **必须**用入口注入的 config_path：回退到"应用目录"在测试/嵌入式用法里
+            # 会写到开发机或用户的真实配置文件上（实测把 desktop/config.json 覆盖过）。
+            raw_path = runtime.get("config_path")
+            if not raw_path:
+                logger.error("拒绝写入配置：运行态未注入 config_path")
+                return JSONResponse(status_code=500,
+                                    content={"success": False,
+                                             "error": "配置未写入：运行态缺少 config_path"})
+            config_path = Path(raw_path)
+            # profile 只在文件里已显式写过时才落盘（否则会把入口默认档固化），
+            # 与 /api/settings 同一口径。
+            new_config.to_file(
+                config_path,
+                omit=() if app_paths.read_explicit_profile(config_path)
+                else ("profile",))
         except Exception as e:
             logger.error(f"保存配置失败: {e}")
             return JSONResponse(status_code=500, content={"success": False, "error": "保存配置失败"})
@@ -259,7 +329,9 @@ def create_app(config: AppConfig) -> FastAPI:
     # ============================================================
     # 静态文件（Web 前端 SPA）
     # ============================================================
-    web_dir = Path(__file__).resolve().parent.parent.parent.parent / "web"
+    # 目录解析必须走 app_paths.web_dir()：PyInstaller 下 __file__ 上溯会落到
+    # _internal/ 而不是 _internal/web（打出来的包会没有前端）。
+    web_dir = app_paths.web_dir()
     if web_dir.is_dir():
         # 根端点：浏览器返回 index.html，API 客户端返回 JSON
         @app.get("/")
@@ -347,13 +419,15 @@ class APIServer:
         server.stop()
     """
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, runtime: Optional[dict] = None) -> None:
         """初始化 API 服务器。
 
         参数:
             config: 应用配置。
+            runtime: 运行时信息（数据根解析结果），透出给 /api/features。
         """
         self._config = config
+        self._runtime = dict(runtime or {})
         self._thread: Optional[threading.Thread] = None
         self._server: Optional[uvicorn.Server] = None
         self._running = False
@@ -365,7 +439,7 @@ class APIServer:
             return
 
         global _app
-        _app = create_app(self._config)
+        _app = create_app(self._config, self._runtime)
 
         import asyncio
 
@@ -413,3 +487,12 @@ class APIServer:
     def is_running(self) -> bool:
         """服务器是否正在运行。"""
         return self._running
+
+    @property
+    def is_thread_alive(self) -> bool:
+        """服务线程是否还活着。
+
+        无界面入口必须靠这个判断"进程是不是在空转"：uvicorn 绑定端口失败等
+        情况下线程会自己退出，而 `is_running` 仍为 True（进程不报错也不服务）。
+        """
+        return bool(self._thread and self._thread.is_alive())

@@ -2,12 +2,19 @@
 """
 扫描工作线程 —— 后台执行文件夹扫描并将结果写入数据库。
 
-使用 QThread 避免阻塞 GUI 线程。
-发出进度信号供状态栏和进度条更新。
+落库逻辑已收敛到 `app/services/scan_service.py`（无 Qt 实现，GUI 与 HTTP API
+共用一份），本线程只负责：驱动扫描器、把进度转发成 Qt 信号、处理取消。
+
+信号:
+    progress: 扫描进度 (当前文件夹, 总数)。
+    file_found: 发现文件时发出 (file_path)。
+    unit_found: 发现资源单元时发出 (unit_name, file_count)。
+    finished: 扫描完成 (ScanResult)。
+    error_occurred: 发生错误 (错误消息)。
+    cancelled: 扫描被取消。
 """
 
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -15,43 +22,21 @@ from PySide6.QtCore import QThread, Signal, Slot
 
 from config import AppConfig
 from app.core.scanner import MediaScanner, ScanResult
-from app.db.engine import DatabaseManager
-from app.db import queries as q
-from app.db.models import MediaFile
+from app.services.scan_service import (
+    PATH_LOOKUP_CHUNK_SIZE, RootRemapRequired, load_existing_files,
+    save_scan_result,
+)
 
 logger = logging.getLogger(__name__)
 
-# 批量预载路径映射时的分块大小：SQLite 单条语句的绑定变量上限默认 32766，
-# 大媒体库一次性 IN 全部路径会抛 "too many SQL variables"。
-PATH_LOOKUP_CHUNK_SIZE = 500
-
-
-def load_existing_files(session, paths: list[str],
-                        chunk_size: int = PATH_LOOKUP_CHUNK_SIZE) -> dict:
-    """分块查询既有 MediaFile 记录，返回 {path: MediaFile}。
-
-    分块是为了避开 SQLite 的绑定变量上限；语义等价于单条 IN 查询。
-    """
-    existing: dict = {}
-    if not paths:
-        return existing
-    for start in range(0, len(paths), max(1, chunk_size)):
-        chunk = paths[start:start + chunk_size]
-        for row in session.query(MediaFile).filter(MediaFile.path.in_(chunk)):
-            existing[row.path] = row
-    return existing
+__all__ = [
+    "ScanWorker", "load_existing_files", "PATH_LOOKUP_CHUNK_SIZE",
+    "RootRemapRequired",
+]
 
 
 class ScanWorker(QThread):
-    """后台扫描线程。
-
-    信号:
-        progress: 扫描进度 (当前文件夹, 总数)。
-        file_found: 发现文件时发出 (file_path)。
-        unit_found: 发现资源单元时发出 (unit_name, file_count)。
-        finished: 扫描完成 (ScanResult)。
-        error_occurred: 发生错误 (错误消息)。
-    """
+    """后台扫描线程（信号转发层，落库走 scan_service）。"""
 
     progress = Signal(int, int)
     file_found = Signal(str)
@@ -76,14 +61,12 @@ class ScanWorker(QThread):
     def run(self) -> None:
         """执行扫描任务（在后台线程中运行）。"""
         try:
-            # 创建扫描器
             scanner = MediaScanner(
                 extensions=self._config.media_extensions,
                 exclude_patterns=self._config.exclude_patterns,
                 progress_callback=lambda cur, total: self.progress.emit(cur, total),
             )
 
-            # 执行扫描
             result = scanner.scan_root(self._root_path)
 
             if self._cancelled:
@@ -93,11 +76,19 @@ class ScanWorker(QThread):
                 logger.info(f"扫描已取消: {self._root_path}")
                 return
 
-            # 写入数据库
             self._save_to_database(result)
 
             self.finished.emit(result)
             logger.info(f"扫描完成: {self._root_path}")
+
+        except RootRemapRequired as e:
+            # 换盘符后直接扫描会多出一套同名根+单元（旧记录永远清不掉），
+            # 因此由守卫拦下并把候选位置交给「工具 → 修复媒体库路径」。
+            msg = (f"{e}\n\n可用工具菜单「修复媒体库路径」先改库，"
+                   f"或确认按新库扫描。\n候选位置: "
+                   + "、".join(c.get("path", "") for c in e.candidates[:3]))
+            logger.warning(f"扫描被路径守卫拦下: {e}")
+            self.error_occurred.emit(msg)
 
         except Exception as e:
             logger.error(f"扫描失败: {e}")
@@ -110,184 +101,16 @@ class ScanWorker(QThread):
         logger.info("扫描已取消")
 
     def _save_to_database(self, result: ScanResult) -> None:
-        """将扫描结果写入数据库。
-
-        参数:
-            result: 扫描结果。
-        """
+        """将扫描结果写入数据库（委托 scan_service，保持与 API 侧同一实现）。"""
         try:
-            with DatabaseManager.session() as session:
-                # 创建/更新媒体库根目录
-                root = q.get_root_by_path(session, str(result.root_path))
-                if not root:
-                    root = q.add_library_root(session, str(result.root_path))
-                    logger.info(f"新增媒体库根目录: {result.root_path}")
-
-                # 创建扫描会话
-                scan_session = q.create_scan_session(session)
-                scan_id = scan_session.id
-
-                new_files = 0
-                updated_files = 0
-                errors: list[str] = list(result.errors)
-
-                # 本轮实际产出内容的单元路径：既用于恢复被自动排除的空壳记录，
-                # 也用于排除本轮已不再产出内容的单元（见下方收尾清理）。
-                produced_paths = [str(u.path) for u in result.units]
-
-                # 恢复：本轮重新产出内容的自动排除记录（必须赶在单元统计写入
-                # 之前判断；判据是 exclude_reason，不是 file_count —— 见
-                # queries.restore_units_produced_by_scan）
-                restored = q.restore_units_produced_by_scan(session, produced_paths)
-                if restored:
-                    logger.info(f"恢复为活跃单元（重新产出内容）: {', '.join(restored)}")
-
-                # ---- 批量预载：IN 查询命中全部扫描路径的既有记录 ----
-                # 取代原先“每个文件一次 get_file_by_path”的 N+1 往返；
-                # 内部分块执行，避免超出 SQLite 绑定变量上限。
-                scanned_paths = [str(df.path) for unit in result.units for df in unit.files]
-                existing_map = load_existing_files(session, scanned_paths)
-
-                # 变更队列（海量文件时批处理，显著减少 SQLite 往返）
-                rows_to_add: list[MediaFile] = []
-                move_updates: list[tuple[int, int]] = []   # (file_id, target_unit_id)
-                heal_ids: list[int] = []                   # 清空失败占位，待重索引
-
-                # 处理每个资源单元
-                for unit in result.units:
-                    # 检查已存在的单元
-                    existing_unit = q.get_unit_by_path(session, str(unit.path))
-
-                    # 单元内容的真实最新修改时间（文件夹被移动后自身
-                    # mtime/ctime 失真，必须用内部文件的 mtime 聚合值）
-                    content_dt = (
-                        datetime.fromtimestamp(unit.latest_mtime)
-                        if unit.latest_mtime is not None else None
-                    )
-
-                    if existing_unit:
-                        unit_id = existing_unit.id
-                        q.update_unit_stats(
-                            session, unit_id,
-                            unit.file_count, unit.total_size,
-                            content_modified_at=content_dt,
-                        )
-                    else:
-                        new_unit = q.create_unit(
-                            session,
-                            path=str(unit.path),
-                            name=unit.name,
-                            library_root_id=root.id,
-                            is_manual=False,
-                            file_count=unit.file_count,
-                            total_size=unit.total_size,
-                            content_modified_at=content_dt,
-                        )
-                        unit_id = new_unit.id
-
-                    # 处理每个文件（仅在内存中比对，最后统一落库）
-                    for df in unit.files:
-                        existing_file = existing_map.get(str(df.path))
-                        if existing_file is not None:
-                            # 更新已有文件的归属
-                            if existing_file.resource_unit_id != unit_id:
-                                move_updates.append((existing_file.id, unit_id))
-                            # 自愈：md5 占位为空串说明历史索引失败/文件曾缺失；
-                            # 文件现已恢复，重置哈希为 NULL 让其重新进入待索引队列。
-                            if existing_file.md5_hash == "":
-                                heal_ids.append(existing_file.id)
-                            updated_files += 1
-                        else:
-                            rows_to_add.append(MediaFile(
-                                path=str(df.path),
-                                filename=df.filename,
-                                extension=df.extension,
-                                media_type=df.media_type,
-                                size_bytes=df.size_bytes,
-                                resource_unit_id=unit_id,
-                            ))
-                            new_files += 1
-                            self.file_found.emit(df.filename)
-
-                    self.unit_found.emit(unit.name, unit.file_count)
-
-                # ---- 批量落库 ----
-                if rows_to_add:
-                    session.add_all(rows_to_add)
-                    session.flush()
-                for file_id, target_unit in move_updates:
-                    q.update_file_unit(session, file_id, target_unit)
-                for file_id in heal_ids:
-                    q.clear_stale_hash_placeholders(session, file_id)
-
-                # 清理：删除所有活跃单元中已不存在的文件记录及对应缩略图缓存
-                stale_file_count = 0
-                stale_ids: list[int] = []
-                affected_units: set[int] = set()
-                for unit in q.get_units_by_root(session, root.id):
-                    if unit.status != "active":
-                        continue
-                    if not Path(unit.path).is_dir():
-                        continue
-                    for mf in q.get_files_by_unit(session, unit.id):
-                        if not Path(mf.path).is_file():
-                            # 删除缩略图缓存
-                            thumb_dir = Path(unit.path) / ".thumbnails"
-                            for suffix in ("", ".meta"):
-                                thumb = thumb_dir / f"{mf.id}_thumb.jpg{suffix}"
-                                thumb.unlink(missing_ok=True)
-                            stale_ids.append(mf.id)
-                            stale_file_count += 1
-                            affected_units.add(unit.id)
-                if stale_ids:
-                    # 批量删除（SQLite 外键 ON DELETE CASCADE 清理人脸/帧/匹配记录）
-                    session.query(MediaFile).filter(
-                        MediaFile.id.in_(stale_ids)
-                    ).delete(synchronize_session=False)
-                if stale_file_count:
-                    logger.info(f"清理了 {stale_file_count} 个已不存在的文件记录及缩略图")
-                    # 更新受影响单元的 file_count / total_size / 内容日期
-                    for uid in affected_units:
-                        remaining = q.get_files_by_unit(session, uid)
-                        new_count = len(remaining)
-                        new_size = sum(f.size_bytes for f in remaining)
-                        latest = None
-                        for f in remaining:
-                            try:
-                                m = Path(f.path).stat().st_mtime
-                            except OSError:
-                                continue
-                            latest = m if latest is None else max(latest, m)
-                        q.update_unit_stats(
-                            session, uid, new_count, new_size,
-                            content_modified_at=(
-                                datetime.fromtimestamp(latest)
-                                if latest is not None else None
-                            ),
-                        )
-
-                # 清理：排除本根下本轮已无内容的单元。必须在删除失效文件记录之后
-                # 执行；判据也不能退回"只看目录是否存在"—— 目录还在、但已不再直接
-                # 包含媒体文件的文件夹（日期文件夹的零散文件被删/挪走）会因此永远
-                # 留在列表里显示 "0 个 · 0 B"。详见 queries.exclude_empty_units。
-                excluded_units = q.exclude_empty_units(session, root.id, produced_paths)
-                if excluded_units:
-                    logger.info(f"排除已无内容的单元: {', '.join(excluded_units)}")
-
-                # 更新扫描会话
-                q.update_scan_session(session, scan_id,
-                    files_scanned=result.total_files,
-                    new_files=new_files,
-                    updated_files=updated_files,
-                    errors_count=len(errors),
-                )
-                q.finish_scan_session(session, scan_id, status="completed", errors=errors)
-
-                logger.info(
-                    f"数据库写入完成: 新增 {new_files} 个文件, "
-                    f"更新 {updated_files} 个文件"
-                )
-
+            save_scan_result(
+                result,
+                thumbnail_cache_dir=self._config.thumbnail_cache_dir,
+                file_callback=self.file_found.emit,
+                unit_callback=self.unit_found.emit,
+            )
+        except RootRemapRequired:
+            raise
         except Exception as e:
             logger.error(f"数据库写入失败: {e}")
             self.error_occurred.emit(f"数据库写入失败: {e}")

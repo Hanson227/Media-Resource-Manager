@@ -202,6 +202,12 @@ class MainWindow(QMainWindow):
         excluded_action.triggered.connect(self._on_manage_excluded)
         tools_menu.addAction(excluded_action)
 
+        repair_action = QAction("修复媒体库路径(&P)...", self)
+        repair_action.setStatusTip(
+            "移动盘换了盘符后，把库里失效的绝对路径改到新位置（改前自动备份数据库）")
+        repair_action.triggered.connect(self._on_repair_paths)
+        tools_menu.addAction(repair_action)
+
         smb_action = QAction("SMB 共享(&S)...", self)
         smb_action.setStatusTip("设置局域网 SMB 文件共享，供手机访问媒体库")
         smb_action.triggered.connect(self._on_open_smb)
@@ -520,9 +526,44 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_scan_error(self, msg: str) -> None:
+        # 扫描被"路径守卫"拦下（盘符变了）：直接给出修复入口，而不是只报错。
+        # 不修就重扫会在库里多出一套同名根+单元，旧记录永远清不掉。
+        if "路径可能已变化" in msg or "路径修复" in msg or "RootRemapRequired" in str(msg):
+            reply = QMessageBox.question(
+                self, "媒体库路径可能已变化",
+                f"{msg}\n\n现在打开「修复媒体库路径」吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            self._status_bar.set_status("扫描已中止：需要先修复媒体库路径")
+            self._status_bar.hide_progress()
+            if reply == QMessageBox.StandardButton.Yes:
+                self._on_repair_paths()
+            return
         QMessageBox.critical(self, "扫描错误", msg)
         self._status_bar.set_status("扫描失败")
         self._status_bar.hide_progress()
+
+    @Slot()
+    def _on_repair_paths(self) -> None:
+        """打开媒体库路径修复对话框（盘符变化后的改库入口）。"""
+        from app.ui.dialogs.path_repair import PathRepairDialog
+
+        dialog = PathRepairDialog(self._config, self)
+        dialog.paths_repaired.connect(self._on_paths_repaired)
+        dialog.exec()
+
+    @Slot(object)
+    def _on_paths_repaired(self, result) -> None:
+        """改库完成后刷新界面（树/网格都基于单元路径）。"""
+        logger.info(f"媒体库路径已修复: {result.get('updated')}")
+        self._tree_view.refresh_model()
+        self._current_unit_id = None
+        self._accordion.reset()
+        self._grid_view.load_unit(0)
+        self._right_header.setText("资源单元视图")
+        self._right_footer.setText("0 个项目 | 共 0 B")
+        self._status_bar.set_status("媒体库路径已修复，建议重新扫描一次")
 
     # ============================================================
     # 文件夹树交互
@@ -726,98 +767,47 @@ class MainWindow(QMainWindow):
 
     @Slot(int, list)
     def _on_merge_units(self, parent_id: int, child_ids: list[int]) -> None:
-        """合并资源单元。"""
-        try:
-            with DatabaseManager.session() as session:
-                parent = q.get_unit_by_id(session, parent_id)
-                # 内容日期取父/子单元中的最新值
-                latest_content = parent.content_modified_at if parent else None
-                child_units = q.get_units_by_ids(session, child_ids) if child_ids else []
-                for cu in child_units:
-                    if cu.content_modified_at is not None and (
-                            latest_content is None
-                            or cu.content_modified_at > latest_content):
-                        latest_content = cu.content_modified_at
-                for cid in child_ids:
-                    q.mark_unit_merged(session, cid, parent_id)
-                # 重新统计父单元
-                total_files = 0
-                total_size = 0
-                all_units = [parent_id] + child_ids
-                for uid in all_units:
-                    files = q.get_files_by_unit(session, uid)
-                    total_files += len(files)
-                    total_size += sum(f.size_bytes for f in files)
-                q.update_unit_stats(session, parent_id, total_files, total_size,
-                                    content_modified_at=latest_content)
-            self._tree_view.refresh_model()
-            self._status_bar.set_status(f"已合并 {len(child_ids)} 个单元")
-        except Exception as e:
-            QMessageBox.critical(self, "合并失败", str(e))
+        """合并资源单元（实现见 app/services/unit_service，GUI 与 API 共用）。"""
+        from app.services import unit_service
+        result = unit_service.merge_units(parent_id, child_ids, config=self._config)
+        if not result.ok:
+            QMessageBox.critical(self, "合并失败", result.message)
+            return
+        self._tree_view.refresh_model()
+        self._status_bar.set_status(result.message)
 
     @Slot(int)
     def _on_split_unit(self, unit_id: int) -> None:
-        """拆分资源单元。"""
-        try:
-            with DatabaseManager.session() as session:
-                children = q.get_child_units(session, unit_id)
-                for child in children:
-                    q.unmerge_unit(session, child.id)
-                q.unmerge_unit(session, unit_id)
-            self._tree_view.refresh_model()
-            self._status_bar.set_status("已拆分")
-        except Exception as e:
-            QMessageBox.critical(self, "拆分失败", str(e))
+        """拆分资源单元（实现见 unit_service）。"""
+        from app.services import unit_service
+        result = unit_service.split_unit(unit_id, config=self._config)
+        if not result.ok:
+            QMessageBox.critical(self, "拆分失败", result.message)
+            return
+        self._tree_view.refresh_model()
+        self._status_bar.set_status(result.message)
 
     @Slot(str)
     def _on_mark_unit(self, folder_path: str) -> None:
-        """标记为资源单元。"""
-        try:
-            with DatabaseManager.session() as session:
-                unit = q.get_unit_by_path(session, folder_path)
-                if unit:
-                    q.mark_unit_manual(session, unit.id, True)
-                    q.set_unit_starred(session, unit.id, True)
-                else:
-                    # 创建新的手动单元
-                    p = Path(folder_path)
-                    roots = q.get_all_roots(session)
-                    root_id = roots[0].id if roots else None
-                    if root_id:
-                        # 采集文件夹内媒体文件的真实最新修改时间
-                        content_dt = None
-                        latest = None
-                        for entry in p.rglob("*"):
-                            if not entry.is_file():
-                                continue
-                            if not is_media_file(entry, self._config.media_extensions):
-                                continue
-                            try:
-                                m = entry.stat().st_mtime
-                            except OSError:
-                                continue
-                            latest = m if latest is None else max(latest, m)
-                        if latest is not None:
-                            content_dt = datetime.fromtimestamp(latest)
-                        q.create_unit(session, str(p), p.name, root_id,
-                                     is_manual=True, file_count=0, total_size=0,
-                                     content_modified_at=content_dt)
-            self._tree_view.refresh_model()
-            self._status_bar.set_status(f"已标记: {Path(folder_path).name}")
-        except Exception as e:
-            QMessageBox.critical(self, "标记失败", str(e))
+        """标记为资源单元（实现见 unit_service）。"""
+        from app.services import unit_service
+        result = unit_service.mark_manual_unit(folder_path, config=self._config)
+        if not result.ok:
+            QMessageBox.critical(self, "标记失败", result.message)
+            return
+        self._tree_view.refresh_model()
+        self._status_bar.set_status(result.message)
 
     @Slot(int)
     def _on_unmark_unit(self, unit_id: int) -> None:
-        """取消标记。"""
-        try:
-            with DatabaseManager.session() as session:
-                q.mark_unit_manual(session, unit_id, False)
-                q.set_unit_starred(session, unit_id, False)
-            self._tree_view.refresh_model()
-            self._status_bar.set_status("已取消标记")
-        except Exception as e:
-            QMessageBox.critical(self, "取消标记失败", str(e))
+        """取消标记（实现见 unit_service）。"""
+        from app.services import unit_service
+        result = unit_service.unmark_manual_unit(unit_id, config=self._config)
+        if not result.ok:
+            QMessageBox.critical(self, "取消标记失败", result.message)
+            return
+        self._tree_view.refresh_model()
+        self._status_bar.set_status(result.message)
 
     @Slot(int)
     def _on_star_unit(self, unit_id: int) -> None:
@@ -881,36 +871,22 @@ class MainWindow(QMainWindow):
 
     @Slot(int)
     def _on_exclude_unit(self, unit_id: int) -> None:
-        """排除资源单元：标记为 excluded。"""
-        if unit_id <= 0:
-            logger.error(f"排除失败：无效的单元 ID {unit_id}")
-            QMessageBox.critical(self, "排除失败", f"无效的单元 ID：{unit_id}")
+        """排除资源单元（实现见 unit_service；起因记 user，扫描不会抹掉）。"""
+        from app.services import unit_service
+        result = unit_service.exclude_unit(unit_id, config=self._config)
+        if not result.ok:
+            logger.error(f"排除失败: {result.message}")
+            QMessageBox.critical(self, "排除失败", result.message)
             return
-        try:
-            with DatabaseManager.session() as session:
-                unit = q.get_unit_by_id(session, unit_id)
-                if unit is None:
-                    logger.error(f"排除失败：找不到单元 {unit_id}")
-                    QMessageBox.critical(self, "排除失败", f"找不到资源单元 (ID={unit_id})")
-                    return
-                name = unit.name
-                # 起因必须记成 user：扫描自动排除（missing/empty）才会被自动恢复，
-                # 用户的选择不能被下一次扫描抹掉（见 constants.ExcludeReason）。
-                q.mark_unit_excluded(session, unit_id,
-                                     reason=ExcludeReason.USER.value)
-                logger.info(f"已标记排除: {name} (id={unit_id}, status=excluded)")
-            self._grid_view.clear()
-            self._breadcrumb.hide()
-            self._current_unit_id = None
-            self._accordion.reset()
-            self._tree_view.refresh_model()
-            root_idx = self._tree_view.model().index(0, 0)
-            if root_idx.isValid():
-                self._tree_view.setCurrentIndex(root_idx)
-            self._status_bar.set_status(f"已排除: {name}")
-        except Exception as e:
-            logger.error(f"排除失败: {e}")
-            QMessageBox.critical(self, "排除失败", str(e))
+        self._grid_view.clear()
+        self._breadcrumb.hide()
+        self._current_unit_id = None
+        self._accordion.reset()
+        self._tree_view.refresh_model()
+        root_idx = self._tree_view.model().index(0, 0)
+        if root_idx.isValid():
+            self._tree_view.setCurrentIndex(root_idx)
+        self._status_bar.set_status(result.message)
 
     @Slot(int)
     def _on_set_cover(self, unit_id: int) -> None:
@@ -932,41 +908,25 @@ class MainWindow(QMainWindow):
         self._apply_cover(self._current_unit_id, file_path)
 
     def _apply_cover(self, unit_id: int, cover_path: str) -> None:
-        """通用：将指定路径设为单元的封面。"""
-        try:
-            with DatabaseManager.session() as session:
-                # 先查旧封面路径，用于失效缓存
-                old = q.get_unit_by_id(session, unit_id)
-                old_cover = old.cover_path if old else None
-                q.set_unit_cover(session, unit_id, cover_path)
-
-            # 封面文件变更时，使旧封面的缩略图缓存失效
-            if old_cover and old_cover != cover_path:
-                from app.services.cleanup_service import CleanupService
-                from app.db.models import MediaFile
-                with DatabaseManager.session() as session:
-                    old_file = session.query(MediaFile).filter(
-                        MediaFile.path == old_cover,
-                        MediaFile.resource_unit_id == unit_id,
-                    ).first()
-                    if old_file:
-                        CleanupService.invalidate_thumbnail(old_file.id)
-
-            self._tree_view.refresh_model()
-            self._status_bar.set_status(f"封面已设置")
-        except Exception as e:
-            QMessageBox.critical(self, "设置封面失败", str(e))
+        """通用：将指定路径设为单元的封面（实现见 unit_service）。"""
+        from app.services import unit_service
+        result = unit_service.set_cover(unit_id, cover_path, config=self._config)
+        if not result.ok:
+            QMessageBox.critical(self, "设置封面失败", result.message)
+            return
+        self._tree_view.refresh_model()
+        self._status_bar.set_status(result.message)
 
     @Slot(int)
     def _on_clear_cover(self, unit_id: int) -> None:
-        """清除资源单元的手动封面。"""
-        try:
-            with DatabaseManager.session() as session:
-                q.clear_unit_cover(session, unit_id)
-            self._tree_view.refresh_model()
-            self._status_bar.set_status("封面已清除")
-        except Exception as e:
-            QMessageBox.critical(self, "清除封面失败", str(e))
+        """清除资源单元的手动封面（实现见 unit_service）。"""
+        from app.services import unit_service
+        result = unit_service.clear_cover(unit_id, config=self._config)
+        if not result.ok:
+            QMessageBox.critical(self, "清除封面失败", result.message)
+            return
+        self._tree_view.refresh_model()
+        self._status_bar.set_status(result.message)
 
     @Slot(int)
     def _on_remove_root(self, root_id: int) -> None:
@@ -1325,6 +1285,8 @@ class MainWindow(QMainWindow):
         from app.ui.dialogs.settings import SettingsDialog
         dlg = SettingsDialog(self._config, self)
         dlg.settings_saved.connect(self._on_settings_saved)
+        # 迁移成功必须立刻落盘（用户往往只点迁移结果提示框的确定就重启程序）
+        dlg.data_root_migrated.connect(self._on_settings_saved)
         dlg.exec()
 
     @Slot()
@@ -1463,13 +1425,27 @@ class MainWindow(QMainWindow):
         self._config = new_config
         # 持久化配置到磁盘（否则退出后密码等设置丢失）
         try:
-            new_config.to_file(Path("config.json"))
+            from app.utils import paths as app_paths
+            config_file = app_paths.default_config_path()
+            # profile 只在用户显式写过时才落盘：否则桌面端存一次设置就会把
+            # "profile: full" 固化进共享配置，便携版入口再也不会默认走轻量档。
+            new_config.to_file(
+                config_file,
+                omit=() if app_paths.read_explicit_profile(config_file)
+                else ("profile",))
         except Exception as e:
             logger.warning(f"配置保存到文件失败: {e}")
         # 同步更新 API 服务器的配置（否则 PIN 等设置不生效）
         from app.api.server import _app, _revoke_all_auth_tokens
         if _app is not None:
             _app.state.config = new_config
+        # 缩略图缓存目录可能被改到别的盘：清理服务用的是模块级全局变量，
+        # 不重新注入的话"删文件/失效缓存"仍会打向旧目录（留下孤儿缓存）。
+        try:
+            from app.services.cleanup_service import configure_thumbnail_cache_dir
+            configure_thumbnail_cache_dir(new_config.thumbnail_cache_dir)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"缩略图缓存目录注入失败: {e}")
         # 改密后旧令牌必须立即失效（API.md 承诺；否则旧会话在 PIN 变更后仍可访问）
         if pin_changed:
             _revoke_all_auth_tokens()

@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-代码修改后请运行 `python desktop/tests/test_flow.py` 验证确认无误。涉及 web 前端修改 (`web/` 下的文件) 还需额外运行 `PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py` 验证浏览器测试全通过。请使用中文进行回答，代码、文件名、API 名等保持英文。
+代码修改后请运行 `python desktop/tests/test_flow.py` 验证确认无误。涉及 web 前端修改 (`web/` 下的文件) 还需额外运行 `PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py` 验证浏览器测试全通过。涉及便携版（能力降级 / 数据根 / 盘符改库 / 无 GUI 入口 / 打包开关）还需运行 `python desktop/tests/test_lite.py`。请使用中文进行回答，代码、文件名、API 名等保持英文。
 
 ## 文档地图
 
@@ -13,6 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 改 HEIC 解码 / 转换 / 缩略图或哈希的解码路径 | `docs/heic.md` |
 | 改 `web/` 下任何文件（含 `index.html` / `sw.js`） | `docs/web-frontend.md` |
 | 改扫描 / 单元生命周期 / 缩略图缓存 / 删除语义 / 回收站 / OpenCV 日志 / Qt 信号 | `docs/pitfalls.md` |
+| 改便携版 / 能力开关 / 数据目录迁移 / 盘符变化 / 无 GUI 入口 / 打包 | `docs/portable-lite.md` |
 | 需要 HTTP 字段级契约 | `API.md` |
 | 想了解某次评审的背景（**不是规范**） | `docs/2026-*.md` |
 
@@ -23,12 +24,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 Media/                          # Git root — monorepo
 ├── desktop/                    # Windows 桌面应用 (PySide6)
-│   ├── main.py                 # Entry point
+│   ├── main.py                 # 桌面档入口（GUI + 内嵌 API）
+│   ├── main_web.py             # 便携版入口（只有 API + Web，不导入 Qt；功能与桌面档一致）
+│   ├── build.spec              # 桌面档 PyInstaller spec（含 Qt 与人脸模型）
+│   ├── build_web.spec          # 便携版 PyInstaller spec（onedir；体积由编译开关控制）
 │   ├── app/                    # Python source
-│   ├── tests/
+│   ├── tests/                  # test_flow.py / test_lite.py / test_web_playwright.py
 │   ├── models/                 # 人脸模型（OpenCV Zoo ONNX: YuNet + SFace）
 │   └── config.json             # 运行时配置
 ├── web/                        # Web 前端 SPA (Vue 3, 无构建; js-core→js-gesture→js-pages→js-app 顺序加载)
+│   └── vendor/                 # 本地 Vue/vue-router/MDI（离线可用，不再依赖 CDN）
 ├── docs/                       # 参考文档（按需读，见上方文档地图）
 ├── API.md                      # HTTP API 契约
 ├── README.md
@@ -65,28 +70,39 @@ conda activate media-manager
 # Run the desktop application
 cd desktop && python main.py
 
-# Run the test suite
-cd desktop && python tests/test_flow.py
+# Run the portable (web-only, no GUI) application
+cd desktop && python main_web.py                 # 功能与桌面档一致（能力探测决定开关）
+cd desktop && python main_web.py --data-root E:\MediaData
+
+# Run the test suites
+cd desktop && python tests/test_flow.py          # 桌面档后端/DB/API/UI 信号
+cd desktop && python tests/test_lite.py          # 便携版（能力降级/数据根/改库/迁移）
+PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py
 
 # Run web frontend tests (requires API server running)
 python desktop/tests/test_web.py
 
-# Run web frontend Playwright browser tests
-PYTHONIOENCODING=utf-8 python desktop/tests/test_web_playwright.py
-
 # Or run from repo root (main.py auto-switches CWD)
 python desktop/main.py
 python desktop/tests/test_flow.py
+python desktop/tests/test_lite.py
 python desktop/tests/test_web.py
 
 # Install dependencies
-cd desktop && pip install -r requirements.txt
+cd desktop && pip install -r requirements.txt        # 桌面完整档
+cd desktop && pip install -r requirements-web.txt    # 便携版（不含 PySide6）
+
+# Package the portable build (onedir, no PySide6)
+cd desktop && pyinstaller build_web.spec
+$env:MEDIA_BUILD_NO_CV2="1";    pyinstaller build_web.spec    # 再省 111MB：视频/人脸能力关闭
+$env:MEDIA_BUILD_WITH_FACE="1"; pyinstaller build_web.spec    # +38MB：人脸线索可用
 ```
 
 ## Architecture (desktop/)
 
 ```
-desktop/main.py          # Entry point: config → db init → API server → GUI → watcher
+desktop/main.py          # 桌面档入口: config → data_root → db init → API server → GUI
+desktop/main_web.py      # 便携版入口（无 GUI，功能与桌面档一致）: config → data_root → db → API
 desktop/config.py        # Frozen dataclass AppConfig, loaded from config.json
 desktop/app/
   core/                  # Business logic (no UI/db dependencies)
@@ -100,16 +116,16 @@ desktop/app/
     models.py            #   12 ORM tables: MediaLibraryRoot, ResourceUnit, MediaFile, FileTag, etc.
     queries.py           #   All persistence functions (session-injected, no raw SQL in business code)
     migrations.py        #   Schema bootstrap via Base.metadata.create_all
-  ui/
+  ui/                    # 只有桌面完整档会导入（便携版必须绕开，见 test_lite）
     main_window.py       #   QMainWindow: menu/toolbar/splitter/signals — the GUI signal hub
     left_panel/          #   FolderTreeView + context menu (merge/split/mark units)
     right_panel/         #   ThumbnailGridView + ThumbnailDelegate
-    dialogs/             #   Settings, DedupCompare, MessageCenter, etc.
+    dialogs/             #   Settings, DedupCompare, PathRepair, MessageCenter, etc.
     widgets/             #   StatusBar, ProgressPanel, ThumbLoader
     workers/             #   QThread workers: ScanWorker, HashWorker, DedupWorker
   api/
     server.py            #   FastAPI app on 0.0.0.0:19527, runs in daemon thread
-    routes/              #   /api/files, /api/units, /api/dedup, /api/messages
+    routes/              #   /api/files, /api/units, /api/library, /api/settings, /api/dedup, ...
     schemas.py           #   Pydantic models
   registry/
     base.py              #   Generic Registry[K, V] base class
@@ -120,17 +136,38 @@ desktop/app/
     index_service.py     #   索引编排（哈希/视频帧/人脸；HashWorker 与 API 共用）
     file_ops.py          #   删除语义（移至回收站 / 仅移出媒体库 / 永久删除），API 侧唯一实现
     merge_service.py     #   查重合并执行（移动/回收/收尾三阶段，先磁盘后库，幂等可重试）
+    scan_service.py      #   扫描落库编排（ScanWorker 与 /api/library/scan 共用唯一实现）
+    path_remap_service.py      # 盘符变化后的路径改库（dry-run / 冲突检测 / meta 同步）
+    data_relocation_service.py # 数据库备份、数据根迁移（copy/move）
   utils/
     constants.py         #   All enums (MediaType, UnitStatus, MatchType, etc.)
     media_types.py       #   Extension-to-type mapping, is_media_file() helper
+    paths.py             #   冻结态路径 + 数据根（data_root）解析，唯一入口
+    capabilities.py      #   能力探测（cv2/HEIC/RAW/人脸模型/Qt）+ 模型目录解析，功能开关唯一来源
+    net.py               #   本机局域网地址（状态栏与便携版入口共用）
 ```
+
+## 数据根（便携版）
+
+数据（数据库 / 缩略图 / Web PIN）可以放在移动硬盘上的一个目录里，程序目录不存数据：
+
+- `config.json` 的 `data_root` 记住位置；数据根里的 `.media_manager_data.json`
+  是身份标记（`data_root_id` = uuid），换盘符后据此认定"还是同一个数据盘"；
+- 解析优先级与全部分支见 `app/utils/paths.py::resolve_paths`；找不到"本该存在"的
+  数据根时**不静默新建库**，而是回退 + 上报 `missing_expected`（Web 顶部红色横幅）；
+- **监听地址默认 `0.0.0.0`**（手机/平板当终端必须这样）：`AppConfig.api_host` 的
+  dataclass 默认值是 `127.0.0.1`（回环，只有本机能访问），便携版入口把"默认值"当作
+  用户没表态，只有 `config.json` 显式写的才认 —— 否则首次运行会把该默认值落盘，
+  下一行解析又把它当用户选择，手机永远连不上；
+- 完整说明（打包、盘符改库、手机访问、排障）见 `docs/portable-lite.md`。
 
 ## Resource Unit Auto-Detection
 
 The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "resource unit" if it directly contains media files. If a parent also contains media files directly, both become units. Sub-folders without media files don't create separate units.
 
 **单元的产生与清理必须同源** — 产生判据是"目录直接含媒体文件"，清理就不能只看目录还在不在，
-否则会留下 "0 个 · 0 B" 的空壳单元。由 `scan_worker._save_to_database`（唯一扫描入口）双向校正：
+否则会留下 "0 个 · 0 B" 的空壳单元。由 `scan_service.save_scan_result`（唯一扫描落库入口，
+`ScanWorker` 与 `/api/library/scan` 都走它）双向校正：
 `queries.exclude_empty_units`（在删除失效文件记录**之后**）+ `queries.restore_units_produced_by_scan`
 （在单元统计写入**之前**）。顺序错了会误删或让回来的内容看不见。→ `docs/pitfalls.md`
 
@@ -176,6 +213,30 @@ The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "reso
   否则切走再回来进度/Tab/展开状态全丢。→ `docs/web-frontend.md`
 - **HEIC 解码注册只有一个入口** — `image_helpers.ensure_heif_support()`；
   不要在任何别处 `import pillow_heif`。→ `docs/heic.md`
+- **路径只能经 `app.utils.paths` 取** — 冻结（PyInstaller）后 `Path(__file__)` 上溯
+  得到的是 `_internal/` 而不是应用目录，`web/` 与 `config.json` 都会找不到；
+  数据根（data_root）解析同样只有 `paths.resolve_paths()` 一个入口。
+  → `docs/portable-lite.md`
+- **换盘符只能"改库"，不能重扫** — 重扫会新建一套同名单单元、旧记录变幽灵；
+  改库必须 dry-run + 单事务 + 幂等 + **同步改写缩略图 `.meta` 的 source_path**
+  （不改写则盘符一变缓存全部失效，弱机上等于全量重生成）。
+  → `docs/portable-lite.md`
+- **功能开关只能来自能力探测，不能来自运行档位** — 便携版与桌面档**同一套代码、
+  同一套功能**；某功能能不能用，读 `app/utils/capabilities.py`（包里有没有
+  cv2 / pillow-heif / rawpy / 人脸模型 / PySide6），并如实报进 `/api/features`。
+  体积/能力差异只由打包开关（`MEDIA_BUILD_NO_CV2` / `MEDIA_BUILD_WITH_FACE`）决定；
+  `profile` 只是"这是哪个包"的标签。**绝不允许**再出现"轻量档 → 不注册某路由 /
+  关掉某功能"这种分叉（会让 HTTP 契约、前端导航、测试、文档全部长出两套）。
+  → `docs/portable-lite.md`
+- **Web 端是"手机看片"终端，不追平桌面端** — 默认只做"手机上没有就会很不方便"的
+  功能（预览/流播放、浏览、搜索、星标、删除、扫描与盘符改库、消息、PIN，
+  以及平板没有桌面界面时必需的数据位置切换/接管）。单元合并/拆分/标记/封面/排除、
+  SMB 共享、重置数据库、实时监视**刻意不做**；**API 有端点 ≠ Web 要有入口**，
+  新功能默认只进桌面端。→ `docs/web-frontend.md`
+- **同一件事只写一份实现** — 单元写操作在 `app/services/unit_service.py`，
+  扫描在 `scan_service`、查重在 `dedup_service`、删除语义在 `file_ops`：
+  GUI 槽函数与 API 路由都调服务层，**不准**在 `main_window` 里再写一遍
+  （两份实现必然漂移，Web 想用只能照抄）。→ `docs/web-frontend.md`
 
 ## Database
 

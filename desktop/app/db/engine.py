@@ -167,3 +167,11 @@ class DatabaseManager:
     def is_initialized(cls) -> bool:
         """检查数据库是否已初始化。"""
         return cls._engine is not None
+
+    @classmethod
+    def current_db_path(cls) -> Optional[Path]:
+        """当前已初始化的数据库文件路径（未初始化返回 None）。
+
+        备份/迁移服务需要知道"现在用的是哪个库"，不应直接摸私有字段。
+        """
+        return cls._db_path

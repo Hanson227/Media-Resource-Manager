@@ -262,14 +262,212 @@ class MessageListResponse(BaseModel):
 # ============================================================
 
 class ScanRequest(BaseModel):
-    """扫描请求。"""
-    path: str = Field(..., description="要扫描的目录路径")
+    """扫描请求。
+
+    二选一：`path`（直接给服务端目录）或 `root_id`（扫已有媒体库根）。
+    """
+    path: Optional[str] = Field(default=None, description="要扫描的目录（服务端绝对路径）")
+    root_id: Optional[int] = Field(default=None, description="已有媒体库根 ID")
+    force_new_root: bool = Field(
+        default=False,
+        description="同尾旧根不可达时，是否明确按新库扫描（默认 False=返回 409 要求先修路径）")
 
 
-class ScanResponse(BaseModel):
-    """扫描响应。"""
-    status: str = "not_implemented"
-    message: str = "扫描功能尚未通过 API 对外开放"
+class ScanTaskResponse(BaseModel):
+    """长任务受理响应（配合 /api/library/scan/{task_id} 轮询）。"""
+    task_id: str
+    status: str = "queued"
+    path: str = ""
+    message: str = ""
+
+
+# ============================================================
+# 媒体库 / 卷 / 路径修复
+# ============================================================
+
+class VolumeItem(BaseModel):
+    """一个就绪的卷（盘符）。"""
+    path: str
+    label: str = ""
+    serial: str = ""
+    total: int = 0
+    free: int = 0
+    contains_media: bool = False
+
+
+class VolumeListResponse(BaseModel):
+    volumes: list[VolumeItem] = []
+
+
+class BrowseEntry(BaseModel):
+    """目录浏览项。"""
+    name: str
+    path: str
+    is_media_dir: bool = False
+    """该目录浅层是否直接含媒体文件（用来快速挑选媒体根目录）。"""
+    media_count: int = 0
+
+
+class BrowseResponse(BaseModel):
+    """目录浏览响应（服务端文件系统，供 Web 端选目录）。"""
+    path: str
+    parent: Optional[str] = None
+    entries: list[BrowseEntry] = []
+    is_media_dir: bool = False
+    media_count: int = 0
+    error: str = ""
+
+
+class RemapCandidateItem(BaseModel):
+    """一个可能的"旧路径新位置"候选。"""
+    path: str
+    kind: str = "same_relative"
+    media_count: int = 0
+    confidence: str = "high"
+
+
+class LibraryRootItem(BaseModel):
+    """媒体库根目录（含可达性与修复候选）。"""
+    id: int
+    path: str
+    enabled: bool = True
+    reachable: bool = True
+    volume_present: bool = True
+    reason: str = ""
+    reason_text: str = ""
+    unit_count: int = 0
+    candidates: list[RemapCandidateItem] = []
+
+
+class LibraryRootListResponse(BaseModel):
+    roots: list[LibraryRootItem] = []
+
+
+class AddRootRequest(BaseModel):
+    """添加媒体库根目录。"""
+    path: str = Field(..., description="服务端绝对路径")
+
+
+class AddRootResponse(BaseModel):
+    """添加结果；需要先修路径时返回 409 + remap 提示。"""
+    success: bool = True
+    root_id: Optional[int] = None
+    created: bool = False
+    needs_remap: bool = False
+    old_path: Optional[str] = None
+    candidates: list[RemapCandidateItem] = []
+    message: str = ""
+
+
+class RemapRequest(BaseModel):
+    """路径改库请求（dry_run=True 只预演）。"""
+    old_prefix: str = Field(..., description="旧路径前缀，如 D:\\Media")
+    new_prefix: str = Field(..., description="新路径前缀，如 E:\\Media")
+    dry_run: bool = Field(default=True, description="只预演不改动")
+    include_whitelist: bool = Field(default=False, description="是否一并改写白名单路径规则")
+
+
+class RemapPlanModel(BaseModel):
+    """改库预演结果。"""
+    old_prefix: str = ""
+    new_prefix: str = ""
+    counts: dict = {}
+    total_rows: int = 0
+    conflicts: list[dict] = []
+    thumbnail_meta_hits: int = 0
+    old_exists: bool = False
+    new_exists: bool = False
+    same: bool = False
+    blocking: bool = False
+    reason: str = ""
+
+
+class RemapResponse(BaseModel):
+    """改库响应（dry_run 时 updated 为空）。"""
+    success: bool = False
+    dry_run: bool = True
+    plan: Optional[RemapPlanModel] = None
+    updated: dict = {}
+    thumbnail_meta: int = 0
+    backup: Optional[str] = None
+    error: str = ""
+
+
+# ============================================================
+# 设置 / 数据目录
+# ============================================================
+
+class SettingsResponse(BaseModel):
+    """运行设置与数据位置。"""
+    profile: str = "full"
+    data_root: str = ""
+    data_root_status: str = ""
+    expected_data_root: str = ""
+    db_path: str = ""
+    thumbnail_cache_dir: str = ""
+    thumbnail_cache_files: int = 0
+    thumbnail_cache_bytes: int = 0
+    db_bytes: int = 0
+    config_path: str = ""
+    restart_required_hint: str = ""
+    api_host: str = ""
+    """当前监听地址：0.0.0.0 表示所有网卡（手机可访问），127.0.0.1 只有本机能访问。"""
+    api_port: int = 0
+    lan_urls: list[str] = []
+    """手机/平板可访问的完整 URL（第一个恒为本机地址）。"""
+    loopback_only: bool = False
+    """只监听回环地址时为 True —— 此时手机一定连不上，界面必须提示。"""
+    capabilities: dict = {}
+    """能力快照（哪个包、有哪些可选能力）。"""
+    capability_notes: list[str] = []
+    """缺失能力的可读说明（"未打包 OpenCV：视频缩略图不可用"）。"""
+
+
+class DataRootRequest(BaseModel):
+    """迁移/接管数据根。"""
+    path: str = Field(..., description="新的数据根目录（如 E:\\MediaData）")
+    mode: str = Field(default="copy", pattern="^(copy|move|adopt)$",
+                      description=("copy=保留源（默认）；move=校验通过后删除源；"
+                                   "adopt=接管该目录里已有的数据（不复制、不覆盖）。"
+                                   "目标目录已有数据根时只接受 adopt"))
+
+
+class DataRootProbeResponse(BaseModel):
+    """探测一个目录"是不是已有数据的数据根"（界面据此决定接管还是迁移）。"""
+    path: str = ""
+    exists: bool = False
+    is_dir: bool = False
+    writable: bool = False
+    has_marker: bool = False
+    data_root_id: str = ""
+    db_path: str = ""
+    db_exists: bool = False
+    db_bytes: int = 0
+    db_ok: bool = False
+    db_detail: str = ""
+    units: int = 0
+    files: int = 0
+    thumbnail_files: int = 0
+    is_data_root: bool = False
+    is_current: bool = False
+    """就是当前正在用的数据根（此时不需要迁移/接管）。"""
+
+
+class ThumbnailCacheRequest(BaseModel):
+    """迁移缩略图缓存目录（可热切换，无需重启）。"""
+    path: str = Field(..., description="新的缩略图缓存目录")
+    mode: str = Field(default="copy", pattern="^(copy|move)$",
+                      description="copy=保留源（默认）；move=拷贝成功后删除源文件")
+
+
+class DataMigrationResponse(BaseModel):
+    """数据目录迁移结果。"""
+    success: bool = False
+    target: str = ""
+    mode: str = "copy"
+    restart_required: bool = False
+    steps: dict = {}
+    message: str = ""
 
 
 # ============================================================

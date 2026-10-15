@@ -57,6 +57,11 @@ def get_root_by_path(session: Session, path: str) -> Optional[MediaLibraryRoot]:
     return session.query(MediaLibraryRoot).filter(MediaLibraryRoot.path == path).first()
 
 
+def get_root_by_id(session: Session, root_id: int) -> Optional[MediaLibraryRoot]:
+    """按 ID 查找媒体库根目录。"""
+    return session.query(MediaLibraryRoot).filter(MediaLibraryRoot.id == root_id).first()
+
+
 def remove_library_root(session: Session, root_id: int) -> None:
     """删除媒体库根目录及其关联的所有数据（级联删除）。"""
     root = session.query(MediaLibraryRoot).filter(MediaLibraryRoot.id == root_id).first()
@@ -1583,3 +1588,154 @@ def get_all_mapped_files(session: Session, tag_ids: Optional[list[int]] = None) 
             "id": tag_id, "name": name, "color": color,
         })
     return result
+
+
+# ============================================================
+# 路径改库（盘符/挂载点变化）
+# ============================================================
+#
+# 媒体库路径以**绝对路径**落库（media_library_roots / resource_units /
+# media_files 三张表的 path 都有 unique 约束），盘符一变整库就"看不见"。
+# 换盘后把这些路径按前缀整体改写，比重扫安全得多（重扫会新建一套根+单元，
+# 旧记录变成幽灵，还会把用户的星标/标签/封面全部孤立在旧 id 上）。
+#
+# 约定：
+#   - 比较一律走 LOWER()：Windows 路径大小写不敏感，`D:\Media` 与 `d:\media`
+#     是同一个目录，按大小写敏感比较会漏改一半；
+#   - 只改前缀能对上的行，不做任何模糊/相似度匹配（改错库比不改更糟）；
+#   - 本模块只负责"执行"，冲突检测与 dry-run 编排在 path_remap_service。
+
+_PATH_TABLES = (
+    # (展示名, 模型, 路径列名)
+    ("library_roots", MediaLibraryRoot, "path"),
+    ("units", ResourceUnit, "path"),
+    ("files", MediaFile, "path"),
+)
+
+
+def _path_prefix_filter(column, prefix: str):
+    """构造"路径以 prefix 开头"的条件（大小写不敏感）。"""
+    return func.lower(column).like(prefix.lower() + "%")
+
+
+def _path_prefix_column(model, column_name: str):
+    """按列名取 ORM 类属性（避免在调用处写死属性引用）。"""
+    return getattr(model, column_name)
+
+
+def count_paths_with_prefix(session: Session, prefix: str) -> dict:
+    """统计各表有多少行路径以 prefix 开头（dry-run / 预览用）。
+
+    返回:
+        {"library_roots": n, "units": n, "unit_covers": n, "files": n,
+         "whitelist": n}
+    """
+    counts = {}
+    for name, model, column_name in _PATH_TABLES:
+        column = _path_prefix_column(model, column_name)
+        counts[name] = int(
+            session.query(func.count()).select_from(model)
+            .filter(_path_prefix_filter(column, prefix)).scalar() or 0
+        )
+    # 单元封面也是绝对路径，但不是 unique 列，单独统计
+    counts["unit_covers"] = int(
+        session.query(func.count()).select_from(ResourceUnit)
+        .filter(ResourceUnit.cover_path.isnot(None),
+                _path_prefix_filter(ResourceUnit.cover_path, prefix)).scalar() or 0
+    )
+    # 白名单里的路径型规则（含正则/glob 的规则只做前缀改写，语义可能变化，
+    # 因此只在 dry-run 里报数量，由用户决定是否接受）
+    counts["whitelist"] = int(
+        session.query(func.count()).select_from(Whitelist)
+        .filter(_path_prefix_filter(Whitelist.pattern, prefix)).scalar() or 0
+    )
+    return counts
+
+
+def find_path_conflicts(session: Session, old_prefix: str,
+                        new_prefix: str, limit: int = 20) -> list[dict]:
+    """找出"改写后会撞上已有记录"的冲突（apply 前必须为空）。
+
+    冲突定义：某行路径以 new_prefix 开头、但**不**以 old_prefix 开头 ——
+    说明目标位置已存在另一份记录，改写会违反 path 的 unique 约束，
+    或让新旧两套记录指向同一个目录（后续扫描会互相覆盖）。
+    """
+    conflicts: list[dict] = []
+    for name, model, column_name in _PATH_TABLES:
+        column = _path_prefix_column(model, column_name)
+        rows = (
+            session.query(column)
+            .filter(_path_prefix_filter(column, new_prefix),
+                    ~_path_prefix_filter(column, old_prefix))
+            .limit(limit).all()
+        )
+        for (path,) in rows:
+            conflicts.append({"table": name, "path": path})
+    return conflicts
+
+
+def rebase_path_prefix(session: Session, old_prefix: str, new_prefix: str,
+                       *, include_whitelist: bool = False,
+                       include_cover: bool = True) -> dict:
+    """把以 old_prefix 开头的路径整体改写成 new_prefix（事务由调用方保证）。
+
+    参数:
+        session: 数据库会话（调用方负责提交/回滚）。
+        old_prefix: 旧前缀，如 `D:\\Media`。
+        new_prefix: 新前缀，如 `E:\\Media`。
+        include_whitelist: 是否一并改写白名单规则里的路径前缀。
+        include_cover: 是否一并改写资源单元封面路径。
+
+    返回:
+        各表实际改写行数（与 count_paths_with_prefix 口径一致）。
+
+    说明:
+        幂等：old_prefix 已经不存在时全部返回 0，重复执行不会二次改写。
+        前缀相同（含仅大小写不同）时视为无需改动，直接返回全 0 ——
+        否则 LOWER() 比较会把"同一个路径"当成命中，产生无意义的 UPDATE。
+    """
+    if old_prefix == new_prefix:
+        return {"library_roots": 0, "units": 0, "unit_covers": 0,
+                "files": 0, "whitelist": 0}
+
+    # 改写表达式：SUBSTR(path, len(old)+1) 拼到 new 后面，保留原后缀大小写
+    def _replacement(column):
+        return new_prefix + func.substr(column, len(old_prefix) + 1)
+
+    updated: dict[str, int] = {}
+    for name, model, column_name in _PATH_TABLES:
+        column = _path_prefix_column(model, column_name)
+        updated[name] = int(
+            session.query(model)
+            .filter(_path_prefix_filter(column, old_prefix))
+            .update({column: _replacement(column)}, synchronize_session=False)
+        )
+
+    if include_cover:
+        updated["unit_covers"] = int(
+            session.query(ResourceUnit)
+            .filter(ResourceUnit.cover_path.isnot(None),
+                    _path_prefix_filter(ResourceUnit.cover_path, old_prefix))
+            .update({ResourceUnit.cover_path: _replacement(ResourceUnit.cover_path)},
+                    synchronize_session=False)
+        )
+    else:
+        updated["unit_covers"] = 0
+
+    if include_whitelist:
+        updated["whitelist"] = int(
+            session.query(Whitelist)
+            .filter(_path_prefix_filter(Whitelist.pattern, old_prefix))
+            .update({Whitelist.pattern: _replacement(Whitelist.pattern)},
+                    synchronize_session=False)
+        )
+    else:
+        updated["whitelist"] = 0
+
+    session.flush()
+    logger.info(
+        "路径改库: %s → %s  " % (old_prefix, new_prefix)
+        + ", ".join(f"{k}={v}" for k, v in updated.items())
+    )
+    return updated
+

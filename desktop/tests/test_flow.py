@@ -144,9 +144,14 @@ def test_preflight():
     py_files: list[Path] = []
 
     for root, dirs, files in os.walk(project_root):
+        # 跳过打包产物（dist*/build*）：PyInstaller 会把 vendored 的第三方包
+        # 原样放进 dist/<name>/_internal/，这些 .py 不是本仓库源码，从源码树
+        # 里 import 必然报错（实测：先打包再跑测试 → "recursion is detected
+        # during loading of cv2" 之类的假失败）。
         dirs[:] = [d for d in dirs
                    if d not in ('__pycache__', 'data', '.thumbnails',
-                                'tests', 'models', 'resources', '.git')]
+                                'tests', 'models', 'resources', '.git')
+                   and not d.startswith(('dist', 'build'))]
         for f in files:
             if f.endswith('.py'):
                 py_files.append(Path(root) / f)
@@ -3520,6 +3525,325 @@ def test_context_menu_lambda_safety():
     refresh_handler = lambda: True
     result = refresh_handler()
     check("刷新 lambda: 无参数不受影响", result is True)
+
+
+def test_data_relocation_worker_signal():
+    """迁移工作线程的契约：**异常也要走信号**回来，绝不静默。
+
+    真实事故：迁移同步跑在主线程上，几千个缩略图复制期间窗口假死、没有任何提示，
+    用户以为程序坏了就关掉 → 留下半份数据。所以迁移必须在后台线程，且无论成功、
+    业务失败还是抛异常，都必须通过 `finished_with` 把结果发回主线程。
+    """
+    section("测试 3.5: 数据迁移工作线程")
+    import shutil
+    import tempfile
+    from app.ui.workers.data_relocation_worker import DataRelocationWorker
+    from app.services import data_relocation_service as relocation
+
+    tmp = Path(tempfile.mkdtemp(prefix="flow_mig_worker_"))
+    main_db = Path(__file__).parent.parent / "data" / "test_flow.db"   # 共用库，结束必须还原
+    try:
+        src_root = tmp / "src"
+        db_path = src_root / "data" / "media_manager.db"
+        thumb_dir = src_root / "data" / ".thumbnails"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        DatabaseManager.dispose()
+        from app.db.migrations import init_db, migrate_db
+        init_db(db_path)
+        migrate_db()
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        (thumb_dir / "1_thumb.jpg").write_bytes(b"jpeg")
+        cfg = AppConfig().with_updates(data_root=src_root, db_path=db_path,
+                                       thumbnail_cache_dir=thumb_dir)
+
+        # 直接调用 run()（不起线程）：验证信号契约与结果字典
+        target = tmp / "drive" / "MediaData"
+        target.mkdir(parents=True)
+        worker = DataRelocationWorker(cfg, target, mode="copy")
+        got: list = []
+        worker.finished_with.connect(lambda r: got.append(r))
+        worker.run()
+        check("线程通过信号发回结果", len(got) == 1)
+        check("结果含 ok 与 message",
+              bool(got) and got[0].get("ok") is True and "复制" in got[0]["message"])
+        # QThread 实例也要显式收尾（留到解释器退出会崩）
+        worker.wait(2000)
+        worker.deleteLater()
+
+        # 服务层抛异常时，线程必须把它转成 ok=False 的结果（不炸掉事件循环）
+        target2 = tmp / "drive2" / "MediaData"
+        target2.mkdir(parents=True)
+        original = relocation.copy_tree
+        relocation.copy_tree = lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))
+        try:
+            worker2 = DataRelocationWorker(cfg, target2, mode="copy")
+            got2: list = []
+            worker2.finished_with.connect(lambda r: got2.append(r))
+            worker2.run()
+        finally:
+            relocation.copy_tree = original
+        check("异常也走信号返回（不抛出线程）",
+              len(got2) == 1 and got2[0]["ok"] is False)
+        check("异常信息可读", "中断" in got2[0]["message"] or "boom" in got2[0]["message"])
+        worker2.wait(2000)
+        worker2.deleteLater()
+    finally:
+        # 本用例动过全局单例（切到临时库），必须还原，否则后续用例全部
+        # 报"数据库未初始化"（第一次写就踩到了）
+        DatabaseManager.initialize(main_db)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_settings_migration_persists_immediately():
+    """迁移成功后必须**立刻**给出新配置（回归"迁移完成但重启还指向旧位置"）。
+
+    事故现场：用户在设置里点「迁移...」，复制成功并看到"迁移完成"，随后只点了那个
+    提示框的确定就重启了程序 —— 而当时的实现要等用户再点一次设置对话框的「确定」
+    才会写 config.json，于是重启后数据根仍是旧的。
+    """
+    section("测试 3.6: 迁移后立即持久化")
+    import shutil
+    import tempfile
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from app.ui.dialogs.settings import SettingsDialog
+
+    QApplication.instance() or QApplication([])
+    tmp = Path(tempfile.mkdtemp(prefix="flow_mig_dialog_"))
+    try:
+        cfg = AppConfig().with_updates(
+            db_path=tmp / "app" / "data" / "media_manager.db",
+            thumbnail_cache_dir=tmp / "app" / "data" / ".thumbnails")
+        dlg = SettingsDialog(cfg)
+
+        # ① 用户点了「保存」：待迁移结果必须体现在发出的新配置里
+        target = tmp / "drive" / "MediaData"
+        dlg._pending_data_root = target
+        dlg._pending_db_path = target / "data" / "media_manager.db"
+        dlg._pending_thumb_dir = target / "data" / ".thumbnails"
+        saved: list = []
+        dlg.settings_saved.connect(lambda c: saved.append(c))
+        dlg._on_save()
+        check("保存时带上迁移后的数据根",
+              bool(saved) and Path(saved[0].data_root) == target)
+        check("保存时带上迁移后的数据库路径",
+              bool(saved) and Path(saved[0].db_path) == dlg._pending_db_path)
+
+        # ② 迁移完成回调：即使不点「保存」也要立刻发出新配置（本 bug 的修复点）
+        dlg2 = SettingsDialog(cfg)
+        migrated: list = []
+        dlg2.data_root_migrated.connect(lambda c: migrated.append(c))
+        # 消息框是模态的：测试里替掉，避免阻塞
+        original_info = QMessageBox.information
+        QMessageBox.information = staticmethod(lambda *a, **k: None)
+        try:
+            dlg2._on_migrate_finished({
+                "ok": True, "target_root": str(target),
+                "db_path": str(target / "data" / "media_manager.db"),
+                "thumbnail_cache_dir": str(target / "data" / ".thumbnails"),
+                "steps": {"database": {"message": "完整（42 个单元 / 640 个文件）"},
+                          "thumbnails": {"copied": 2916}},
+                "message": "ok",
+            }, None)
+        finally:
+            QMessageBox.information = original_info
+        check("迁移完成立刻发出 data_root_migrated", len(migrated) == 1)
+        check("发出的配置指向新数据根",
+              bool(migrated) and Path(migrated[0].data_root) == target)
+        check("发出的配置带上新数据库路径",
+              bool(migrated)
+              and Path(migrated[0].db_path) == target / "data" / "media_manager.db")
+
+        # ③ 失败时不发信号、不改配置
+        dlg3 = SettingsDialog(cfg)
+        failed: list = []
+        dlg3.data_root_migrated.connect(lambda c: failed.append(c))
+        original_crit = QMessageBox.critical
+        QMessageBox.critical = staticmethod(lambda *a, **k: None)
+        try:
+            dlg3._on_migrate_finished({"ok": False, "message": "磁盘满了",
+                                       "steps": {}}, None)
+        finally:
+            QMessageBox.critical = original_crit
+        check("迁移失败不发持久化信号", not failed)
+
+        # 显式清理：Qt 控件若留到解释器退出时才销毁，会在关停阶段崩溃
+        # （实测 exit code 0xC0000409）。这里按仓库里其它对话框用例的惯例收尾。
+        for widget in (dlg, dlg2, dlg3):
+            widget.close()
+            widget.deleteLater()
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_relocation_progress_callback():
+    """迁移必须报告阶段进度（缩略图几千个文件，否则界面就是个黑盒）。"""
+    section("测试 3.7: 迁移进度回调")
+    import shutil
+    import tempfile
+    from app.services import data_relocation_service as relocation
+
+    tmp = Path(tempfile.mkdtemp(prefix="flow_mig_progress_"))
+    try:
+        src_root = tmp / "src"
+        db_path = src_root / "data" / "media_manager.db"
+        thumb_dir = src_root / "data" / ".thumbnails"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        DatabaseManager.dispose()
+        from app.db.migrations import init_db, migrate_db
+        init_db(db_path)
+        migrate_db()
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(7):
+            (thumb_dir / f"{i}_thumb.jpg").write_bytes(b"jpeg")
+        cfg = AppConfig().with_updates(data_root=src_root, db_path=db_path,
+                                       thumbnail_cache_dir=thumb_dir)
+        target = tmp / "drive" / "MediaData"
+        target.mkdir(parents=True)
+
+        events: list = []
+        result = relocation.relocate_data_root(
+            cfg, target, mode="copy",
+            progress=lambda phase, done, total: events.append((phase, done, total)))
+        check("迁移成功", result["ok"] is True)
+        phases = [e[0] for e in events]
+        check("报告了数据库阶段", "database" in phases)
+        check("报告了缩略图阶段", "thumbnails" in phases)
+        thumb_events = [e for e in events if e[0] == "thumbnails"]
+        check("缩略图进度总数正确（7）",
+              thumb_events and thumb_events[0][2] == 7)
+        check("缩略图进度单调递增到 100%",
+              thumb_events and thumb_events[-1][1] == thumb_events[-1][2])
+        check("回调异常不会拖垮迁移",
+              relocation.relocate_data_root(
+                  cfg, target, mode="copy",
+                  progress=lambda *a: (_ for _ in ()).throw(RuntimeError("cb")))["ok"] is True)
+    finally:
+        DatabaseManager.initialize(Path(__file__).parent.parent / "data" / "test_flow.db")
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_unit_service():
+    """单元写操作服务（GUI 槽函数与 API 共用的唯一实现）。
+
+    为什么单独测这一层：这些操作原先内联在 `main_window` 的槽函数里，靠 GUI 手点
+    才能验证；抽到服务层后必须能脱离界面直接验证 —— 否则重构等于没验证
+    （实测：重构后 963 个用例全绿，却一个都没覆盖到这些槽函数）。
+    """
+    section("测试 3.8: 单元操作服务")
+    import shutil
+    import tempfile
+    from datetime import datetime
+    from app.db.models import MediaFile, ResourceUnit
+    from app.services import unit_service
+
+    tmp = Path(tempfile.mkdtemp(prefix="flow_unit_svc_"))
+    tmp_db = tmp / "data" / "media_manager.db"
+    main_db = Path(__file__).parent.parent / "data" / "test_flow.db"
+    try:
+        tmp_db.parent.mkdir(parents=True, exist_ok=True)
+        DatabaseManager.dispose()
+        init_db(tmp_db)
+        migrate_db()
+
+        # 造：1 根 + 1 父单元 + 2 子单元，各 2 个文件
+        with DatabaseManager.session() as s:
+            root = q.add_library_root(s, str(tmp / "lib"))
+            ids = {}
+            for tag, when, size in (("parent", datetime(2026, 1, 1), 10),
+                                    ("c1", datetime(2026, 3, 1), 20),
+                                    ("c2", datetime(2026, 2, 1), 30)):
+                unit = ResourceUnit(name=tag, path=str(tmp / "lib" / tag),
+                                    library_root_id=root.id, status="active",
+                                    content_modified_at=when)
+                s.add(unit)
+                s.flush()
+                ids[tag] = unit.id
+                for i in range(2):
+                    s.add(MediaFile(resource_unit_id=unit.id,
+                                    path=str(tmp / "lib" / tag / f"f{i}.jpg"),
+                                    filename=f"f{i}.jpg", extension=".jpg",
+                                    media_type="image", size_bytes=size))
+        parent_id, c1, c2 = ids["parent"], ids["c1"], ids["c2"]
+
+        # ① 合并
+        result = unit_service.merge_units(parent_id, [c1, c2], config=AppConfig())
+        check("合并成功", result.ok is True)
+        with DatabaseManager.session() as s:
+            parent = q.get_unit_by_id(s, parent_id)
+            children = q.get_child_units(s, parent_id)
+            check("子单元挂到父单元下", len(children) == 2)
+            check("父单元重算文件数（2+2+2=6）", parent.file_count == 6)
+            check("父单元重算总大小（10*2+20*2+30*2=120）", parent.total_size == 120)
+            check("内容日期取最新（2026-03-01）",
+                  parent.content_modified_at == datetime(2026, 3, 1))
+
+        # ② 拆分
+        result = unit_service.split_unit(parent_id, config=AppConfig())
+        check("拆分成功", result.ok is True)
+        with DatabaseManager.session() as s:
+            check("拆分后没有子单元", len(q.get_child_units(s, parent_id)) == 0)
+
+        # ②b 合并参数不合法 → ok=False（不外抛）
+        check("合并缺子单元 → 失败但不抛异常",
+              unit_service.merge_units(parent_id, [], config=AppConfig()).ok is False)
+        check("合并父单元不存在 → 失败",
+              unit_service.merge_units(999999, [c1], config=AppConfig()).ok is False)
+
+        # ③ 手动标记（真实目录 + 媒体文件）
+        folder = tmp / "manual_unit"
+        folder.mkdir(parents=True)
+        (folder / "a.jpg").write_bytes(b"x")
+        (folder / "b.mp4").write_bytes(b"x")
+        result = unit_service.mark_manual_unit(str(folder), config=AppConfig())
+        check("标记为资源单元成功", result.ok is True and len(result.unit_ids) == 1)
+        marked_id = result.unit_ids[0]
+        with DatabaseManager.session() as s:
+            marked = q.get_unit_by_id(s, marked_id)
+            check("标记后 is_manual=True", marked.is_manual is True)
+            check("标记顺手加星标", marked.is_starred is True)
+        check("标记不存在的目录 → 失败但不抛异常",
+              unit_service.mark_manual_unit(str(tmp / "nope"),
+                                            config=AppConfig()).ok is False)
+        result = unit_service.unmark_manual_unit(marked_id, config=AppConfig())
+        check("取消标记成功", result.ok is True)
+        with DatabaseManager.session() as s:
+            marked = q.get_unit_by_id(s, marked_id)
+            check("取消标记后 is_manual=False", marked.is_manual is False)
+
+        # ④ 排除 / 恢复（起因必须是 user，否则会被扫描抹掉）
+        result = unit_service.exclude_unit(marked_id, config=AppConfig())
+        check("排除成功", result.ok is True)
+        with DatabaseManager.session() as s:
+            marked = q.get_unit_by_id(s, marked_id)
+            check("状态变为 excluded", marked.status == "excluded")
+            check("排除起因记为 user", marked.exclude_reason == "user")
+        check("排除不存在的单元 → 失败但不抛异常",
+              unit_service.exclude_unit(999999, config=AppConfig()).ok is False)
+        result = unit_service.restore_excluded_unit(marked_id, config=AppConfig())
+        check("恢复成功", result.ok is True)
+        with DatabaseManager.session() as s:
+            check("恢复后状态为 active",
+                  q.get_unit_by_id(s, marked_id).status == "active")
+
+        # ⑤ 封面
+        result = unit_service.set_cover(parent_id, str(folder / "a.jpg"),
+                                        config=AppConfig())
+        check("设置封面成功", result.ok is True)
+        with DatabaseManager.session() as s:
+            check("封面路径已写入",
+                  q.get_unit_by_id(s, parent_id).cover_path.endswith("a.jpg"))
+        result = unit_service.clear_cover(parent_id, config=AppConfig())
+        check("清除封面成功", result.ok is True)
+        with DatabaseManager.session() as s:
+            check("封面已清空", not q.get_unit_by_id(s, parent_id).cover_path)
+        check("空封面路径 → 失败",
+              unit_service.set_cover(parent_id, "", config=AppConfig()).ok is False)
+    finally:
+        DatabaseManager.initialize(main_db)   # 还原共用库，否则后续用例全报未初始化
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_ui_signal_integration():
@@ -7027,6 +7351,60 @@ def test_unit_metadata_queries():
 # 新增 API 端点测试 —— 标签、消息、单元详情、文件详情
 # ============================================================
 
+def test_api_features_and_library_endpoints():
+    """测试 33: 完整档的能力开关与媒体库/设置端点。
+
+    便携版（轻量档）另有 test_lite.py 覆盖；这里守的是**完整档不能被改坏**：
+    查重必须仍然注册、features 必须如实上报，媒体库/设置端点必须可用。
+    """
+    section("测试 33: 能力开关与媒体库端点（完整档）")
+    from app.api.server import create_app
+    from fastapi.testclient import TestClient
+
+    config = AppConfig()   # 默认 profile=full
+    check("默认档位是完整档", config.profile == "full")
+    client = TestClient(create_app(config, {"data_root_status": "none"}))
+
+    features = client.get("/api/features").json()
+    check("T33: features.profile=full", features["profile"] == "full")
+    check("T33: 完整档 dedup=true", features["dedup"] is True)
+    check("T33: 完整档 hash_index=true", features["hash_index"] is True)
+    check("T33: scan=true", features["scan"] is True)
+    check("T33: 查重路由已注册", client.get("/api/dedup/results").status_code == 200)
+    check("T33: 健康检查含档位字段",
+          client.get("/api/health").json()["profile"] == "full")
+    # 功能开关必须来自能力探测（不是运行档位）：键名是前端契约，缺失即前端失能
+    check("T33: 透出能力快照（含全部键）",
+          {"image", "cv2", "heic", "raw", "face_models", "qt"}
+          <= set(features.get("capabilities") or {}))
+    check("T33: 源码态 Qt 可用（desktop=true）", features["desktop"] is True)
+    check("T33: 源码态 cv2 可用（video=true）", features["video"] is True)
+    check("T33: 源码态能拿到人脸模型（face_models=true）",
+          features["capabilities"]["face_models"] is True)
+    check("T33: 能力说明为列表", isinstance(features.get("capability_notes"), list))
+    check("T33: 设置端点同样透出能力",
+          client.get("/api/settings").json()["capabilities"]["image"] is True)
+    check("T33: 视频能力单独透出（dedup_video）", features["dedup_video"] is True)
+
+    check("T33: GET /api/library/volumes 200",
+          client.get("/api/library/volumes").status_code == 200)
+    check("T33: GET /api/library/roots 200",
+          client.get("/api/library/roots").status_code == 200)
+    check("T33: GET /api/settings 200",
+          client.get("/api/settings").status_code == 200)
+    check("T33: 目录浏览拒绝相对路径",
+          client.get("/api/library/browse",
+                     params={"path": "relative"}).status_code == 400)
+    # REMAP 预演（不存在的旧前缀 → 0 行、不阻塞、不写库）
+    plan = client.post("/api/library/remap", json={
+        "old_prefix": str(Path(tempfile.gettempdir()) / "no_such_prefix_xyz"),
+        "new_prefix": str(Path(tempfile.gettempdir()) / "no_such_prefix_abc"),
+        "dry_run": True,
+    }).json()
+    check("T33: remap dry-run 返回计划", plan.get("plan") is not None
+          and plan["plan"]["total_rows"] == 0)
+
+
 def test_api_tags_endpoints():
     """测试 29: 标签 API 端点全覆盖（list/create/delete/get-by-file/set-by-file/mapped-files）。"""
     section("测试 29: 标签 API 端点")
@@ -7391,6 +7769,14 @@ def main():
     config = AppConfig()
     _BASE = Path(__file__).parent.parent
     db_path = _BASE / "data" / "test_flow.db"
+    # 上一次跑崩了会留下半成品测试库（main() 收尾的 unlink 失败会被吞掉），
+    # 带着旧数据重跑会出现 "UNIQUE constraint failed" 或计数翻倍之类的**假失败**。
+    # 测试库是专用文件，开跑前一律清空（含 WAL/SHM）。
+    for _suffix in ("", "-wal", "-shm"):
+        try:
+            Path(str(db_path) + _suffix).unlink(missing_ok=True)
+        except OSError:
+            pass
     init_db(db_path)
 
     # 创建测试媒体库
@@ -7466,6 +7852,10 @@ def main():
         test_dedup_results_pagination()
         test_tree_model()
         test_context_menu_lambda_safety()
+        test_data_relocation_worker_signal()
+        test_settings_migration_persists_immediately()
+        test_relocation_progress_callback()
+        test_unit_service()
         test_ui_signal_integration()
         test_status_bar_cancel_wiring()
         test_status_bar_cancel_button_not_squashed()
@@ -7520,6 +7910,7 @@ def main():
         test_api_messages_endpoints()
         test_api_detail_endpoints()
         test_convert_batch()
+        test_api_features_and_library_endpoints()
 
     finally:
         # 清理数据库连接

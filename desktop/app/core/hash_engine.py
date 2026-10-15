@@ -29,6 +29,7 @@ from app.utils.constants import (
 )
 from app.utils.image_helpers import imread_unicode, read_image_bgr, VideoCapture_unicode
 from app.utils.media_types import is_perceptual_image_extension, is_video_extension
+from app.utils import capabilities
 from app.registry.hash_registry import HashAlgorithmRegistry, create_default_registry
 from app.core.exceptions import HashComputationError, FaceDetectionError
 
@@ -177,14 +178,19 @@ class HashEngine:
             dhash_size: dHash 哈希尺寸。
             video_frame_interval: 视频帧提取间隔（秒）。
             face_detection_enabled: 是否启用人脸检测。
-            model_dir: 人脸模型目录（Caffe SSD + OpenFace），默认相对当前目录的 models/。
+            model_dir: 人脸模型目录（YuNet + SFace），默认由能力探测解析
+                （源码态 `models/`、打包后 `_internal/models`）。
             face_confidence: 人脸检测置信度阈值。
         """
         self._algorithms = algorithms
         self._registry = registry or create_default_registry(phash_size, dhash_size)
         self._video_frame_interval = video_frame_interval
         self._face_enabled = face_detection_enabled
-        self._model_dir = Path(model_dir) if model_dir else Path("models")
+        # 打包后模型在 `_internal/models`，而配置里的相对 `models` 是相对 CWD —— 直接
+        # 按相对路径找必然失败、人脸会在打包版里**静默失效**。统一经能力探测解析出
+        # 真正含模型文件的目录（源码态 / onedir / 自定义目录都覆盖），解析不到再退回原值。
+        self._model_dir = (capabilities.resolve_face_model_dir(model_dir)
+                           or (Path(model_dir) if model_dir else Path("models")))
         self._face_confidence = face_confidence
         self._cancelled = False
 

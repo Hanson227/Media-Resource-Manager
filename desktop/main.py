@@ -84,10 +84,36 @@ else:
     logger.warning("pillow-heif 未安装，HEIC/HEIF 文件无法识别")
 
 
+def _parse_data_root_arg(argv) -> "Path | None":
+    """从命令行/环境变量取数据根覆盖值（便携部署时用来显式指定）。
+
+    只认 `--data-root <路径>` 与 `--data-root=<路径>`；其余参数原样留给 Qt
+    （QApplication 会处理自己的参数）。优先级：命令行 > MEDIA_DATA_ROOT 环境变量。
+    """
+    override = None
+    for index, arg in enumerate(list(argv)):
+        if arg == "--data-root" and index + 1 < len(argv):
+            override = argv[index + 1]
+            del argv[index:index + 2]
+            break
+        if arg.startswith("--data-root="):
+            override = arg.split("=", 1)[1]
+            del argv[index]
+            break
+    if not override:
+        override = os.environ.get("MEDIA_DATA_ROOT") or None
+    return Path(override) if override else None
+
+
 def main() -> None:
     """程序主入口。"""
-    # 切换到脚本所在目录，确保相对路径（config.json, data/ 等）正确
-    os.chdir(Path(__file__).parent)
+    from app.utils import paths as app_paths
+
+    # 切换到应用目录，确保相对路径（config.json, data/ 等）正确；
+    # 打包态必须是 exe 所在目录（__file__ 在冻结包里不可靠）。
+    os.chdir(app_paths.app_dir())
+
+    data_root_override = _parse_data_root_arg(sys.argv)
 
     logger.info("=" * 50)
     logger.info("影视资源管理器 v0.1.0 启动中...")
@@ -96,7 +122,7 @@ def main() -> None:
     # ============================================================
     # 1. 加载配置
     # ============================================================
-    config_path = Path("config.json")
+    config_path = app_paths.default_config_path()
     if config_path.exists():
         try:
             config = AppConfig.from_file(config_path)
@@ -112,6 +138,38 @@ def main() -> None:
             logger.info(f"已保存默认配置到: {config_path}")
         except Exception as e:
             logger.warning(f"无法保存配置文件: {e}")
+
+    # ============================================================
+    # 1.1 数据根解析（数据库 / 缩略图 / PIN 可能放在移动盘上）
+    # ============================================================
+    original_root = config.data_root
+    original_id = config.data_root_id
+    base_config = config   # 落盘基线：保留用户写的相对路径，不写解析出的绝对路径
+
+    resolved = app_paths.resolve_paths(config, explicit_data_root=data_root_override)
+    for message in resolved.warnings:
+        logger.warning(message)
+    config = app_paths.apply_resolved_paths(config, resolved)
+    logger.info(f"数据根: {resolved.data_root or '（未启用，使用应用目录）'}"
+                f"  来源={resolved.data_root_source}")
+    if not resolved.ok:
+        logger.error(
+            f"未找到数据盘上的数据根（期望: {resolved.expected_data_root}）；"
+            "已临时使用应用目录下的空库，插入数据盘后重启即可恢复")
+    # 记住本次发现的数据根/身份（换盘符后才能认出"还是同一个数据盘"）。
+    # 只更新数据根字段：db_path / thumbnail_cache_dir 保持相对形式，
+    # 否则 config.json 会被钉死在当前盘符上（换机器/换盘即失效）。
+    if (config.data_root != original_root) or (config.data_root_id != original_id):
+        try:
+            base_config.with_updates(
+                data_root=config.data_root,
+                data_root_id=config.data_root_id).to_file(
+                    config_path,
+                    omit=() if app_paths.read_explicit_profile(config_path)
+                    else ("profile",))
+            logger.info(f"已记住数据根: {config.data_root}")
+        except OSError as e:
+            logger.warning(f"配置写入失败: {e}")
 
     # ============================================================
     # 2. 初始化数据库
@@ -143,7 +201,12 @@ def main() -> None:
     api_server: APIServer | None = None
     if config.api_enabled:
         try:
-            api_server = APIServer(config)
+            api_server = APIServer(config, runtime={
+                "data_root": str(resolved.data_root or ""),
+                "data_root_status": resolved.data_root_source,
+                "expected_data_root": str(resolved.expected_data_root or ""),
+                "config_path": str(config_path),
+            })
             api_server.start()
         except Exception as e:
             logger.error(f"API 服务器启动失败: {e}")

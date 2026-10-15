@@ -937,6 +937,260 @@ POST /api/heic/cancel
 
 ---
 
+### 3.9 媒体库与数据目录（便携版）
+
+便携版没有桌面 GUI，"添加媒体文件夹 / 扫描 / 修盘符"全部由这些端点承担。
+客户端应先取 `/api/features` 决定显示哪些入口。
+
+#### 能力开关（客户端启动时拉一次）
+
+```
+GET /api/features
+```
+
+```json
+{
+  "app": "media-manager",
+  "version": "0.1.0",
+  "profile": "lite",
+  "dedup": true,
+  "dedup_video": true,
+  "hash_index": true,
+  "face": false,
+  "video": true,
+  "heic": true,
+  "raw": true,
+  "scan": true,
+  "desktop": false,
+  "capabilities": {"image": true, "cv2": true, "heic": true,
+                   "raw": true, "face_models": false, "qt": false},
+  "capability_notes": ["未打包人脸模型：人脸线索不可用（需要时打包设 MEDIA_BUILD_WITH_FACE=1）"],
+  "data_root": "E:\\MediaData",
+  "data_root_status": "configured",
+  "expected_data_root": "",
+  "db_path": "E:\\MediaData\\data\\media_manager.db",
+  "thumbnail_cache_dir": "E:\\MediaData\\data\\.thumbnails"
+}
+```
+
+- **这些开关全部来自运行时能力探测**（`app/utils/capabilities.py`：包里有没有
+  Pillow / cv2 / pillow-heif / rawpy / 人脸模型 / PySide6），**不是运行档位**：
+  便携版与桌面档同一套代码、同一套功能，`profile` 只是"这是哪个包"的标签。
+  `/api/dedup/*` **在任何打包组合下都已注册**（文件级查重只需要 Pillow）；
+  只有 `dedup`/`video`/`face` 等**能力**会随编译开关（`MEDIA_BUILD_NO_CV2` /
+  `MEDIA_BUILD_WITH_FACE`）变化；
+- 客户端隐藏入口的规则：`dedup=false` 隐藏查重、`video=false` 不请求视频缩略图、
+  `face=false` 隐藏人脸线索、`heic=false` 隐藏 HEIC 工具、`desktop=false` 提示无桌面界面；
+  `capability_notes` 是可直接展示给用户的降级原因清单；
+- `data_root_status` 取值：`explicit` / `app_dir` / `configured` / `discovered` /
+  `missing_expected` / `none`。**`missing_expected` 必须在界面上醒目提示**
+  （数据盘没插或盘符变了，当前显示的很可能是空库）；
+- `desktop` 表示本机是否具备桌面 GUI 运行条件（便携版包为 `false`）。
+
+`GET /api/health` 返回 `{"status": "ok", ...同上字段}`，可作为免鉴权的探活端点。
+`GET /api/settings` 也带 `capabilities` / `capability_notes`，另含 `api_host` /
+`api_port` / `lan_urls` / `loopback_only`（手机访问地址，见 §3.10）。
+
+#### 卷（盘符）列表
+
+```
+GET /api/library/volumes
+```
+
+```json
+{"volumes": [
+  {"path": "E:\\", "label": "Media", "serial": "1A2B3C4D",
+   "total": 1000204886016, "free": 73400320000, "contains_media": true}
+]}
+```
+
+#### 目录浏览（服务端文件系统）
+
+```
+GET /api/library/browse?path=E:\Media
+```
+
+```json
+{"path": "E:\\Media", "parent": "E:\\",
+ "entries": [{"name": "2025", "path": "E:\\Media\\2025",
+              "is_media_dir": true, "media_count": 128}],
+ "is_media_dir": false, "media_count": 0, "error": ""}
+```
+
+`path` 必须是绝对路径（相对路径返回 400；目录不存在时 `error` 说明原因，
+磁盘未连接时为"磁盘未连接"）。单次最多返回 400 个子目录。
+
+#### 媒体库根目录
+
+```
+GET /api/library/roots
+```
+
+```json
+{"roots": [
+  {"id": 1, "path": "D:\\Media", "enabled": true, "reachable": false,
+   "volume_present": true, "reason": "path_missing",
+   "reason_text": "目录不存在（盘符可能已变化）", "unit_count": 42,
+   "candidates": [
+     {"path": "E:\\Media", "kind": "same_relative", "media_count": 0,
+      "confidence": "high"}]}]}
+```
+
+- `reason`：`volume_offline`（盘没插，先插盘）或 `path_missing`（盘在、目录没了，
+  通常是盘符变了，可改库）；
+- `candidates[].kind`：`same_relative`（卷根之后结构一致，最可信）或
+  `name_match`（按末级目录名找到）。
+
+```
+POST /api/library/roots        {"path": "E:\\Media"}
+```
+
+```json
+{"success": true, "root_id": 3, "created": true, "needs_remap": false,
+ "old_path": null, "candidates": [], "message": "已添加媒体库: E:\\Media"}
+```
+
+若库里存在**同尾但不可达**的旧根（换盘符后直接添加），返回
+`success=false, needs_remap=true` 并附 `old_path` 与候选 —— 客户端应先引导用户
+改库，而不是当作新库继续（否则库里会多出一套同名根+单元，旧记录永远清不掉）。
+
+```
+DELETE /api/library/roots/{root_id}
+```
+
+移除媒体库（默认级联删除库内单元/文件记录，**不动磁盘文件**）。
+
+#### 路径改库（盘符变化）
+
+```
+POST /api/library/remap
+{"old_prefix": "D:\\Media", "new_prefix": "E:\\Media",
+ "dry_run": true, "include_whitelist": false}
+```
+
+dry-run 响应：
+
+```json
+{"success": true, "dry_run": true,
+ "plan": {"old_prefix": "D:\\Media", "new_prefix": "E:\\Media",
+          "counts": {"library_roots": 1, "units": 42, "files": 1280,
+                     "unit_covers": 2, "whitelist": 0},
+          "total_rows": 1323, "conflicts": [], "thumbnail_meta_hits": 1280,
+          "old_exists": false, "new_exists": true,
+          "same": false, "blocking": false, "reason": ""},
+ "updated": {}, "thumbnail_meta": 0, "backup": null, "error": ""}
+```
+
+`dry_run=false` 执行（改前自动备份数据库，返回 `backup` 路径）：
+
+- 冲突（目标位置已有另一套记录）→ `success=false` + `error`，需先删除重复的库/单元；
+- 幂等：重复执行返回全 0 行、无副作用；
+- 会**同步改写缩略图缓存 `.meta` 里的源路径**（`thumbnail_meta` 为改写条数），
+  否则盘符一变所有缓存归属校验都会失配。
+
+#### 扫描（长任务）
+
+```
+POST /api/library/scan         {"path": "E:\\Media"}      # 或 {"root_id": 3}
+```
+
+```json
+{"task_id": "scan-1", "status": "queued", "path": "E:\\Media", "message": "扫描已开始"}
+```
+
+```json
+GET /api/library/scan/{task_id}
+{
+  "task_id": "scan-1", "kind": "scan", "status": "running",
+  "phase": "scanning", "progress": [128, 640], "result": null, "error": null
+}
+```
+
+完成时 `result`：
+
+```json
+{"total_files": 640, "total_size_bytes": 7340032000, "unit_count": 42,
+ "new_files": 12, "updated_files": 628, "stale_files": 3,
+ "excluded_units": [], "errors": []}
+```
+
+- `GET /api/library/scan/active-task`：当前仍在跑的任务（页面切走再回来接上进度；
+  空闲时 `task_id` 为 null）；
+- `POST /api/library/scan/cancel`：协作式取消（扫描器在下一个回调点停止，且不落库）；
+- 互斥：扫描 / HEIC 转换 / 改库 / 查重同时只允许一个，冲突时返回 `409`；
+- 路径守卫：待扫描路径与"同尾不可达旧根"等价时，任务 `status=failed`、
+  `phase=needs_remap`、`result.needs_remap=true` 并带 `old_path` 与 `candidates`；
+  客户端应引导先改库；确实要作为新库扫描时传 `force_new_root=true`。
+
+#### 设置与数据目录
+
+```
+GET /api/settings
+```
+
+```json
+{"profile": "lite", "data_root": "E:\\MediaData", "data_root_status": "configured",
+ "expected_data_root": "", "db_path": "E:\\MediaData\\data\\media_manager.db",
+ "thumbnail_cache_dir": "E:\\MediaData\\data\\.thumbnails",
+ "thumbnail_cache_files": 1461, "thumbnail_cache_bytes": 19922944,
+ "db_bytes": 7012352, "config_path": "D:\\App\\config.json",
+ "restart_required_hint": "修改数据根后需要重启程序才会切换数据库",
+ "capabilities": {"image": true, "cv2": true, "heic": true, "raw": true,
+                  "face_models": false, "qt": false},
+ "capability_notes": ["未打包人脸模型：人脸线索不可用…"]}
+```
+
+#### 探测目标目录（决定"接管"还是"迁移"）
+
+```
+GET /api/settings/data-root/probe?path=E:\MediaData
+```
+
+```json
+{"path": "E:\\MediaData", "exists": true, "is_dir": true, "writable": true,
+ "has_marker": true, "data_root_id": "6b1f…",
+ "db_path": "E:\\MediaData\\data\\media_manager.db",
+ "db_exists": true, "db_bytes": 7012352, "db_ok": true,
+ "db_detail": "完整（42 个单元 / 640 个文件）", "units": 42, "files": 640,
+ "thumbnail_files": 1461, "is_data_root": true, "is_current": false}
+```
+
+`is_data_root=true` → 只能**接管**；否则才走迁移。相对路径 → 400。
+
+```
+POST /api/settings/data-root      {"path": "E:\\MediaData", "mode": "copy"}
+```
+
+把数据库 / 缩略图 / 访问密码迁移到新的数据根（`mode=copy` 保留源；`move`
+校验通过后删源；`mode=adopt` 接管该目录里**已有**的数据）。返回：
+
+```json
+{"success": true, "target": "E:\\MediaData", "mode": "copy",
+ "restart_required": true, "steps": {"database": {"ok": true, "message": "完整（42 个单元 / 640 个文件）"}},
+ "message": "数据已复制到 E:\\MediaData；重启程序后生效（源目录数据保留…）"}
+```
+
+- **目标目录已有数据时 `copy`/`move` 一律 409**（`detail` 提示改用 `mode=adopt`），
+  避免用当前（可能是空的）库覆盖用户迁过去的数据；
+- `adopt` 要求目标目录有 marker 或一份可用数据库，**不写入 / 不覆盖**目标库，只在
+  接管前备份一次（`<db>.bak_<时间戳>_adopt`），并要求目标目录可写；
+- `move` / `adopt` 需要释放数据库引擎才能换库，此时服务端会立刻在新库上重新
+  初始化并返回 `restart_required=false`（`adopt` 后立即可用）。
+
+```
+POST /api/settings/thumbnail-cache   {"path": "E:\\MediaData\\data\\.thumbnails", "mode": "copy"}
+```
+
+切换缩略图缓存目录（**可热切换**，无需重启；旧目录文件会先拷贝过去）。
+
+```
+POST /api/settings/clear-thumbnail-cache
+```
+
+清空当前缩略图缓存（下次浏览按需重新生成）。
+
+---
+
 ## 4. 缩略图与媒体文件
 
 ### 4.1 缩略图 HTTP 服务（已实现）

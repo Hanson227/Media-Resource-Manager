@@ -207,6 +207,17 @@ class CleanupService:
         return int(id_str) if id_str.isdigit() else None
 
     @staticmethod
+    def remove_thumbnail(file_id: int, cache_dir=None) -> None:
+        """删除文件对应的缩略图缓存（含 `.meta` sidecar）。
+
+        公开入口：扫描清理、删除、失效都走这里，保证"图与 meta 成对处理"
+        只有一份实现（只删图会留下永远无人回收的碎 meta）。
+        ```
+        cache_dir=None`` 时用配置注入的缓存目录。
+        """
+        CleanupService._remove_thumbnail(file_id, cache_dir)
+
+    @staticmethod
     def _remove_thumbnail(file_id: int, cache_dir=None) -> None:
         """删除文件对应的缩略图缓存（含 .meta sidecar，目录来自配置）。"""
         if file_id is None:

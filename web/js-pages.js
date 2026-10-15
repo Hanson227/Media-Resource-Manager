@@ -3219,6 +3219,493 @@ const MessagesPage = {
 };
 
 /* ========== Settings Page ========== */
+/* ========== 目录选择器（服务端文件系统） ==========
+   为什么需要：浏览器拿不到服务端原生文件夹对话框，而便携版又要"自动选择
+   文件路径"——只能由服务端 /api/library/browse 提供目录树，前端把它画出来。
+   媒体库页与设置页共用这一个组件。 */
+const FolderPicker = {
+  template: `
+    <div class="folder-picker">
+      <div class="fp-bar">
+        <button class="sort-btn" @click="goUp" :disabled="!parent">
+          <span class="mdi mdi-arrow-up"></span> 上级
+        </button>
+        <span class="fp-path">{{ path || '选择磁盘' }}</span>
+        <button class="sort-btn" @click="$emit('close')">
+          <span class="mdi mdi-close"></span> 关闭
+        </button>
+      </div>
+
+      <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
+      <div v-else-if="error" class="fp-error">
+        <span class="mdi mdi-alert-circle-outline"></span> {{ error }}
+      </div>
+      <template v-else>
+        <template v-if="!path">
+          <button v-for="v in volumes" :key="v.path" class="fp-entry" @click="enter(v.path)">
+            <span class="mdi mdi-harddisk"></span>
+            <span class="fp-name">{{ v.path }}<span v-if="v.label"> ({{ v.label }})</span></span>
+            <span class="fp-free">{{ fmtSize(v.free) }} 可用</span>
+          </button>
+          <div v-if="!volumes.length" class="fp-empty">没有检测到可用磁盘</div>
+        </template>
+        <template v-else>
+          <button v-for="e in entries" :key="e.path" class="fp-entry" @click="enter(e.path)">
+            <span class="mdi" :class="e.is_media_dir ? 'mdi-folder-image' : 'mdi-folder'"></span>
+            <span class="fp-name">{{ e.name }}</span>
+            <span v-if="e.media_count" class="fp-badge">{{ e.media_count }} 个媒体</span>
+            <span v-else-if="e.is_media_dir" class="fp-badge">含媒体</span>
+          </button>
+          <div v-if="!entries.length" class="fp-empty">（没有子文件夹）</div>
+          <div class="fp-actions">
+            <button class="btn btn-primary" @click="$emit('picked', path)">
+              <span class="mdi mdi-check"></span> 选择「{{ pathName }}」
+            </button>
+          </div>
+        </template>
+      </template>
+    </div>
+  `,
+  props: ['serverUrl'],
+  emits: ['picked', 'close'],
+  data() { return {
+    path: '', parent: null, entries: [], volumes: [],
+    error: '', loading: false,
+  };},
+  computed: {
+    pathName() {
+      const parts = String(this.path || '').replace(/[\\\\/]+$/, '').split(/[\\\\/]/);
+      return parts[parts.length - 1] || this.path;
+    },
+  },
+  methods: {
+    fmtSize(n) {
+      let size = Number(n || 0);
+      if (size < 1024) return size + ' B';
+      size /= 1024;
+      if (size < 1024) return size.toFixed(1) + ' KB';
+      size /= 1024;
+      if (size < 1024) return size.toFixed(1) + ' MB';
+      return (size / 1024).toFixed(2) + ' GB';
+    },
+    async loadVolumes() {
+      this.loading = true;
+      this.error = '';
+      try {
+        const data = await api(this.serverUrl, '/api/library/volumes');
+        this.volumes = data.volumes || [];
+      } catch (e) {
+        this.error = '读取磁盘列表失败: ' + e.message;
+      } finally {
+        this.loading = false;
+      }
+    },
+    async enter(path) {
+      this.loading = true;
+      this.error = '';
+      try {
+        const data = await api(this.serverUrl,
+          '/api/library/browse?path=' + encodeURIComponent(path));
+        this.path = data.path || path;
+        this.parent = data.parent || null;
+        this.entries = data.entries || [];
+        if (data.error) this.error = data.error;
+      } catch (e) {
+        this.error = '无法打开目录: ' + e.message;
+      } finally {
+        this.loading = false;
+      }
+    },
+    goUp() {
+      if (this.parent) this.enter(this.parent);
+      else { this.path = ''; this.entries = []; this.parent = null; this.loadVolumes(); }
+    },
+  },
+  mounted() { this.loadVolumes(); },
+};
+
+/* ========== 媒体库页跨路由状态（模块级） ==========
+   扫描是**服务端后台任务**，页面组件会随路由卸载重建（与查重/HEIC 同理）。
+   任务 id 与进度放模块级，切走再回来/整页刷新都能靠 active-task 接上。 */
+let _libraryRun = {
+  taskId: null, running: false, phase: '', progress: null, summary: '', error: '',
+};
+let _libraryRoots = null;        // 上次加载的根列表（避免每次进页面都闪空白）
+
+/* ========== 媒体库页 ==========
+   便携版没有桌面 GUI，"添加媒体文件夹 / 扫描 / 修盘符" 全部由这一页承担。 */
+const LibraryPage = {
+  template: `
+    <div class="page">
+      <!-- 数据位置：便携版最要紧的一条信息（数据到底在哪块盘上） -->
+      <div class="card data-root-card" style="cursor:default">
+        <div class="card-row">
+          <div class="card-icon blue"><span class="mdi mdi-harddisk"></span></div>
+          <div class="card-body">
+            <div class="card-title">数据目录</div>
+            <div class="card-sub">{{ settings.data_root || '（未设置，使用程序目录）' }}</div>
+            <div class="card-sub muted">
+              数据库 {{ settings.db_path }} · 缩略图 {{ settings.thumbnail_cache_dir }}
+            </div>
+          </div>
+          <div class="card-meta">
+            <div class="count">{{ fmtSize(settings.db_bytes) }}</div>
+            <div class="label">数据库</div>
+          </div>
+        </div>
+        <!-- 发现多个数据根时不许自动猜（可能选到旧副本），给出一键接管 -->
+        <div v-if="(features.data_root_candidates || []).length" class="cand-list">
+          <div class="cand-title">发现 {{ features.data_root_candidates.length }} 个数据根，选择一个接管：</div>
+          <div v-for="c in features.data_root_candidates" :key="c" class="cand-row">
+            <span class="cand-path">{{ c }}</span>
+            <button class="btn btn-primary" @click="adoptCandidate(c)" :disabled="busy">接管</button>
+          </div>
+          <div class="settings-hint">接管不会复制或覆盖数据，只把程序指向这份数据（接管前自动备份一次数据库）。</div>
+        </div>
+      </div>
+
+      <div v-if="notice" class="lib-notice">
+        <span class="mdi mdi-information-outline"></span>
+        <div class="lib-notice-text">
+          <div>{{ notice }}</div>
+          <div v-if="suggestion" class="lib-notice-actions">
+            <button class="btn btn-primary" @click="applySuggestion" :disabled="busy">
+              改库（{{ suggestion.old }} → {{ suggestion.new }}）
+            </button>
+            <button class="btn" @click="suggestion = null">忽略</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="run.running" class="run-progress-wrap">
+        <div class="run-progress"><div class="run-progress-bar" :style="{ width: runPercent + '%' }"></div></div>
+        <div class="run-progress-text">{{ runText }}</div>
+        <button class="sort-btn" @click="cancelScan">取消</button>
+      </div>
+      <div v-else-if="run.summary" class="lib-summary">{{ run.summary }}</div>
+
+      <!-- 媒体库根列表 -->
+      <div class="section-title">
+        媒体库
+        <span class="spacer"></span>
+        <button class="sort-btn" @click="loadRoots" :disabled="busy">
+          <span class="mdi mdi-refresh"></span> 刷新
+        </button>
+      </div>
+
+      <div v-if="loading" class="loading-dots"><span></span><span></span><span></span></div>
+      <template v-else-if="!roots.length">
+        <div class="empty-state">
+          <span class="mdi mdi-folder-plus-outline"></span>
+          <p>还没有媒体库<br>点下面的「选择文件夹」添加一个</p>
+        </div>
+      </template>
+      <div v-for="r in roots" :key="r.id" class="card lib-root" :class="{ broken: !r.reachable }">
+        <div class="card-row">
+          <div class="card-icon" :class="r.reachable ? 'green' : 'red'">
+            <span class="mdi" :class="r.reachable ? 'mdi-folder-check' : 'mdi-folder-alert'"></span>
+          </div>
+          <div class="card-body">
+            <div class="card-title">{{ r.path }}</div>
+            <div class="card-sub">
+              <span>{{ r.unit_count }} 个单元</span>
+              <span v-if="!r.reachable" class="lib-bad">· {{ r.reason_text }}</span>
+            </div>
+          </div>
+          <div class="lib-root-actions">
+            <button v-if="r.reachable" class="sort-btn" @click="scanRoot(r)" :disabled="busy">
+              <span class="mdi mdi-magnify-scan"></span> 扫描
+            </button>
+            <button class="sort-btn danger" @click="removeRoot(r)" :disabled="busy">
+              <span class="mdi mdi-delete-outline"></span>
+            </button>
+          </div>
+        </div>
+        <!-- 不可达根：列出候选位置，一键改库 -->
+        <div v-if="!r.reachable && r.candidates && r.candidates.length" class="lib-candidates">
+          <div class="lib-candidates-title">找到可能的原位置：</div>
+          <button v-for="c in r.candidates" :key="c.path" class="fp-entry"
+            @click="repairRoot(r, c.path)" :disabled="busy">
+            <span class="mdi mdi-folder-search-outline"></span>
+            <span class="fp-name">{{ c.path }}</span>
+            <span class="fp-badge">
+              {{ c.kind === 'same_relative' ? '同级结构一致' : '目录名一致' }}
+              · {{ c.media_count }} 个媒体
+            </span>
+          </button>
+        </div>
+        <div v-else-if="!r.reachable" class="lib-candidates">
+          <div class="lib-candidates-title">没有找到候选位置，请插入数据盘后刷新重试。</div>
+        </div>
+      </div>
+
+      <!-- 添加媒体库 -->
+      <div class="section-title">添加媒体库</div>
+      <div v-if="!pickerOpen" class="lib-add">
+        <button class="btn btn-primary" @click="pickerOpen = true" :disabled="busy">
+          <span class="mdi mdi-folder-plus-outline"></span> 选择文件夹
+        </button>
+      </div>
+      <folder-picker v-else :server-url="serverUrl"
+        @picked="onPicked" @close="pickerOpen = false"></folder-picker>
+      <div v-if="pickedPath" class="lib-picked">
+        <div class="lib-picked-path">{{ pickedPath }}</div>
+        <button class="btn btn-primary" @click="scanPath(pickedPath)" :disabled="busy">
+          <span class="mdi mdi-plus"></span> 添加并扫描
+        </button>
+        <button class="btn" @click="addRootOnly(pickedPath)" :disabled="busy">只添加</button>
+      </div>
+    </div>
+  `,
+  props: ['serverUrl'],
+  emits: ['loading'],
+  data() { return {
+    roots: _libraryRoots || [],
+    settings: {},
+    features: {},
+    loading: false,
+    busy: false,
+    pickerOpen: false,
+    pickedPath: '',
+    notice: '',
+    suggestion: null,
+    run: Object.assign({}, _libraryRun),
+    _timer: null,
+    _mounted: true,
+  };},
+  computed: {
+    runPercent() {
+      if (!this.run.progress || !this.run.progress[1]) return 0;
+      return Math.min(100, Math.round(this.run.progress[0] / this.run.progress[1] * 100));
+    },
+    runText() {
+      const map = { queued: '排队中…', scanning: '正在扫描…', done: '完成' };
+      let text = map[this.run.phase] || '处理中…';
+      if (this.run.progress) text += ' ' + this.run.progress[0] + ' / ' + this.run.progress[1];
+      return text;
+    },
+  },
+  methods: {
+    fmtSize(n) {
+      let size = Number(n || 0);
+      if (size < 1024) return size + ' B';
+      size /= 1024;
+      if (size < 1024) return size.toFixed(1) + ' KB';
+      size /= 1024;
+      if (size < 1024) return size.toFixed(1) + ' MB';
+      return (size / 1024).toFixed(2) + ' GB';
+    },
+    async loadRoots() {
+      this.loading = true;
+      try {
+        const data = await api(this.serverUrl, '/api/library/roots');
+        this.roots = data.roots || [];
+        _libraryRoots = this.roots;
+      } catch (e) {
+        this.notice = '读取媒体库失败: ' + e.message;
+      } finally { this.loading = false; }
+    },
+    async loadSettings() {
+      try {
+        this.settings = await api(this.serverUrl, '/api/settings');
+        if (this.settings.data_root_status === 'missing_expected') {
+          this.notice = '未找到数据盘上的数据目录（期望: '
+            + (this.settings.expected_data_root || '未知') + '）。'
+            + '当前显示的可能是空库，请插入数据盘后重启，或在设置里指定数据目录。';
+        }
+      } catch (e) { /* 旧版服务端无该端点：忽略 */ }
+      try {
+        this.features = await api(this.serverUrl, '/api/features');
+        if ((this.features.data_root_candidates || []).length
+            && !this.settings.data_root) {
+          this.notice = '程序目录里没有数据，但在磁盘上发现了 '
+            + this.features.data_root_candidates.length
+            + ' 个数据根。请在下面的「数据目录」卡片里选择要接管的那一个。';
+        }
+      } catch (e) { /* 忽略 */ }
+    },
+    async adoptCandidate(path) {
+      if (!confirm('接管这份数据？\n' + path
+          + '\n\n不会复制或覆盖数据，只把程序指向它（接管前会自动备份一次数据库）。')) {
+        return;
+      }
+      this.busy = true;
+      this.notice = '';
+      try {
+        const res = await api(this.serverUrl, '/api/settings/data-root', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: path, mode: 'adopt' }),
+        });
+        this.notice = res.message || '已接管';
+        if (res.restart_required) this.notice += '（需重启程序）';
+        await this.loadSettings();
+        await this.loadRoots();
+      } catch (e) {
+        this.notice = '接管失败: ' + e.message;
+      } finally {
+        this.busy = false;
+      }
+    },
+    onPicked(path) {
+      this.pickedPath = path;
+      this.pickerOpen = false;
+    },
+    async addRootOnly(path) {
+      this.busy = true;
+      try {
+        const res = await api(this.serverUrl, '/api/library/roots', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: path }),
+        });
+        if (res.needs_remap) {
+          this.notice = res.message;
+          this.suggestion = { old: res.old_path, new: path };
+          return false;
+        }
+        this.notice = res.message || '已添加';
+        this.pickedPath = '';
+        await this.loadRoots();
+        return true;
+      } catch (e) {
+        this.notice = '添加失败: ' + e.message;
+        return false;
+      } finally { this.busy = false; }
+    },
+    async removeRoot(r) {
+      if (!confirm('从媒体库中移除：\\n' + r.path
+        + '\\n\\n只会删除库里的记录与单元列表，磁盘上的文件不会被删除。\\n'
+        + '确定继续？')) return;
+      this.busy = true;
+      try {
+        await api(this.serverUrl, '/api/library/roots/' + r.id, { method: 'DELETE' });
+        await this.loadRoots();
+      } catch (e) {
+        this.notice = '移除失败: ' + e.message;
+      } finally { this.busy = false; }
+    },
+    async scanRoot(r) { await this.scanPath(r.path, r.id); },
+    async scanPath(path, rootId) {
+      this.busy = true;
+      this.notice = '';
+      try {
+        const body = rootId ? { root_id: rootId } : { path: path };
+        const res = await api(this.serverUrl, '/api/library/scan', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        this.run = { taskId: res.task_id, running: true, phase: 'queued',
+                     progress: [0, 0], summary: '', error: '' };
+        this.syncRun();
+        this.poll();
+      } catch (e) {
+        this.notice = '扫描启动失败: ' + e.message;
+      } finally { this.busy = false; }
+    },
+    syncRun() {
+      _libraryRun = Object.assign({}, this.run);
+    },
+    applyTask(t) {
+      this.run.taskId = t.task_id;
+      this.run.phase = t.phase || '';
+      this.run.progress = t.progress || null;
+      this.run.error = t.error || '';
+      this.run.running = (t.status === 'queued' || t.status === 'running');
+      if (t.status === 'completed') {
+        const r = t.result || {};
+        this.run.summary = '扫描完成：' + (r.total_files || 0) + ' 个文件 · '
+          + (r.new_files || 0) + ' 新增 · ' + (r.updated_files || 0) + ' 更新'
+          + ((r.stale_files || 0) ? (' · ' + r.stale_files + ' 条失效记录已清理') : '');
+      } else if (t.status === 'failed') {
+        this.run.summary = '';
+        if (t.result && t.result.needs_remap) {
+          this.notice = t.error || '媒体库路径可能已变化';
+          this.suggestion = { old: t.result.old_path, new: t.result.path };
+        } else {
+          this.notice = t.error || '扫描失败';
+        }
+      } else if (t.status === 'cancelled') {
+        this.run.summary = '扫描已取消';
+      }
+      this.syncRun();
+    },
+    async poll() {
+      if (!this.run.taskId) return;
+      try {
+        const t = await api(this.serverUrl, '/api/library/scan/' + this.run.taskId);
+        this.applyTask(t);
+        if (this.run.running) {
+          this._timer = setTimeout(() => { if (this._mounted) this.poll(); }, 1200);
+        } else {
+          await this.loadRoots();
+        }
+      } catch (e) {
+        this.run.running = false;
+        this.syncRun();
+      }
+    },
+    async cancelScan() {
+      try { await api(this.serverUrl, '/api/library/scan/cancel', { method: 'POST' }); }
+      catch (e) { this.notice = '取消失败: ' + e.message; }
+    },
+    async repairRoot(root, newPrefix) {
+      if (!confirm('把库里失效的旧路径\\n  ' + root.path + '\\n改写为\\n  ' + newPrefix
+        + '\\n\\n只改数据库记录（改前自动备份），不移动/删除任何文件。确定继续？')) return;
+      this.busy = true;
+      try {
+        const res = await api(this.serverUrl, '/api/library/remap', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ old_prefix: root.path, new_prefix: newPrefix,
+                                 dry_run: false }),
+        });
+        if (!res.success) {
+          this.notice = '改库失败: ' + (res.error || '存在冲突，请先删除重复的媒体库');
+          return;
+        }
+        const u = res.updated || {};
+        this.notice = '路径已修复：媒体库 ' + (u.library_roots || 0)
+          + ' 条 / 单元 ' + (u.units || 0) + ' 条 / 文件 ' + (u.files || 0)
+          + ' 条 / 缩略图 ' + (res.thumbnail_meta || 0) + ' 条';
+        await this.loadRoots();
+      } catch (e) {
+        this.notice = '改库失败: ' + e.message;
+      } finally { this.busy = false; }
+    },
+    async applySuggestion() {
+      const s = this.suggestion;
+      if (!s) return;
+      this.suggestion = null;
+      await this.repairRoot({ path: s.old }, s.new);
+    },
+    async reattach() {
+      try {
+        const t = await api(this.serverUrl, '/api/library/scan/active-task');
+        if (t && t.task_id) {
+          this.run.taskId = t.task_id;
+          this.applyTask(t);
+          this.poll();
+          return true;
+        }
+      } catch (e) { /* 忽略 */ }
+      return false;
+    },
+  },
+  async mounted() {
+    this._mounted = true;
+    await Promise.all([this.loadRoots(), this.loadSettings()]);
+    // 页面切走再回来：接上仍在跑的服务端任务（否则只能靠风扇判断）
+    if (!this.run.running || !this.run.taskId) {
+      await this.reattach();
+    } else {
+      this.poll();
+    }
+  },
+  beforeUnmount() {
+    this._mounted = false;
+    if (this._timer) clearTimeout(this._timer);
+    this.syncRun();   // 任务在服务端继续跑，本地镜像留到下个实例
+  },
+};
+
 const SettingsPage = {
   template: `
     <div class="page">
@@ -3249,6 +3736,74 @@ const SettingsPage = {
         <span class="label"><span class="mdi mdi-image-sync-outline" style="font-size:16px;margin-right:6px"></span>HEIC 检查与转换<span
           v-if="heicRunning" class="heic-running">转换中…</span></span>
         <span class="mdi mdi-chevron-right"></span>
+      </div>
+
+      <!-- 数据位置：便携版核心设置（数据放哪块盘） -->
+      <div class="setting-item" @click="toggleDataSection">
+        <span class="label"><span class="mdi mdi-harddisk" style="font-size:16px;margin-right:6px"></span>数据位置</span>
+        <span class="mdi" :class="showData ? 'mdi-chevron-up' : 'mdi-chevron-right'"></span>
+      </div>
+      <div v-if="showData" class="settings-block">
+        <!-- 能力清单：便携版与桌面档是同一套代码，差异只在"包里放了什么"，
+             这里如实列出缺失的可选能力，避免用户以为是 bug -->
+        <div class="settings-row" v-if="(settings.capability_notes || []).length">
+          <span class="settings-key">功能能力</span>
+          <span class="settings-val">
+            <div v-for="n in settings.capability_notes" :key="n" class="cap-note">· {{ n }}</div>
+          </span>
+        </div>
+        <!-- 手机访问地址：平板上的浏览器自己算不出服务端局域网 IP，必须服务端给 -->
+        <div class="settings-row">
+          <span class="settings-key">手机访问</span>
+          <span class="settings-val">
+            <template v-if="settings.loopback_only">
+              当前只监听本机（{{ settings.api_host }}），手机连不上 —— 请去掉
+              <code>--host 127.0.0.1</code> 重启（默认监听 0.0.0.0）
+            </template>
+            <template v-else>
+              <div v-for="(u, i) in (settings.lan_urls || [])" :key="u" class="lan-url">
+                <span>{{ u }}</span>
+                <span v-if="i === 0" class="lan-tag">本机</span>
+                <span v-else class="lan-tag">手机用这个</span>
+              </div>
+              <div class="settings-hint">
+                手机需与平板在同一 WiFi；打不开时检查首次启动的防火墙弹窗（要勾「专用网络」并允许访问）
+              </div>
+            </template>
+          </span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-key">数据目录</span>
+          <span class="settings-val">{{ settings.data_root || '（未设置：程序目录）' }}</span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-key">数据库</span>
+          <span class="settings-val">{{ settings.db_path }} · {{ fmtSize(settings.db_bytes) }}</span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-key">缩略图缓存</span>
+          <span class="settings-val">{{ settings.thumbnail_cache_dir }} ·
+            {{ settings.thumbnail_cache_files }} 个文件 · {{ fmtSize(settings.thumbnail_cache_bytes) }}</span>
+        </div>
+        <div v-if="settings.data_root_status === 'missing_expected'" class="settings-row warn">
+          <span class="mdi mdi-alert-outline"></span>
+          <span>未找到数据盘（期望 {{ settings.expected_data_root || '未知' }}），当前可能是空库。</span>
+        </div>
+        <div class="settings-actions">
+          <button class="btn" @click="migrateDataRoot">
+            <span class="mdi mdi-content-save-move-outline"></span> 迁移数据到其它位置
+          </button>
+          <button class="btn" @click="changeThumbDir">
+            <span class="mdi mdi-image-multiple-outline"></span> 修改缩略图目录
+          </button>
+        </div>
+        <div v-if="pickerMode" class="settings-picker">
+          <div class="settings-row">
+            <span class="settings-key">{{ pickerMode === 'data' ? '迁移数据到' : '缩略图目录改为' }}</span>
+          </div>
+          <folder-picker :server-url="serverUrl" @picked="onDirPicked" @close="pickerMode = ''"></folder-picker>
+        </div>
+        <div v-if="migrateMsg" class="settings-row">{{ migrateMsg }}</div>
       </div>
       <div class="setting-item" @click="showAbout = !showAbout">
         <span class="label">关于</span>
@@ -3299,11 +3854,92 @@ const SettingsPage = {
     pinChanging: false,
     pinChangeError: '',
     heicRunning: false,
+    // 数据位置（便携版核心）
+    showData: false,
+    settings: {},
+    pickerMode: '',
+    migrateMsg: '',
+    migrating: false,
   };},
   computed: {
     hasPin() { return this.pinEnabled; }
   },
   methods: {
+    fmtSize(n) {
+      let size = Number(n || 0);
+      if (size < 1024) return size + ' B';
+      size /= 1024;
+      if (size < 1024) return size.toFixed(1) + ' KB';
+      size /= 1024;
+      if (size < 1024) return size.toFixed(1) + ' MB';
+      return (size / 1024).toFixed(2) + ' GB';
+    },
+    toggleDataSection() {
+      this.showData = !this.showData;
+      if (this.showData) this.loadSettings();
+    },
+    async loadSettings() {
+      try {
+        this.settings = await api(this.serverUrl, '/api/settings');
+      } catch (e) { /* 旧版服务端无该端点 */ }
+    },
+    migrateDataRoot() {
+      this.migrateMsg = '';
+      this.pickerMode = 'data';
+    },
+    changeThumbDir() {
+      this.migrateMsg = '';
+      this.pickerMode = 'thumb';
+    },
+    async onDirPicked(path) {
+      const mode = this.pickerMode;
+      this.pickerMode = '';
+      if (!path) return;
+      // 选数据位置时先探测：该目录是不是"已经有一份数据"（电脑迁到移动硬盘、
+      // 插到平板接着用）。已有数据只能"接管"，绝不能用迁移把这份数据覆盖掉。
+      let probe = null;
+      if (mode === 'data') {
+        try {
+          probe = await api(this.serverUrl,
+            '/api/settings/data-root/probe?path=' + encodeURIComponent(path));
+        } catch (e) { /* 探测失败就按普通迁移走，服务端还有二次拦截 */ }
+      }
+      let body = { path: path, mode: 'copy' };
+      if (mode === 'data' && probe && probe.is_data_root) {
+        if (probe.is_current) {
+          this.migrateMsg = '这就是当前正在使用的数据目录，无需操作';
+          return;
+        }
+        if (!confirm('该目录里已经有一份数据：\n' + path
+            + '\n\n单元 ' + probe.units + ' 个 / 文件 ' + probe.files
+            + ' 个（接管前会自动备份一次数据库）\n\n'
+            + '【确定】= 接管这份数据（不复制、不覆盖）\n'
+            + '【取消】= 什么都不做')) return;
+        body = { path: path, mode: 'adopt' };
+      } else {
+        if (!confirm((mode === 'data' ? '把数据（数据库/缩略图/访问密码）复制到：\n'
+                      : '把缩略图缓存目录改为：\n') + path
+          + (mode === 'data' ? '\n\n需要重启程序后生效（源数据保留）。' : '')
+          + '\n\n确定继续？')) return;
+      }
+      this.migrating = true;
+      // 复制缩略图可能要一两分钟：先给出明确状态，否则用户以为没反应就关页面
+      this.migrateMsg = body.mode === 'adopt'
+        ? '正在接管该目录里的数据…' : '正在复制数据（缩略图多时需一两分钟），请不要关闭页面…';
+      try {
+        const endpoint = mode === 'data'
+          ? '/api/settings/data-root' : '/api/settings/thumbnail-cache';
+        const res = await api(this.serverUrl, endpoint, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        this.migrateMsg = (res.message || '完成')
+          + (res.restart_required ? '（需重启程序）' : '');
+        await this.loadSettings();
+      } catch (e) {
+        this.migrateMsg = '失败: ' + e.message;
+      } finally { this.migrating = false; }
+    },
     openHeic() { this.$router.push('/heic'); },
     disconnect() {
       if (confirm('确定断开连接？')) this.$emit('disconnected');
@@ -3356,6 +3992,7 @@ const SettingsPage = {
         this.heicRunning = !!(t && t.task_id);
       } catch (e) { /* 旧版服务端无该端点：忽略 */ }
     }
+    this.loadSettings();
   }
 };
 

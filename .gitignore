@@ -35,7 +35,11 @@ build/
 *.egg-info/
 *.egg
 *.spec
-!build.spec  # PyInstaller 打包配置
+# PyInstaller 打包配置：桌面完整档 / 便携版（无 GUI）
+# 注意：gitignore **不支持行尾注释** —— "!build.spec  # 说明" 会被整体当成
+# 模式，等于没写。注释必须单独成行。
+!build.spec
+!build_web.spec
 
 # Thumbnail cache
 .thumbnails/
