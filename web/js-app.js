@@ -11,6 +11,7 @@ const routes = [
   { path: '/heic', component: HeicPage },
   { path: '/messages', component: MessagesPage },
   { path: '/settings', component: SettingsPage },
+  { path: '/setup', component: SetupPage },
   { path: '/', redirect: '/units' },
 ];
 
@@ -70,16 +71,26 @@ const App = {
   computed: {
     isConnectPage() { return this.$route.path === '/connect'; },
     isPreviewPage() { return this.$route.path.startsWith('/preview/'); },
+    /** 数据目录向导页：隐藏导航（没选数据之前别的页面都不可用）。 */
+    isSetupPage() { return this.$route.path === '/setup'; },
     /** 查重入口是否显示（便携版为 false）。 */
     showDedup() { return this.features.dedup !== false; },
     /** 媒体库管理入口是否显示（含添加目录/扫描；只有很旧的服务端才没有）。 */
     showLibrary() { return this.features.scan !== false; },
-    /** 数据盘未就绪时的横幅文案（便携版忘插盘时最要紧的提示）。 */
+    /** 数据盘未就绪时的横幅文案（便携版忘插盘/盘符变了时最要紧的提示）。
+        三态都要提示：
+         - blocked_no_root：没加载任何数据目录（服务端已拦住写操作）
+         - missing_expected：配置过的数据根找不到（盘没插 / 盘符变了）
+         - 其它：不显示 */
     dataRootWarning() {
-      if (this.features.data_root_status !== 'missing_expected') return '';
+      const status = String(this.features.data_root_status || '');
+      if (status === 'blocked_no_root') {
+        return '这台机器还没加载媒体库（数据在硬盘上，不会丢）—— 请先选一份硬盘上的数据。';
+      }
+      if (status !== 'missing_expected') return '';
       const expected = this.features.expected_data_root || '（未知位置）';
       return '未找到数据盘上的数据目录（期望: ' + expected
-        + '），当前库可能是空的。请插入数据盘后重启，或在「设置 → 数据位置」里指定。';
+        + '），当前库是空的。请插入数据盘后重启，或点右边选择盘上的数据。';
     },
     currentTab() {
       const p = this.$route.path;
@@ -102,6 +113,7 @@ const App = {
       if (p.startsWith('/heic')) return 'HEIC 转换';
       if (p.startsWith('/messages')) return '消息中心';
       if (p.startsWith('/settings')) return '设置';
+      if (p.startsWith('/setup')) return '选择数据目录';
       if (p.startsWith('/connect')) return '连接';
       return '影视资源管理器';
     },
@@ -175,6 +187,15 @@ const App = {
         if (data.profile) _features.profile = data.profile;
         if (data.db_path) _features.db_path = data.db_path;
         if (data.thumbnail_cache_dir) _features.thumbnail_cache_dir = data.thumbnail_cache_dir;
+        // 数据目录未就绪（便携版忘插盘 / 盘符变了没认出来）→ 直接进向导。
+        // 不自动跳的后果：用户看到空库、以为数据没了，甚至拿它重新建库。
+        // 注意：不能在这里直接 replace —— created() 阶段首次导航还没 settle，
+        // 立刻 replace 会被当重定向取消（实测：URL 不动、向导也不出）。
+        // 统一交给 ensureSetupRoute()：等 router ready 再跳。
+        const rootStatus = String(_features.data_root_status || '');
+        if (rootStatus === 'blocked_no_root' || rootStatus === 'missing_expected') {
+          this.ensureSetupRoute();
+        }
         // 拉取后若当前正停在已关闭的页面上（例如历史记录里的 #/dedup），重定向
         if (_features.dedup === false && this.$route.path.startsWith('/dedup')) {
           this.$router.replace('/units');
@@ -183,6 +204,13 @@ const App = {
         // 旧版服务端 / 网络异常：保持默认（全开）
         console.warn('/api/features 不可用，按完整档显示', e && e.message);
       }
+    },
+    ensureSetupRoute(attempt = 0) {
+      const status = String(_features.data_root_status || '');
+      if (status !== 'blocked_no_root' && status !== 'missing_expected') return;
+      if (attempt > 12) return;                    // 最多重试 ~1.8 秒
+      this.$router.replace('/setup').catch(() => {});
+      setTimeout(() => this.ensureSetupRoute(attempt + 1), 150);
     },
     async onConnected(url) {
       this.serverUrl = url;

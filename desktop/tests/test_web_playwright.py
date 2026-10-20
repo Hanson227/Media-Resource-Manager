@@ -2240,6 +2240,7 @@ def test_responsive_layout(page):
 # ============================================================
 
 _LITE_PORT = 19529  # 轻量档第二实例端口（与主实例、桌面端都不同）
+_WIZARD_PORT = 19530  # 未加载数据目录（blocked_no_root）的第二实例端口
 
 
 def test_library_page_and_scan(page):
@@ -2352,10 +2353,86 @@ def test_settings_data_location(page):
     check("展示手机访问行", "手机访问" in text)
     check("回环监听时提示手机连不上",
           "只监听本机" in text or "手机连不上" in text)
+    # 数据位置入口拆成三条：接管盘上已有数据（向导）、迁移到别的盘、改缩略图目录
+    check("提供“选数据盘上的数据”入口",
+          page.locator(".settings-actions button", has_text="选择数据盘").count() >= 1)
     check("提供迁移数据入口",
-          page.locator(".settings-actions button", has_text="迁移数据").count() >= 1)
+          page.locator(".settings-actions button", has_text="迁移").count() >= 1)
     check("提供修改缩略图目录入口",
           page.locator(".settings-actions button", has_text="缩略图目录").count() >= 1)
+
+
+def test_data_root_wizard(page):
+    """便携版没找到数据盘 → 自动进「选择数据目录」向导（而不是给一个空库）。
+
+    事故现场：平板插上硬盘但盘符变了/没认出来，app 回退到应用目录的空库；
+    用户看到空库以为数据没了，甚至拿它重建。现在入口会把这种状态标成
+    blocked_no_root：数据端点 409 + 首屏强制进向导，只留“选盘上的数据”。
+    """
+    section("Web 测试 36: 数据目录向导（未加载数据）")
+    import requests
+    import threading
+    import uvicorn
+
+    from app.api.server import create_app
+
+    wizard_app = create_app(
+        AppConfig().with_updates(thumbnail_cache_dir=_thumb_cache_dir(),
+                                 api_port=_WIZARD_PORT),
+        {"config_path": str(Path(__file__).parent.parent / "data" / "test_wizard.json"),
+         "data_root": "", "data_root_status": "blocked_no_root"})
+    server = uvicorn.Server(uvicorn.Config(
+        wizard_app, host="127.0.0.1", port=_WIZARD_PORT, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        for _ in range(50):
+            if getattr(server, "started", False):
+                break
+            time.sleep(0.1)
+        base = f"http://127.0.0.1:{_WIZARD_PORT}"
+        try:
+            check("闸门生效：/api/units 返回 409",
+                  requests.get(f"{base}/api/units", timeout=5).status_code == 409)
+            features = requests.get(f"{base}/api/features", timeout=5).json()
+            check("features 如实报 blocked_no_root",
+                  features.get("data_root_status") == "blocked_no_root")
+        except Exception as e:  # noqa: BLE001
+            check(f"向导实例启动失败: {e}", False)
+            return
+
+        page.goto(f"{base}/#/units")
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(700)
+        check("未加载数据时自动进入选择向导", "/setup" in page.url)
+        body = page.content()
+        check("向导标题可见", "先选择数据目录" in body)
+        check("提示数据在硬盘上不会丢", "不会丢" in body)
+        check("导航被隐藏（选好数据前不能进别的页）",
+              page.locator(".bottom-tabs").count() == 0)
+        check("列出本机磁盘并提供深扫", "深扫" in body)
+        check("提供「使用这份数据」入口", "使用这份数据" in body)
+        check("提供手动选文件夹入口", "手动选文件夹" in body)
+        check("说明接管不会复制/覆盖", "不会复制" in body)
+
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(600)
+        check("刷新后仍在向导（不会掉回空库）", "/setup" in page.url)
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        # 把页面交还给主实例：后面的用例（尤其测试 35）默认当前页就在主实例上，
+        # 停在向导实例的 origin 上会让它们从"无 serverUrl"的状态开始（实测会偶发
+        # 首屏还没拉完 features 就判导航缺失）。
+        try:
+            page.goto(f"http://127.0.0.1:{_PORT}/")
+            page.evaluate(
+                f"() => localStorage.setItem('media_server_url', 'http://127.0.0.1:{_PORT}')")
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_load_state("networkidle")
+        except Exception:  # noqa: BLE001 — 交还失败不应影响用例结论
+            pass
 
 
 def test_lite_mode_hides_dedup(page):
@@ -2612,6 +2689,7 @@ def main():
             # 注意顺序：轻量档用例会 create_app → 吊销令牌，必须排在 PIN 用例之前
             test_library_page_and_scan(page)
             test_settings_data_location(page)
+            test_data_root_wizard(page)
             test_lite_mode_hides_dedup(page)
 
             # 取消访问密码不锁死（会临时改动服务端 web_pin，放在最后）

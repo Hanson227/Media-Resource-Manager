@@ -426,9 +426,10 @@ class SettingsResponse(BaseModel):
 class DataRootRequest(BaseModel):
     """迁移/接管数据根。"""
     path: str = Field(..., description="新的数据根目录（如 E:\\MediaData）")
-    mode: str = Field(default="copy", pattern="^(copy|move|adopt)$",
+    mode: str = Field(default="copy", pattern="^(copy|move|adopt|create)$",
                       description=("copy=保留源（默认）；move=校验通过后删除源；"
-                                   "adopt=接管该目录里已有的数据（不复制、不覆盖）。"
+                                   "adopt=接管该目录里已有的数据（不复制、不覆盖）；"
+                                   "create=在一个空目录里新建数据根（会得到空库）。"
                                    "目标目录已有数据根时只接受 adopt"))
 
 
@@ -479,3 +480,76 @@ class ThumbnailResponse(BaseModel):
     available: bool = False
     url: Optional[str] = None
     message: str = "缩略图服务尚未实现"
+
+
+# ============================================================
+# 数据盘扫描（便携版“选择数据盘”/换盘符后接上盘上的数据）
+# ============================================================
+
+class DataRootHit(BaseModel):
+    """某个卷上找到的一个数据根。"""
+
+    path: str = ""
+    data_root_id: str = ""
+    last_known_path: str = ""
+    volume_serial: str = ""
+    units: int = 0
+    files: int = 0
+    db_bytes: int = 0
+    thumbnail_files: int = 0
+    db_ok: bool = False
+    is_current: bool = False
+    """就是当前正在用的数据根。"""
+    is_same_identity: bool = False
+    """与配置里记的 data_root_id 一致，即“就是上次用的那份数据”。"""
+
+
+class DataRootVolumeItem(BaseModel):
+    """一个就绪的卷，以及在它上面找到的数据根。"""
+
+    path: str = ""
+    label: str = ""
+    serial: str = ""
+    total: int = 0
+    free: int = 0
+    data_roots: list[DataRootHit] = []
+
+
+class DataRootVolumesResponse(BaseModel):
+    """列出所有卷及卷上的数据根（便携版“选择数据盘”用）。"""
+
+    volumes: list[DataRootVolumeItem] = []
+    depth: int = 0
+    """本次搜索深度（“深扫”按钮会用更大的值）。"""
+    current_data_root: str = ""
+    """当前数据根（未加载时为空串）。"""
+    expected_data_root_id: str = ""
+    """配置里记的数据根身份（用于“同一份数据”标记）。"""
+    data_root_status: str = ""
+    """none / missing_expected / blocked_no_root / configured ..."""
+
+
+class RemapSuggestionItem(BaseModel):
+    """一条“盘符可能变了”的改库建议（已跑过 dry-run）。"""
+
+    old_prefix: str = ""
+    new_prefix: str = ""
+    scope: str = "volume"
+    """volume = 整盘前缀（盘符变化）；root = 单个根（同卷内搬家）。"""
+    roots: list[dict] = []
+    """受影响的根：[{id, path, new_path}]。"""
+    counts: dict = {}
+    total_rows: int = 0
+    conflicts: list[dict] = []
+    thumbnail_meta_hits: int = 0
+    new_exists: bool = False
+    blocking: bool = False
+    reason: str = ""
+
+
+class RemapSuggestResponse(BaseModel):
+    """改库建议汇总。"""
+
+    suggestions: list[RemapSuggestionItem] = []
+    broken_roots: int = 0
+    message: str = ""

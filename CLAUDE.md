@@ -233,6 +233,11 @@ The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "reso
   以及平板没有桌面界面时必需的数据位置切换/接管）。单元合并/拆分/标记/封面/排除、
   SMB 共享、重置数据库、实时监视**刻意不做**；**API 有端点 ≠ Web 要有入口**，
   新功能默认只进桌面端。→ `docs/web-frontend.md`
+- **找不到数据根时绝不静默建空库** — 便携版 `resolved.data_root is None` 时以
+  `blocked_no_root` 启动：**不 init_db**，数据端点一律 409（白名单只有 settings/auth/
+  features/health/browse/volumes），前端强制进 `#/setup` 向导；用户接管后热切库
+  并立即解除闸门。盘符变化只做"建议 + 一键改库"，**绝不自动改库**。
+  → `docs/portable-lite.md`
 - **同一件事只写一份实现** — 单元写操作在 `app/services/unit_service.py`，
   扫描在 `scan_service`、查重在 `dedup_service`、删除语义在 `file_ops`：
   GUI 槽函数与 API 路由都调服务层，**不准**在 `main_window` 里再写一遍

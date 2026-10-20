@@ -1157,12 +1157,22 @@ GET /api/settings/data-root/probe?path=E:\MediaData
 
 `is_data_root=true` → 只能**接管**；否则才走迁移。相对路径 → 400。
 
+#### 扫描数据盘（“选择数据盘”/换盘符后用）
+
+```
+GET /api/settings/data-root/volumes?deep=false&volume=F:\
+```
+
+每个就绪卷列出：盘符、卷标、序列号、容量，以及**卷上找到的数据根**（含单元/文件数、
+是否当前在用、是否与配置里记的 `data_root_id` 同一身份）。`deep=true` 把搜索深度从
+默认 2 提到 4（界面的「深扫」按钮）；`volume` 可只扫某一块盘。
+
 ```
 POST /api/settings/data-root      {"path": "E:\\MediaData", "mode": "copy"}
 ```
 
 把数据库 / 缩略图 / 访问密码迁移到新的数据根（`mode=copy` 保留源；`move`
-校验通过后删源；`mode=adopt` 接管该目录里**已有**的数据）。返回：
+校验通过后删源；`mode=adopt` 接管该目录里**已有**的数据；`mode=create` 在空目录里新建数据根——会得到空库，仅在向导里显式确认后使用）。返回：
 
 ```json
 {"success": true, "target": "E:\\MediaData", "mode": "copy",
@@ -1175,7 +1185,12 @@ POST /api/settings/data-root      {"path": "E:\\MediaData", "mode": "copy"}
 - `adopt` 要求目标目录有 marker 或一份可用数据库，**不写入 / 不覆盖**目标库，只在
   接管前备份一次（`<db>.bak_<时间戳>_adopt`），并要求目标目录可写；
 - `move` / `adopt` 需要释放数据库引擎才能换库，此时服务端会立刻在新库上重新
-  初始化并返回 `restart_required=false`（`adopt` 后立即可用）。
+  初始化并返回 `restart_required=false`（接管后立即可用）；
+- `create` 只接受**空目录**：现场写 marker、建空库、切配置；已有数据的目录直接拒绝；
+- 便携版入口**找不到数据根**时以 `data_root_status=blocked_no_root` 启动：
+  上述端点与 `/api/features`、`/api/auth/*`、`/api/library/{browse,volumes}` 可用，
+  其余数据端点一律 **409**（不允许在临时空库里扫描/写入/新建）。
+  接管成功后闸门立即解除（`data_root_status=configured`）。
 
 ```
 POST /api/settings/thumbnail-cache   {"path": "E:\\MediaData\\data\\.thumbnails", "mode": "copy"}

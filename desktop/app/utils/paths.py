@@ -170,6 +170,20 @@ def list_volumes() -> list[Path]:
     return volumes
 
 
+def _volume_api_root(volume) -> str:
+    """Win32 卷信息 API 要的是**卷根**（`E:\\`），不是数据根目录。
+
+    踩过的坑：把 `E:\\Guofu\\Data` 这种目录直接传给 GetVolumeInformationW 会失败，
+    于是 marker 里的 `volume_serial` 恒为空 —— "同一块盘换了盘符"就失去了盘级身份，
+    只能靠数据根 uuid 认。实测：卷根 `C:\\`/`D:\\` 正常返回序列号，数据根目录返回空。
+    """
+    try:
+        anchor = Path(volume).anchor
+        return anchor or str(volume)
+    except Exception:  # noqa: BLE001
+        return str(volume)
+
+
 def volume_label(volume: Path) -> str:
     """卷标（如 `Media`）；取不到返回空串。"""
     if os.name != "nt":
@@ -179,7 +193,7 @@ def volume_label(volume: Path) -> str:
 
         buf = ctypes.create_unicode_buffer(261)
         ok = ctypes.windll.kernel32.GetVolumeInformationW(
-            str(volume), buf, 260, None, None, None, None, 0)
+            _volume_api_root(volume), buf, 260, None, None, None, None, 0)
         return buf.value if ok else ""
     except Exception:  # noqa: BLE001 — 卷标只是展示信息，取不到不算错误
         return ""
@@ -189,6 +203,7 @@ def volume_serial(volume: Path) -> str:
     """卷序列号（32 位十六进制字符串）；取不到返回空串。
 
     用于在同名数据盘副本之间消歧：盘符会变、卷标可被改，序列号相对稳定。
+    传目录也可以（内部会归一到卷根）。
     """
     if os.name != "nt":
         return ""
@@ -197,7 +212,8 @@ def volume_serial(volume: Path) -> str:
 
         serial = ctypes.c_ulong(0)
         ok = ctypes.windll.kernel32.GetVolumeInformationW(
-            str(volume), None, 0, ctypes.byref(serial), None, None, None, 0)
+            _volume_api_root(volume), None, 0, ctypes.byref(serial),
+            None, None, None, 0)
         return f"{serial.value:08X}" if ok else ""
     except Exception:  # noqa: BLE001
         return ""
@@ -335,6 +351,33 @@ def iter_marker_dirs(
                 queue.clear()
                 break
     return found
+
+
+def scan_volume_data_roots(volume, *, depth: Optional[int] = None,
+                          filename: str = MARKER_FILENAME) -> list[Path]:
+    """扫描**单个卷**上的数据根（Web「扫描这块盘」用）。
+
+    与开机自动搜索的区别：这里允许手动指定更深的 `depth`（默认仍是
+    DEFAULT_DATA_ROOT_SEARCH_DEPTH）—— 用户给数据根起了很深的目录名时，
+    浅扫找不到，但手动点一下就找得到；同时手动扫描只影响这一次请求，
+    不会把每次开机都拖慢。
+
+    传卷根（`F:\\`）= 扫整盘；传子目录（`F:\\Guofu`）= 只扫这棵子树。
+
+    返回按路径排序的数据根目录（卷根自身也可能是数据根）。
+    """
+    root = Path(volume)
+    try:
+        if not root.is_dir():
+            return []
+    except OSError:
+        return []
+    level = DEFAULT_DATA_ROOT_SEARCH_DEPTH if depth is None else max(0, int(depth))
+    try:
+        found = iter_marker_dirs([root], filename=filename, depth=level)
+    except OSError:
+        return []
+    return sorted(found, key=lambda p: str(p).lower())
 
 
 # ============================================================

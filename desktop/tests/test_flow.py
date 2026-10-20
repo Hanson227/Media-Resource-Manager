@@ -5308,7 +5308,9 @@ def test_web_static_files():
           "cdn.jsdelivr.net/npm/vue-router@4" in html
           and "unpkg.com/vue-router@4" in html)
     check("引导脚本按固定顺序加载本地脚本",
-          "['js-core.js', 'js-gesture.js', 'js-pages.js', 'js-app.js']" in html)
+          "['js-core.js', 'js-gesture.js', 'js-pages.js', 'js-setup.js', 'js-app.js']" in html)
+    check("数据目录向导脚本也被 Service Worker 预缓存",
+          "js-setup.js" in (web_dir / "sw.js").read_text(encoding="utf-8"))
     check("不再写死单个 <script src> 引入本地脚本",
           '<script src="js-core.js">' not in html)
     check("Vue 挂载前用 v-cloak 藏住原始 HTML", 'id="app" v-cloak' in html)

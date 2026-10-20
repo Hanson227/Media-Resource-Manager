@@ -852,6 +852,179 @@ def test_relocation_robustness():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_volume_scan_and_gate():
+    """盘符扫描 + “未加载数据”闸门（平板换盘符场景的核心）。
+
+    事故背景：平板插上硬盘（盘符经常变），老版本只会在“配置过、但目录不在”时
+    搜索，且找不到就回退到应用目录建空库，界面也无处可选数据 —— 用户只能看到
+    一个空库，以为要重新建库。这里守住：
+      ① 卷序列号/卷标对**目录**参数也能拿到（之前传目录给 Win32 恒返回空）；
+      ② 单卷扫描能控深度（深层目录名靠“深扫”才能找到）；
+      ③ /data-root/volumes 如实列出卷与卷上的数据根，并标出“上次用的那份”；
+      ④ blocked_no_root = 数据端点全部 409，但向导/能力查询可用；
+      ⑤ 接管后闸门立即解除，无需重启。
+    """
+    section("测试 L16: 盘符扫描 + 未加载数据闸门")
+    from fastapi.testclient import TestClient
+    from app.api import server as server_mod
+    from app.api.server import create_app
+    from app.db.engine import DatabaseManager
+    from app.db.migrations import init_db, migrate_db
+    from app.services import data_relocation_service as relocation
+    from app.services import path_remap_service as remap_svc
+
+    tmp = Path(tempfile.mkdtemp(prefix="lite_volscan_"))
+    try:
+        # ① 卷序列号：传目录与传卷根结果一致且非空（Windows）
+        drive = tmp / "drive"
+        drive.mkdir(parents=True, exist_ok=True)
+        vol_root = Path(app_paths.volume_of(drive) or str(drive))
+        check("卷序列号对目录参数也能取到（不再恒为空）",
+              bool(app_paths.volume_serial(drive)) == bool(app_paths.volume_serial(vol_root)))
+        check("卷标同理不因传目录而丢",
+              app_paths.volume_label(drive) == app_paths.volume_label(vol_root))
+
+        # ② 单卷扫描：深 4 层的数据根浅扫找不到、深扫能找到
+        deep_root = drive / "a" / "b" / "c" / "MediaData"
+        deep_root.mkdir(parents=True)
+        app_paths.write_marker(deep_root, db_name="media_manager.db")
+        check("浅扫（depth=2）找不到深层数据根",
+              deep_root not in app_paths.scan_volume_data_roots(drive, depth=2))
+        check("深扫（depth=4）能找到深层数据根",
+              deep_root in app_paths.scan_volume_data_roots(drive, depth=4))
+
+        # ③ volumes 端点：把 fake 卷注入进去，避免依赖真实盘
+        # 造一个带数据的根（有 marker + 可用数据库）
+        src_db = drive / "data" / "media_manager.db"
+        DatabaseManager.dispose()
+        init_db(src_db)
+        migrate_db()
+        cfg = AppConfig().with_updates(data_root=drive, db_path=src_db,
+                                      thumbnail_cache_dir=drive / "data" / ".thumbnails")
+        meta = app_paths.read_marker(deep_root) or {}
+
+        original_infos = remap_svc.list_volume_infos
+        remap_svc.list_volume_infos = lambda volumes=None: [
+            remap_svc.VolumeInfo(path=drive, label="TestVol",
+                                 serial=app_paths.volume_serial(drive),
+                                 total=0, free=0)]
+        try:
+            rt = {"config_path": str(tmp / "config.json"),
+                  "data_root": str(drive), "data_root_status": "configured",
+                  "data_root_id": str((app_paths.read_marker(drive) or {}).get("data_root_id") or "")}
+            client = TestClient(create_app(cfg, rt))
+            data = client.get("/api/settings/data-root/volumes?deep=true").json()
+            found = [r["path"] for v in data["volumes"] for r in v["data_roots"]]
+            check("volumes 端点列出卷上的数据根", any(Path(p) == deep_root for p in found))
+            check("深扫结果里带单元/文件数（供界面判断是不是同一份）",
+                  all("units" in r for v in data["volumes"] for r in v["data_roots"]))
+            check("磁盘容量信息透出",
+                  data["volumes"] and data["volumes"][0]["label"] == "TestVol")
+        finally:
+            remap_svc.list_volume_infos = original_infos
+
+        # ④ 闸门：blocked_no_root → 数据端点 409，向导/能力查询 200
+        db2 = tmp / "app2" / "data" / "media_manager.db"
+        cfg2 = AppConfig().with_updates(db_path=db2, thumbnail_cache_dir=tmp / "app2" / "data" / ".thumbnails")
+        rt2 = {"config_path": str(tmp / "app2" / "config.json"), "data_root": "",
+               "data_root_status": "blocked_no_root"}
+        client2 = TestClient(create_app(cfg2, rt2))
+        check("blocked: /api/units 被挡（409）", client2.get("/api/units").status_code == 409)
+        check("blocked: /api/library/roots 被挡（409）",
+              client2.get("/api/library/roots").status_code == 409)
+        check("blocked: /api/features 可用（前端靠它进向导）",
+              client2.get("/api/features").status_code == 200)
+        check("blocked: 数据盘扫描可用",
+              client2.get("/api/settings/data-root/volumes").status_code == 200)
+        check("blocked: /api/health 可用", client2.get("/api/health").status_code == 200)
+
+        # ⑤ 接管后：闸门立即解除、状态变 configured
+        adopt_target = tmp / "drive2" / "MediaData"
+        adopt_target.mkdir(parents=True)
+        # 用前面造好的那份数据（cfg 指向 drive）迁过去，模拟“电脑上迁到硬盘”
+        relocation.relocate_data_root(cfg, adopt_target, mode="copy")
+        res = client2.post("/api/settings/data-root",
+                           json={"path": str(adopt_target), "mode": "adopt"})
+        check("接管成功", res.status_code == 200 and res.json().get("success") is True)
+        check("接管后闸门解除（/api/units 不再 409）",
+              client2.get("/api/units").status_code == 200)
+        check("接管后状态为 configured",
+              client2.get("/api/features").json().get("data_root_status") == "configured")
+
+        # ⑥ 新建数据根：空目录可以，已有数据的目录拒绝（不覆盖）
+        fresh = tmp / "fresh" / "MediaData"
+        fresh.mkdir(parents=True)
+        created = relocation.create_data_root(cfg2, fresh)
+        check("空目录新建数据根成功", created["ok"] is True)
+        check("新建后有 marker", (fresh / app_paths.MARKER_FILENAME).is_file())
+        check("新建后有空库", Path(created["db_path"]).is_file())
+        again = relocation.create_data_root(cfg2, fresh)
+        check("已有数据的目录拒绝新建（不覆盖）", again["ok"] is False)
+    finally:
+        DatabaseManager.dispose()
+        configure_pin_dir(None)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_remap_suggest_api():
+    """盘符变化后的一键改库建议端点（盘内搬家 → 单根映射）。"""
+    section("测试 L17: 改库建议端点")
+    from fastapi.testclient import TestClient
+    from app.api.server import create_app
+    from app.db.engine import DatabaseManager
+    from app.db.migrations import init_db, migrate_db
+    from app.db import queries as q
+    from app.db.models import MediaFile, ResourceUnit
+    from app.services import path_remap_service as remap_svc
+
+    tmp = Path(tempfile.mkdtemp(prefix="lite_suggest_"))
+    try:
+        db = tmp / "data" / "media_manager.db"
+        DatabaseManager.dispose()
+        init_db(db)
+        migrate_db()
+        old_prefix = r"D:\__lite_old__"
+        new_prefix = str(tmp / "__lite_new__")
+        with DatabaseManager.session() as session:
+            root = q.add_library_root(session, old_prefix)
+            unit = ResourceUnit(name="u", path=old_prefix + r"\u",
+                                library_root_id=root.id, status="active")
+            session.add(unit)
+            session.flush()
+            for i in range(3):
+                session.add(MediaFile(
+                    resource_unit_id=unit.id,
+                    path=old_prefix + rf"\u\f{i}.jpg", filename=f"f{i}.jpg",
+                    extension=".jpg", media_type="image", size_bytes=1))
+        root_id = root.id
+
+        fake_broken = [{
+            "id": root_id, "path": old_prefix + r"\u", "enabled": True,
+            "path_exists": False, "volume_present": True, "reason": "path_missing",
+            "candidates": [{"path": new_prefix + r"\u", "kind": "same_relative",
+                            "media_count": 3}],
+        }]
+        original = remap_svc.find_broken_roots
+        remap_svc.find_broken_roots = lambda *a, **k: fake_broken
+        try:
+            cfg = AppConfig().with_updates(db_path=db, thumbnail_cache_dir=tmp / ".thumbnails")
+            client = TestClient(create_app(cfg, {"config_path": str(tmp / "config.json")}))
+            payload = client.get("/api/library/remap/suggest").json()
+            suggestions = payload.get("suggestions") or []
+            check("识出一条盘符变化映射", len(suggestions) == 1)
+            if suggestions:
+                item = suggestions[0]
+                check("映射给出旧→新前缀", item["old_prefix"] and item["new_prefix"])
+                check("影响行数已算好（库根+单元+文件）", int(item["total_rows"]) >= 3)
+                check("附带了受影响的根", len(item["roots"]) == 1)
+                check("预演无冲突才允许一键执行", item["blocking"] is False)
+        finally:
+            remap_svc.find_broken_roots = original
+    finally:
+        DatabaseManager.dispose()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_data_relocation():
     """备份 / 拷贝 / 数据根迁移（copy 保留源、move 校验后删源）。"""
     section("测试 L5: 数据迁移服务")
@@ -1144,6 +1317,8 @@ def main() -> bool:
         test_adopt_data_root()
         test_data_root_probe_and_adopt_api()
         test_relocation_robustness()
+        test_volume_scan_and_gate()
+        test_remap_suggest_api()
         test_data_relocation()
         test_lite_api()
         test_scan_via_api()

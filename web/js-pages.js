@@ -3364,6 +3364,25 @@ const LibraryPage = {
         </div>
       </div>
 
+      <div v-if="remapSuggest.suggestions.length" class="cand-list" style="padding:12px 16px">
+        <div class="cand-title">
+          <span class="mdi mdi-harddisk-plus-outline"></span>
+          检测到盘符可能变了（{{ remapSuggest.message }}）
+        </div>
+        <div v-for="(s, i) in remapSuggest.suggestions" :key="i" class="cand-row" style="flex-wrap:wrap;gap:8px">
+          <div style="flex:1;min-width:0">
+            <div class="cand-path">{{ s.old_prefix }} → {{ s.new_prefix }}</div>
+            <div class="settings-hint">
+              影响 {{ s.roots.length }} 个根 · {{ s.total_rows }} 行路径
+              <span v-if="s.blocking" style="color:var(--danger,#ef4444)"> · 有冲突，不可执行</span>
+            </div>
+          </div>
+          <button class="btn btn-primary" @click="applyRemapSuggestion(s)"
+                  :disabled="remapBusy || s.blocking">改库</button>
+        </div>
+        <div class="settings-hint">只改数据库里的路径（改前自动备份），不动磁盘文件；可重复执行。</div>
+      </div>
+
       <div v-if="notice" class="lib-notice">
         <span class="mdi mdi-information-outline"></span>
         <div class="lib-notice-text">
@@ -3469,6 +3488,9 @@ const LibraryPage = {
     pickedPath: '',
     notice: '',
     suggestion: null,
+    // 盘符变化的一键改库建议（/api/library/remap/suggest：已跑过 dry-run）
+    remapSuggest: { suggestions: [], message: '' },
+    remapBusy: false,
     run: Object.assign({}, _libraryRun),
     _timer: null,
     _mounted: true,
@@ -3504,6 +3526,42 @@ const LibraryPage = {
       } catch (e) {
         this.notice = '读取媒体库失败: ' + e.message;
       } finally { this.loading = false; }
+      await this.loadRemapSuggest();
+    },
+    /** 读改库建议：有不可达的根时，后端已把“旧卷根 → 新卷根”归并并跑过 dry-run。 */
+    async loadRemapSuggest() {
+      const broken = (this.roots || []).some((r) => r.reachable === false);
+      if (!broken) {
+        this.remapSuggest = { suggestions: [], message: '' };
+        return;
+      }
+      try {
+        this.remapSuggest = await api(this.serverUrl, '/api/library/remap/suggest');
+      } catch (e) { /* 旧版服务端无该端点 */ }
+    },
+    async applyRemapSuggestion(s) {
+      if (!confirm('把库里的旧路径改写为新路径？\n\n  ' + s.old_prefix + '\n  → ' + s.new_prefix
+          + '\n\n影响 ' + s.roots.length + ' 个根 / ' + s.total_rows + ' 行路径。\n'
+          + '只改数据库记录（改前自动备份），不移动/删除任何文件。确定继续？')) return;
+      this.remapBusy = true;
+      try {
+        const res = await api(this.serverUrl, '/api/library/remap', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ old_prefix: s.old_prefix, new_prefix: s.new_prefix,
+                                 dry_run: false }),
+        });
+        if (!res.success) {
+          this.notice = '改库失败: ' + (res.error || '存在冲突，请先处理重复记录');
+          return;
+        }
+        this.notice = '改库完成（已备份）：' + JSON.stringify(res.updated || {})
+          + (res.thumbnail_meta ? ' · 同步缩略图 meta ' + res.thumbnail_meta + ' 条' : '');
+        await this.loadRoots();
+      } catch (e) {
+        this.notice = '改库失败: ' + e.message;
+      } finally {
+        this.remapBusy = false;
+      }
     },
     async loadSettings() {
       try {
@@ -3787,11 +3845,15 @@ const SettingsPage = {
         </div>
         <div v-if="settings.data_root_status === 'missing_expected'" class="settings-row warn">
           <span class="mdi mdi-alert-outline"></span>
-          <span>未找到数据盘（期望 {{ settings.expected_data_root || '未知' }}），当前可能是空库。</span>
+          <span>未找到数据盘（期望 {{ settings.expected_data_root || '未知' }}），当前是空库。
+            插回数据盘后重启，或点上方「选择数据盘上的数据」接管。</span>
         </div>
         <div class="settings-actions">
+          <button class="btn btn-primary" @click="openSetup">
+            <span class="mdi mdi-harddisk-plus-outline"></span> 选择数据盘上的数据（接管）
+          </button>
           <button class="btn" @click="migrateDataRoot">
-            <span class="mdi mdi-content-save-move-outline"></span> 迁移数据到其它位置
+            <span class="mdi mdi-content-save-move-outline"></span> 迁移 / 复制到别的盘
           </button>
           <button class="btn" @click="changeThumbDir">
             <span class="mdi mdi-image-multiple-outline"></span> 修改缩略图目录
@@ -3810,7 +3872,11 @@ const SettingsPage = {
         <span class="mdi mdi-chevron-right"></span>
       </div>
       <div v-if="showAbout" style="padding:16px;font-size:13px;color:var(--text-secondary);line-height:1.6">
-        影视资源管理器 Web 端 v0.1.0<br>
+        影视资源管理器 Web 端 v{{ (features.build && features.build.version) || '0.1.0' }}<br>
+        <template v-if="features.build">
+          运行方式：{{ features.build.frozen ? '打包版（便携包）' : '源码运行' }}
+          <template v-if="features.build.built_at"> · 构建于 {{ features.build.built_at }}</template><br>
+        </template>
         通过浏览器访问桌面端媒体库<br>
         支持浏览、预览、查重和消息通知
       </div>
@@ -3857,6 +3923,7 @@ const SettingsPage = {
     // 数据位置（便携版核心）
     showData: false,
     settings: {},
+    features: {},
     pickerMode: '',
     migrateMsg: '',
     migrating: false,
@@ -3882,6 +3949,10 @@ const SettingsPage = {
       try {
         this.settings = await api(this.serverUrl, '/api/settings');
       } catch (e) { /* 旧版服务端无该端点 */ }
+      try {
+        // “关于”里要看版本/构建时间：平板上跑的包是不是旧的，一眼就能判断
+        this.features = await api(this.serverUrl, '/api/features');
+      } catch (e) { /* 旧版服务端 */ }
     },
     migrateDataRoot() {
       this.migrateMsg = '';
@@ -3941,6 +4012,8 @@ const SettingsPage = {
       } finally { this.migrating = false; }
     },
     openHeic() { this.$router.push('/heic'); },
+    /** 跳数据目录向导（选盘符/接管/新建都在那里做）。 */
+    openSetup() { this.$router.push('/setup'); },
     disconnect() {
       if (confirm('确定断开连接？')) this.$emit('disconnected');
     },

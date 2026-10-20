@@ -275,27 +275,37 @@ def main(argv=None) -> int:
     from app.db.engine import DatabaseManager
     from app.db.migrations import init_db, migrate_db
 
-    try:
-        init_db(config.db_path)
-        migrate_db()
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"数据库初始化失败: {e}")
-        if not resolved.ok:
-            logger.error("数据盘未连接时无法初始化数据库，请先插入数据盘。")
-        return 1
-    logger.info("数据库就绪")
+    # 没找到数据根（盘没插 / 盘符变了没认出来）：**不初始化任何数据库**。
+    # 旧行为是回退到应用目录建一个空库 —— 用户能在空库里扫描/删除，
+    # 以为“数据全没了”，甚至直接拿它重建。这里改成明确的“未加载数据”状态：
+    # 服务照常启动（向导需要它），但数据类端点一律 409（见 server.py 的闸门），
+    # 直到用户在 Web 向导里选中盘上的数据（接管后会热初始化数据库，无需重启）。
+    data_root_blocked = resolved.data_root is None
+    if data_root_blocked:
+        logger.error(
+            "未加载数据目录：磁盘上的数据不会被修改。请在浏览器里打开本机地址，"
+            "在「设置 → 数据位置」里选择硬盘上的数据（或插入数据盘后重启）。")
+    else:
+        try:
+            init_db(config.db_path)
+            migrate_db()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"数据库初始化失败: {e}")
+            return 1
+        logger.info("数据库就绪")
 
-    # ---- 4. 缩略图缓存目录注入 + 孤儿清理 ----
-    try:
-        from app.services.cleanup_service import (
-            CleanupService, configure_thumbnail_cache_dir,
-        )
-        configure_thumbnail_cache_dir(config.thumbnail_cache_dir)
-        purged = CleanupService.purge_orphaned_thumbnails()
-        if purged:
-            logger.info(f"已清理 {purged} 个孤儿缩略图缓存文件")
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"孤儿缩略图清理失败: {e}")
+    # ---- 4. 缩略图缓存目录注入 + 孤儿清理（未加载数据时跳过：清理需要数据库）----
+    if not data_root_blocked:
+        try:
+            from app.services.cleanup_service import (
+                CleanupService, configure_thumbnail_cache_dir,
+            )
+            configure_thumbnail_cache_dir(config.thumbnail_cache_dir)
+            purged = CleanupService.purge_orphaned_thumbnails()
+            if purged:
+                logger.info(f"已清理 {purged} 个孤儿缩略图缓存文件")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"孤儿缩略图清理失败: {e}")
 
     # ---- 5. 启动 HTTP API（Web 前端由它一起提供）----
     from app.api.server import APIServer
@@ -314,7 +324,10 @@ def main(argv=None) -> int:
 
     server = APIServer(config, runtime={
         "data_root": str(resolved.data_root or ""),
-        "data_root_status": resolved.data_root_source,
+        # 未加载数据根时用 blocked_no_root（而不是 none/missing）：Web 据此进向导，
+        # 且 server.py 的闸门会把数据类端点全部 409，避免任何写入落到空库。
+        "data_root_status": ("blocked_no_root" if data_root_blocked
+                             else resolved.data_root_source),
         "expected_data_root": str(resolved.expected_data_root or ""),
         "candidates": [str(c) for c in resolved.candidates],
         "config_path": str(config_path),

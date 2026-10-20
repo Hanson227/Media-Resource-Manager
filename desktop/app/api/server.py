@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import AppConfig
+from app.utils import buildinfo
 from app.utils import capabilities
 from app.utils import paths as app_paths
 from app.api.routes import files, units, messages, events, tags, heic
@@ -147,6 +148,7 @@ def _features_payload(request: Request) -> dict:
     return {
         "app": "media-manager",
         "version": "0.1.0",
+        "build": buildinfo.build_stamp(),
         "profile": getattr(cfg, "profile", "full") if cfg else "full",
         "dedup": caps.dedup,
         "dedup_video": caps.dedup_video,
@@ -205,6 +207,40 @@ def create_app(config: AppConfig, runtime: Optional[dict] = None) -> FastAPI:
     # 将配置存入 app.state，路由可通过 request.app.state.config 访问
     app.state.config = config
     app.state.runtime = dict(runtime or {})
+
+    # ============================================================
+    # 数据目录闸门（没找到数据根时，禁止任何写入落到空库）
+    # ============================================================
+    # 为什么需要：便携版没插盘 / 盘符变了没认出来时，旧实现会回退到应用目录
+    # 建一个空库，用户能对着它扫描、删除、建库，以为“数据全没了”（真实事故）。
+    # 现在入口把这种状态标成 blocked_no_root：服务照常起来（向导需要），
+    # 但除“选数据/认证/能力查询”之外的数据端点一律 409，并在 detail 里告诉用户
+    # 下一步做什么。这也顺便防住了“往临时空库里写任何东西”。
+    _GATE_ALLOW_PREFIXES = (
+        "/api/settings",          # 向导：数据盘扫描、探测、接管、迁移
+        "/api/auth",              # 解锁页面必须能用
+        "/api/features",          # 前端靠它判断要不要进向导
+        "/api/health",            # 排障
+        "/api/library/browse",    # 手选目录要能浏览服务端目录
+        "/api/library/volumes",   # 盘符列表
+    )
+
+    @app.middleware("http")
+    async def _data_root_gate(request: Request, call_next):
+        runtime_state = getattr(request.app.state, "runtime", None) or {}
+        if str(runtime_state.get("data_root_status") or "") != "blocked_no_root":
+            return await call_next(request)
+        path = request.url.path
+        # 非 /api/ 的请求全部放行：静态资源、/docs、SPA 壳 —— 拦了页面都打不开
+        if (not path.startswith("/api/")
+                or request.method == "OPTIONS"
+                or path.startswith(_GATE_ALLOW_PREFIXES)):
+            return await call_next(request)
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "尚未加载数据目录：请先在「设置 → 数据位置」里"
+                               "选择硬盘上的数据（磁盘上的数据不会被修改）"},
+        )
 
     # 注册路由
     # 查重路由**总是**注册：一套代码不允许按运行档位分叉。包里没有 cv2 / 模型时

@@ -221,6 +221,89 @@ def remove_root(root_id: int, purge_records: bool = Query(
 # 路径改库
 # ============================================================
 
+def _vol_key(path) -> str:
+    """卷根比较键（`E:\\` → `e:`，大小写/尾分隔符不敏感）。"""
+    text = str(path or "")
+    anchor = Path(text).anchor or text
+    return anchor.lower().rstrip("\\/").rstrip(":")
+
+
+@router.get("/remap/suggest", response_model=schemas.RemapSuggestResponse)
+def suggest_remap(request: Request):
+    """盘符变化后的一键改库建议（已跑过 dry-run，不改库）。
+
+    为什么需要：平板/便携版上盘符经常变，5 个根逐个改库太麻烦。这里把
+    “同卷内相对路径不变”的根按**卷级前缀**归并（`E:\\` → `F:\\`），一次
+    dry-run 给出影响行数与冲突；前端一个按钮就能全部改完。
+
+    执行仍走 `POST /api/library/remap`（`dry_run=false`，改前自动备份）——
+    本端点只读，不会写任何数据。用户必须自己点确认（不自动改库）。
+    """
+    cfg = getattr(request.app.state, "config", None)
+    cache_dir = getattr(cfg, "thumbnail_cache_dir", None) if cfg is not None else None
+    try:
+        broken = remap_svc.find_broken_roots()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"改库建议：读取失效根失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
+
+    path_missing = [b for b in broken if b.get("reason") == "path_missing"]
+    groups: dict[tuple[str, str], list[dict]] = {}
+    singles: list[schemas.RemapSuggestionItem] = []
+
+    for item in path_missing:
+        candidates = item.get("candidates") or []
+        if not candidates:
+            continue
+        # 优先“盘符变了但相对路径不变”的候选（same_relative）—— 那种才能做整盘映射
+        same_rel = [c for c in candidates if c.get("kind") == "same_relative"]
+        pick = same_rel[0] if same_rel else max(
+            candidates, key=lambda c: int(c.get("media_count") or 0))
+        new_path = str(pick.get("path") or "")
+        if not new_path:
+            continue
+        old_vol, new_vol = _vol_key(item["path"]), _vol_key(new_path)
+        entry = {"id": item["id"], "path": item["path"], "new_path": new_path}
+        if pick.get("kind") == "same_relative" and old_vol and new_vol and old_vol != new_vol:
+            groups.setdefault((old_vol, new_vol), []).append(entry)
+        else:
+            # 同卷搬家 / 只按目录名找到：按单个根映射，绝不整盘改写
+            plan = remap_svc.plan_remap(item["path"], new_path, cache_dir=cache_dir)
+            singles.append(schemas.RemapSuggestionItem(
+                old_prefix=plan.old_prefix, new_prefix=plan.new_prefix,
+                scope="root", roots=[entry], counts=dict(plan.counts),
+                total_rows=plan.total_rows, conflicts=list(plan.conflicts),
+                thumbnail_meta_hits=plan.thumbnail_meta_hits,
+                new_exists=plan.new_exists, blocking=plan.blocking,
+                reason=plan.reason,
+            ))
+
+    suggestions: list[schemas.RemapSuggestionItem] = []
+    for (old_vol, new_vol), entries in groups.items():
+        # 卷级映射：用真实卷根字符串（保留盘符冒号与反斜杠）
+        old_root = Path(str(entries[0]["path"])).anchor or str(entries[0]["path"])
+        new_root = Path(str(entries[0]["new_path"])).anchor or str(entries[0]["new_path"])
+        plan = remap_svc.plan_remap(old_root, new_root, cache_dir=cache_dir)
+        suggestions.append(schemas.RemapSuggestionItem(
+            old_prefix=plan.old_prefix, new_prefix=plan.new_prefix,
+            scope="volume", roots=list(entries), counts=dict(plan.counts),
+            total_rows=plan.total_rows, conflicts=list(plan.conflicts),
+            thumbnail_meta_hits=plan.thumbnail_meta_hits,
+            new_exists=plan.new_exists, blocking=plan.blocking,
+            reason=plan.reason,
+        ))
+
+    suggestions.extend(singles)
+    suggestions.sort(key=lambda s: (bool(s.blocking), -int(s.total_rows)))
+    message = ""
+    if suggestions:
+        total = sum(int(s.total_rows) for s in suggestions)
+        message = (f"检测到 {len(suggestions)} 处可能的盘符变化，"
+                   f"共 {total} 行路径可修复（改前自动备份，可重复执行）")
+    return schemas.RemapSuggestResponse(
+        suggestions=suggestions, broken_roots=len(path_missing), message=message)
+
+
 @router.post("/remap", response_model=schemas.RemapResponse)
 def remap_paths(body: schemas.RemapRequest):
     """路径改库：dry_run=True 只预演；False 执行（改前自动备份数据库）。"""

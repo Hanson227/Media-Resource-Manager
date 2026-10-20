@@ -52,7 +52,7 @@
       <div v-if="dataRootWarning" class="data-root-banner">
         <span class="mdi mdi-harddisk-remove"></span>
         <span class="data-root-text">{{ dataRootWarning }}</span>
-        <button class="sort-btn" @click="goTab('/settings')">去设置</button>
+        <button class="sort-btn" @click="goTab('/setup')">选择数据目录</button>
       </div>
 
       <!-- Top Bar -->
@@ -68,7 +68,7 @@
       </template>
 
       <!-- Sidebar (tablet+, conditional) -->
-      <nav class="sidebar" v-if="serverUrl && !isPreviewPage && !isConnectPage">
+      <nav class="sidebar" v-if="serverUrl && !isPreviewPage && !isConnectPage && !isSetupPage">
         <div class="sidebar-header">影视资源管理器</div>
         <div class="sidebar-nav">
           <button class="sidebar-item" :class="{ active: currentTab === 'units' }" @click="goTab('/units')">
@@ -98,7 +98,7 @@
     </div>  <!-- /layout-wrap -->
 
     <!-- Bottom Tab Bar (mobile only, outside layout-wrap) -->
-    <template v-if="serverUrl && !isPreviewPage && !isConnectPage">
+    <template v-if="serverUrl && !isPreviewPage && !isConnectPage && !isSetupPage">
       <nav class="bottom-tabs">
         <button class="tab-item" :class="{ active: currentTab === 'units' }" @click="goTab('/units')">
           <span class="mdi mdi-folder-multiple-image"></span>
@@ -148,7 +148,7 @@
       原先打开就是白屏、连 PIN 界面都没有（实测复现）。因此 vendor/ 里的
       Vue 与 vue-router 是第一顺位，CDN 只作兜底（部署时没带 vendor 也不崩）。
    ② CDN 各备两个镜像，前一个 onerror 就换下一个；
-   ③ 本地脚本必须按 js-core → js-gesture → js-pages → js-app 顺序执行
+   ③ 本地脚本必须按 js-core → js-gesture → js-pages → js-setup → js-app 顺序执行
       （js-core 第一行就是 `const { createApp } = Vue`，Vue 未就绪会整页崩）。 */
 (function () {
   var MIRRORS = {
@@ -159,7 +159,7 @@
              'https://cdn.jsdelivr.net/npm/vue-router@4/dist/vue-router.global.prod.js',
              'https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js']
   };
-  var LOCAL = ['js-core.js', 'js-gesture.js', 'js-pages.js', 'js-app.js'];
+  var LOCAL = ['js-core.js', 'js-gesture.js', 'js-pages.js', 'js-setup.js', 'js-app.js'];
 
   function fail() {
     var el = document.getElementById('app');

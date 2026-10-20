@@ -652,3 +652,61 @@ def adopt_data_root(config, target_root, *, marker_name: str = "") -> dict:
         "message": (f"已接管 {root} 里的数据"
                     f"（{info['units']} 个单元 / {info['files']} 个文件）"),
     }
+
+
+def create_data_root(config, target_root) -> dict:
+    """在一个空目录里**新建**数据根（marker + 空数据库 + 缩略图目录）。
+
+    用途：便携版没插盘、且用户确实想在本机从头开始。旧行为是“静默回退到应用
+    目录建空库”，不可见也不可逆；这里把它变成用户显式点一下、写在指定位置
+    的动作（向导里已二次确认）。已有数据的目录**拒绝**执行（防止误覆盖）。
+    """
+    from app.db.migrations import init_db, migrate_db
+    from app.db.engine import DatabaseManager
+    from app.utils import paths as _paths
+
+    root = Path(target_root)
+    marker_name = (getattr(config, "data_root_marker", None)
+                   or _paths.MARKER_FILENAME)
+    if not path_writable(root):
+        return {"ok": False, "target_root": str(root), "mode": "create",
+                "steps": {}, "marker": None,
+                "message": f"目标目录不可写: {root}"}
+    info = inspect_data_root(root, marker_name=marker_name)
+    if info["is_data_root"] or info["db_exists"]:
+        return {"ok": False, "target_root": str(root), "mode": "create",
+                "steps": {}, "marker": None, "inspect": info,
+                "message": ("这个目录里已经有数据（或数据库），"
+                            "请用“使用这份数据”接管，不要新建覆盖它")}
+
+    steps: dict = {}
+    try:
+        marker = _paths.write_marker(root, filename=marker_name,
+                                     db_name="media_manager.db")
+        steps["marker"] = {"path": str(_paths.marker_path(root, marker_name))}
+        db_path = root / "data" / "media_manager.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        DatabaseManager.dispose()
+        init_db(db_path)
+        migrate_db()
+        steps["database"] = {"ok": True, "dst": str(db_path),
+                             "message": "已创建空库"}
+    except Exception as e:  # noqa: BLE001 — 与 migrate 一致：异常转 ok=False
+        logger.error(f"新建数据根失败: {e}", exc_info=True)
+        return {"ok": False, "target_root": str(root), "mode": "create",
+                "steps": steps, "marker": None,
+                "message": f"新建数据根失败: {e}"}
+
+    thumb_dir = root / "data" / ".thumbnails"
+    return {
+        "ok": True,
+        "target_root": str(root),
+        "db_path": str(db_path),
+        "thumbnail_cache_dir": str(thumb_dir),
+        "pin_path": str(root / "data" / ".web_pin"),
+        "mode": "create",
+        "steps": steps,
+        "marker": marker,
+        "engine_released": True,
+        "message": f"已在 {root} 新建数据根（空库）",
+    }

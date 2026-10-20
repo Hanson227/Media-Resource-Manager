@@ -11,10 +11,11 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.api import schemas
 from app.services import data_relocation_service as relocation
+from app.services import path_remap_service as remap_svc
 from app.services.cleanup_service import CleanupService, configure_thumbnail_cache_dir
 from app.services.dedup_gate import acquire_dedup_gate, is_dedup_busy, release_dedup_gate
 from app.utils import net as net_utils
@@ -110,6 +111,23 @@ def _apply_runtime_config(request: Request, config) -> None:
         logger.warning(f"缩略图缓存目录注入失败: {e}")
 
 
+def _mark_data_root_ready(request: Request, data_root, *,
+                          source: str = "configured") -> None:
+    """接管/迁移成功后解除“未加载数据目录”闸门（无需重启）。
+
+    不解除的后果：便携版从 blocked_no_root 启动后，用户明明已经选好了盘上的数据，
+    数据端点却继续 409，只能重启 —— 那正是我们要避免的“黑盒”体验。
+    """
+    app = getattr(request, "app", None)
+    runtime = getattr(getattr(app, "state", None), "runtime", None)
+    if not isinstance(runtime, dict):
+        return
+    runtime["data_root"] = str(data_root or "")
+    runtime["data_root_status"] = source
+    runtime["expected_data_root"] = ""
+    runtime["candidates"] = []
+
+
 @router.get("", response_model=schemas.SettingsResponse)
 def get_settings(request: Request):
     """当前运行设置与数据位置（Web 设置页展示）。"""
@@ -179,6 +197,71 @@ def probe_data_root(path: str, request: Request):
     return schemas.DataRootProbeResponse(**info)
 
 
+@router.get("/data-root/volumes", response_model=schemas.DataRootVolumesResponse)
+def list_data_root_volumes(request: Request, deep: bool = Query(
+        False, description="是否深扫（目录层级更大，稍慢）"),
+        volume: str = Query("", description="只扫描这个卷（如 F:\\）；空=全部")):
+    """列出每个就绪卷，以及卷上找到的数据根（便携版“选择数据盘”用）。
+
+    为什么需要它：平板插上硬盘后盘符经常变，用户只知道“数据在这块盘上”。
+    这里把“这块盘上有没有数据根 / 是哪一份（uuid 与配置里的相同就标 same_identity）/
+    有多少单元与文件”直接列出来，点一下就能接管 —— 不用让用户猜路径。
+
+    `deep=true` 时搜索深度从默认 2 提到 4（“扫描这块盘”按钮用）：
+    数据根目录名起得深时浅扫找不到，但手动深扫只影响这一次请求，不拖慢每次开机。
+    """
+    cfg = _cfg(request)
+    marker_name = getattr(cfg, "data_root_marker", "") or ""
+    depth = 4 if deep else int(
+        getattr(cfg, "data_root_search_depth", None) or 2)
+    current = Path(cfg.data_root) if cfg is not None and cfg.data_root else None
+    expected_id = str(getattr(cfg, "data_root_id", "") or "")
+    marker_file = marker_name or app_paths.MARKER_FILENAME
+
+    volumes: list[schemas.DataRootVolumeItem] = []
+    wanted = str(volume or "").strip().lower().rstrip("\\/")
+    for info in remap_svc.list_volume_infos():
+        if wanted and str(info.path).strip().lower().rstrip("\\/") != wanted:
+            continue
+        hits: list[schemas.DataRootHit] = []
+        for root in app_paths.scan_volume_data_roots(
+                info.path, depth=depth, filename=marker_file):
+            probe = relocation.inspect_data_root(root, marker_name=marker_name)
+            marker = probe.get("marker") or {}
+            is_current = False
+            if current is not None:
+                try:
+                    is_current = root.resolve() == current.resolve()
+                except OSError:
+                    is_current = False
+            hit_id = str(probe.get("data_root_id") or "")
+            hits.append(schemas.DataRootHit(
+                path=str(root),
+                data_root_id=hit_id,
+                last_known_path=str(marker.get("last_known_path") or ""),
+                volume_serial=str(marker.get("volume_serial") or ""),
+                units=int(probe.get("units") or 0),
+                files=int(probe.get("files") or 0),
+                db_bytes=int(probe.get("db_bytes") or 0),
+                thumbnail_files=int(probe.get("thumbnail_files") or 0),
+                db_ok=bool(probe.get("db_ok")),
+                is_current=is_current,
+                is_same_identity=bool(expected_id and hit_id == expected_id),
+            ))
+        volumes.append(schemas.DataRootVolumeItem(
+            path=str(info.path), label=info.label, serial=info.serial,
+            total=int(info.total or 0), free=int(info.free or 0),
+            data_roots=hits))
+
+    runtime = getattr(request.app.state, "runtime", None) or {}
+    return schemas.DataRootVolumesResponse(
+        volumes=volumes, depth=depth,
+        current_data_root=str(current) if current is not None else "",
+        expected_data_root_id=expected_id,
+        data_root_status=str(runtime.get("data_root_status") or ""),
+    )
+
+
 @router.post("/data-root", response_model=schemas.DataMigrationResponse)
 def set_data_root(body: schemas.DataRootRequest, request: Request):
     """迁移（copy/move）或接管（adopt）数据根。
@@ -234,6 +317,9 @@ def set_data_root(body: schemas.DataRootRequest, request: Request):
         if body.mode == "adopt":
             result = relocation.adopt_data_root(
                 cfg, target, marker_name=getattr(cfg, "data_root_marker", "") or "")
+        elif body.mode == "create":
+            # 在空目录里新建数据根（向导兜底用）：只接受空目录，不碰已有数据
+            result = relocation.create_data_root(cfg, target)
         else:
             result = relocation.relocate_data_root(cfg, target, mode=body.mode)
         if not result["ok"]:
@@ -258,6 +344,8 @@ def set_data_root(body: schemas.DataRootRequest, request: Request):
                    "（请通过 main.py / main_web.py 启动）") if config_path is None \
             else _persist_config(new_cfg, config_path)
         _apply_runtime_config(request, new_cfg)
+        # 闸门解除：数据目录已就绪，数据端点立即可用（无需重启）
+        _mark_data_root_ready(request, target, source="configured")
         restart_required = True
         message = f"{result['message']}；重启程序后生效"
         if body.mode == "copy":

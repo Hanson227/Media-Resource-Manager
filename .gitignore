@@ -64,3 +64,6 @@ docs/
 Thumbs.db
 .DS_Store
 $RECYCLE.BIN/
+
+# dsh-ops 运行时锁文件（插件自动生成，非项目文件）
+.dsh-ops-update-*.lock
