@@ -232,6 +232,38 @@ class CleanupService:
         CleanupService._remove_thumbnail(file_id, cache_dir)
 
     @staticmethod
+    def remove_thumbnails_for_files(
+        file_ids,
+        cache_dir=None,
+        unit_path=None,
+    ) -> None:
+        """批量删除文件的缩略图缓存（集中缓存 + 旧版单元 `.thumbnails`）。
+
+        这是删除/合并等场景的唯一实现：缓存名只带 file_id，而 file_id 会被
+        复用；只删图不删 `.meta` 会留下永远无人回收的 sidecar。`cache_dir=None`
+        时使用配置注入的目录。
+        """
+        dirs = [_resolve_cache_dir(cache_dir)]
+        if unit_path:
+            dirs.append(Path(unit_path) / ".thumbnails")
+        seen_dirs = set()
+        for d in dirs:
+            key = str(d).lower()
+            if key in seen_dirs:
+                continue
+            seen_dirs.add(key)
+            for file_id in file_ids or ():
+                if file_id is None:
+                    continue
+                for thumb in CleanupService._thumbnail_paths(int(file_id), d):
+                    if not thumb.exists():
+                        continue
+                    try:
+                        thumb.unlink()
+                    except OSError as e:
+                        logger.warning(f"缩略图清理失败 {thumb}: {e}")
+
+    @staticmethod
     def _remove_thumbnail(file_id: int, cache_dir=None) -> None:
         """删除文件对应的缩略图缓存（含 .meta sidecar，目录来自配置）。"""
         if file_id is None:

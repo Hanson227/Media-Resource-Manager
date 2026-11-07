@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 from app.db import queries as q
 from app.db.engine import DatabaseManager
 from app.db.models import MediaFile
+from app.services.cleanup_service import CleanupService
 from app.services.file_ops import (
     OFFLINE_REASON,
     move_to_trash,
@@ -91,7 +92,6 @@ class MergePlan:
     merged_path: str
     move_files: tuple[MergeFile, ...]
     trash_files: tuple[MergeFile, ...]
-    retained_count: int = 0
 
 
 def _resolve_dest_name(dest_dir: Path, filename: str) -> str:
@@ -115,28 +115,6 @@ def _resolve_dest_name(dest_dir: Path, filename: str) -> str:
             return candidate
         candidate = f"{stem} ({n}){suffix}"
         n += 1
-
-
-def _purge_thumb_cache(file_id: int, unit_path: str, cfg) -> None:
-    """删除某文件的缩略图缓存（与 files.py _purge_thumbnail_cache 同一逻辑）。
-
-    只在文件被回收站删除时需要（file_id 可能被新文件复用，旧缓存会张冠李戴）；
-    被移动的文件保留缓存 —— .meta 里源路径过期会让缓存自动 miss 重生成。
-    """
-    dirs = []
-    if cfg is not None and getattr(cfg, "thumbnail_cache_dir", None):
-        dirs.append(Path(cfg.thumbnail_cache_dir))
-    if unit_path:
-        dirs.append(Path(unit_path) / ".thumbnails")
-    for d in dirs:
-        for fmt in ("jpg", "png"):
-            for suffix in ("", ".meta"):
-                target = d / f"{file_id}_thumb.{fmt}{suffix}"
-                try:
-                    if target.exists():
-                        target.unlink()
-                except OSError as e:
-                    logger.warning("清理缩略图缓存失败 %s: %s", target, e)
 
 
 def build_merge_plan(result_id: int, keep: str,
@@ -183,7 +161,7 @@ def build_merge_plan(result_id: int, keep: str,
             # 重入重试时被并入目录可能已被上次收尾删除（空目录 rmdir）。
             # 只要该单元在库里已无文件，就没什么可移/可删的，直接进收尾；
             # 还有文件却找不到目录才是真异常（被外部删除），拒绝并说明。
-            if q.get_files_by_unit(session, other.id):
+            if other_files:
                 raise MergeError(409, f"被并入文件夹已不存在: {other.path}")
 
         matches = q.get_file_matches_for_result(session, dr.id)
@@ -202,7 +180,6 @@ def build_merge_plan(result_id: int, keep: str,
             MergeFile(f.id, f.path, f.filename)
             for f in other_files if f.id not in trash_ids
         ]
-        retained_count = len(matched_other_ids & set(retain_matches))
 
         return MergePlan(
             result_id=dr.id,
@@ -212,7 +189,6 @@ def build_merge_plan(result_id: int, keep: str,
             merged_path=other.path,
             move_files=tuple(move_files),
             trash_files=tuple(trash_files),
-            retained_count=retained_count,
         )
 
 
@@ -336,7 +312,12 @@ def execute_merge_plan(plan: MergePlan, cfg=None) -> MergeOutcome:
                     "reason": f"回收后删库失败: {e}",
                 })
                 continue
-            _purge_thumb_cache(f.file_id, plan.merged_path, cfg)
+            CleanupService.remove_thumbnails_for_files(
+                [f.file_id],
+                cache_dir=(getattr(cfg, "thumbnail_cache_dir", None)
+                           if cfg is not None else None),
+                unit_path=plan.merged_path,
+            )
             outcome.trashed_count += 1
         except Exception as e:
             logger.error("合并回收失败 file_id=%s: %s", f.file_id, e, exc_info=True)

@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Sequence, Any
 
-from sqlalchemy import func, and_, or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import (

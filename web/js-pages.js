@@ -398,7 +398,7 @@ const UnitsPage = {
     },
 
     async mergeInto(child, parent) {
-      if (!confirm('将「' + child.name + '」合并进「' + parent.name + '」？\n\n只移动媒体库记录/文件，重复内容按查重规则处理。')) return;
+      if (!confirm('将「' + child.name + '」合并进「' + parent.name + '」？\n\n只合并媒体库记录，不移动磁盘文件；磁盘内容保持不变。')) return;
       try {
         const data = await api(this.serverUrl, '/api/units/merge', {
           method: 'POST',

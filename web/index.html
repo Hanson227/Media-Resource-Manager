@@ -10,11 +10,8 @@
 <title>影视资源管理器</title>
 <link rel="manifest" href="manifest.json">
 <link rel="stylesheet" href="style.css">
-<link rel="preconnect" href="https://cdn.jsdelivr.net">
-<!-- 离线优先：本地 vendor 里的 MDI 图标字体先加载（便携版/内网无外网时仍能显示图标）；
-     若部署时没带 vendor，浏览器忽略 404，下面 CDN 那份仍然生效。 -->
+<!-- 离线优先：使用本地 vendor 里的 MDI 图标字体（内网/无外网时仍能显示图标）。 -->
 <link rel="stylesheet" href="vendor/mdi/css/materialdesignicons.min.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7/css/materialdesignicons.min.css">
 </head>
 <body>
 <div id="app" v-cloak>

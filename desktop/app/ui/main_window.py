@@ -32,7 +32,6 @@ from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView
 from app.ui.right_panel.thumbnail_grid import (
     ThumbnailGridModel, ThumbnailGridView, FolderCardModel,
 )
-from app.ui.right_panel.thumbnail_delegate import ThumbnailDelegate
 from app.ui.workers.scan_worker import ScanWorker
 from app.ui.workers.hash_worker import HashWorker
 from app.ui.workers.dedup_worker import DedupWorker
@@ -40,7 +39,6 @@ from app.services.file_ops import volume_available, volume_label
 from app.core.watcher import FileWatcher, MediaFileEventHandler
 from app.utils.constants import ExcludeReason, MediaType
 from app.utils.file_helpers import format_size
-from app.utils.media_types import is_media_file
 
 logger = logging.getLogger(__name__)
 
@@ -546,7 +544,7 @@ class MainWindow(QMainWindow):
             if root_idx.isValid():
                 self._tree_view.setCurrentIndex(root_idx)
 
-        # 缩略图由 ThumbLoader 按需生成，后台不自动启动哈希/人脸索引
+        # 缩略图由 ThumbnailGenerator/网格按需生成，后台不自动启动哈希/人脸索引
 
     @Slot()
     def _on_scan_cancelled(self) -> None:

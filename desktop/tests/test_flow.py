@@ -8004,6 +8004,64 @@ def test_p0_regressions():
         shutil.rmtree(tmp_scan, ignore_errors=True)
 
 
+    # ---------- Review: 缩略图清理统一入口（集中缓存 + 单元 .thumbnails，图/meta 成对） ----------
+    from app.services.cleanup_service import CleanupService
+    tmp_thumb = Path(tempfile.mkdtemp(prefix="p0_thumb_"))
+    try:
+        cache_dir = tmp_thumb / "cache"
+        unit_dir = tmp_thumb / "unit"
+        for d in (cache_dir, unit_dir / ".thumbnails"):
+            d.mkdir(parents=True, exist_ok=True)
+            for name in ("7_thumb.jpg", "7_thumb.jpg.meta",
+                         "7_thumb.png", "7_thumb.png.meta", "8_thumb.jpg"):
+                (d / name).write_bytes(b"x")
+        CleanupService.remove_thumbnails_for_files(
+            [7], cache_dir=cache_dir, unit_path=unit_dir)
+        check("Review 缩略图集中缓存已删 jpg",
+              not (cache_dir / "7_thumb.jpg").exists())
+        check("Review 缩略图集中缓存已删 meta",
+              not (cache_dir / "7_thumb.jpg.meta").exists())
+        check("Review 缩略图集中缓存已删 png",
+              not (cache_dir / "7_thumb.png").exists())
+        check("Review 缩略图单元缓存已删",
+              not (unit_dir / ".thumbnails" / "7_thumb.png.meta").exists())
+        check("Review 缩略图不误删其他文件",
+              (cache_dir / "8_thumb.jpg").exists())
+    finally:
+        shutil.rmtree(tmp_thumb, ignore_errors=True)
+
+    # ---------- Review: 删除文件后 content_modified_at 必须回退 ----------
+    tmp_stat = Path(tempfile.mkdtemp(prefix="p0_stats_"))
+    try:
+        uid_stat, fids_stat, paths_stat = _make_temp_unit(
+            tmp_stat, "统计单元", ["old.jpg", "new.jpg"])
+        old_ts = 1_700_000_000.0
+        new_ts = old_ts + 86400
+        os.utime(paths_stat[0], (old_ts, old_ts))
+        os.utime(paths_stat[1], (new_ts, new_ts))
+        with DatabaseManager.session() as session:
+            q.refresh_unit_stats(session, [uid_stat])
+        with DatabaseManager.session() as session:
+            before_dt = q.get_unit_by_id(session, uid_stat).content_modified_at
+        check("Review 统计前置：内容日期取最新文件",
+              before_dt is not None
+              and abs(before_dt.timestamp() - new_ts) < 2)
+        result = unit_service.delete_file(
+            fids_stat[1], mode=file_ops_module.MODE_RECORD)
+        with DatabaseManager.session() as session:
+            after_dt = q.get_unit_by_id(session, uid_stat).content_modified_at
+        check("Review 删除最新文件成功", result.ok is True)
+        check("Review 删除后内容日期回退到剩余文件",
+              after_dt is not None
+              and abs(after_dt.timestamp() - old_ts) < 2)
+        with DatabaseManager.session() as session:
+            root = q.get_root_by_path(session, str(tmp_stat))
+            if root:
+                session.delete(root)
+    finally:
+        shutil.rmtree(tmp_stat, ignore_errors=True)
+
+
 def test_api_unit_management_endpoints():
     """Phase 1: 单元管理能力（改名/封面/排除/恢复）HTTP 端点。"""
     section("测试 41: 单元管理 HTTP 端点")

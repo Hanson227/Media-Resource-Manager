@@ -8,6 +8,7 @@
 """
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -717,11 +718,38 @@ class FolderTreeView(QTreeView):
             if all(_under(other, path) for _, other in paths)
         ]
         if not candidates:
+            # 两个兄弟单元没有共同的“已存在父单元”时，把它们的公共父目录
+            # 自动标成一个手动单元，再合并进去 —— 否则菜单文案承诺的
+            # “合并到公共父文件夹”会直接变成一句错误提示。
+            try:
+                common = os.path.commonpath([p for _, p in paths])
+            except ValueError:
+                common = ""
+            common_path = Path(common) if common else None
+            if (common_path is not None and common_path.is_dir()
+                    and common_path.parent != common_path):
+                from app.services import unit_service
+                marked = unit_service.mark_manual_unit(
+                    str(common_path),
+                    config=getattr(self._model, "_config", None),
+                )
+                if marked.ok and marked.unit_ids:
+                    parent_id = marked.unit_ids[0]
+                    child_ids = [uid for uid, _ in paths if uid != parent_id]
+                    if child_ids:
+                        self.merge_requested.emit(parent_id, child_ids)
+                        return
+                else:
+                    QMessageBox.warning(
+                        self, "无法合并",
+                        f"无法把公共父文件夹标记为资源单元：\n{marked.message}",
+                    )
+                    return
             QMessageBox.information(
                 self,
                 "无法合并",
-                "请选择同一父文件夹下的多个资源单元再合并；\n"
-                "如果它们不在同一个单元内，请先在父文件夹上手动标记为资源单元。",
+                "选中的单元没有可用的公共父文件夹，无法合并。\n"
+                "请选择同一父文件夹下的多个资源单元。",
             )
             return
         parent_id, _ = min(candidates, key=lambda item: len(item[1]))

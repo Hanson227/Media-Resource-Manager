@@ -49,7 +49,6 @@ def checkpoint(db_path) -> bool:
 
     if DatabaseManager.is_initialized() and DatabaseManager.current_db_path() == db_path:
         try:
-            from sqlalchemy import text
             with DatabaseManager.get_engine().connect() as conn:
                 conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE);")
             return True

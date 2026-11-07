@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 from app.db.engine import DatabaseManager
 from app.db import queries as q
@@ -280,44 +280,28 @@ def rename_unit(unit_id: int, new_name: str, *, config=None) -> UnitActionResult
 def _purge_thumbnails(file_ids, unit_path, config) -> None:
     """删除这些文件的缩略图缓存（含 `.meta` sidecar）。
 
-    清理必须与生成同源：缓存名只带 file_id，而 file_id 会被复用；只删图
-    会留下孤儿 meta。集中缓存与旧版单元内 `.thumbnails` 都要处理。
+    实现统一在 `CleanupService.remove_thumbnails_for_files`：集中缓存与旧版
+    单元内 `.thumbnails` 都要处理，图与 meta 成对删除。
     """
-    dirs = []
+    from app.services.cleanup_service import CleanupService
+
     cache_dir = getattr(config, "thumbnail_cache_dir", None) if config else None
-    if cache_dir:
-        dirs.append(Path(cache_dir))
-    if unit_path:
-        dirs.append(Path(unit_path) / ".thumbnails")
-    for fid in file_ids:
-        for d in dirs:
-            # 两种扩展名都清：配置从 jpg 改成 png 后，旧 jpg 仍可能命中
-            for fmt in ("jpg", "png"):
-                for suffix in ("", ".meta"):
-                    target = d / f"{fid}_thumb.{fmt}{suffix}"
-                    try:
-                        if target.exists():
-                            target.unlink()
-                    except OSError:
-                        pass
+    CleanupService.remove_thumbnails_for_files(
+        file_ids, cache_dir=cache_dir, unit_path=unit_path,
+    )
 
 
 def _refresh_unit_stats(unit_id: int) -> None:
-    """按库内实际文件重算单元统计（删除文件后快照列不会自己变）。"""
+    """按库内实际文件重算单元统计（删除文件后快照列不会自己变）。
+
+    直接复用 `queries.refresh_unit_stats()`：它会同时更新 file_count /
+    total_size / content_modified_at（删掉最新文件后内容日期必须回退，
+    否则按日期排序会一直停在旧值）。
+    """
     if not unit_id:
         return
-    from sqlalchemy import func
-    from app.db.models import MediaFile
     with DatabaseManager.session() as session:
-        row = (
-            session.query(
-                func.count(MediaFile.id),
-                func.coalesce(func.sum(MediaFile.size_bytes), 0),
-            )
-            .filter(MediaFile.resource_unit_id == unit_id)
-            .one()
-        )
-        q.update_unit_stats(session, unit_id, int(row[0]), int(row[1]))
+        q.refresh_unit_stats(session, [unit_id])
 
 
 def delete_unit(unit_id: int, *, mode: str = file_ops.MODE_TRASH,

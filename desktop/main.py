@@ -53,7 +53,7 @@ def _fix_windows_encoding():
 _fix_windows_encoding()
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, QObject, Signal
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QIcon
 
 from config import AppConfig

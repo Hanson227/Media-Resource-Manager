@@ -1,5 +1,5 @@
 /* 影视资源管理器 — Service Worker */
-const CACHE = 'media-manager-v13';
+const CACHE = 'media-manager-v14';
 
 /* 预缓存清单：本地脚本/样式 + 离线 Vue 运行库（vendor/）。
    必须逐个 add（addAll 有一个 404 就整批失败），否则部署时缺了 vendor

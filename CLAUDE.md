@@ -121,7 +121,7 @@ desktop/app/
     left_panel/          #   FolderTreeView + context menu (merge/split/mark units)
     right_panel/         #   ThumbnailGridView + ThumbnailDelegate
     dialogs/             #   Settings, DedupCompare, PathRepair, MessageCenter, etc.
-    widgets/             #   StatusBar, ProgressPanel, ThumbLoader
+    widgets/             #   StatusBar, TagFilterBar, AccordionManager
     workers/             #   QThread workers: ScanWorker, HashWorker, DedupWorker
   api/
     server.py            #   FastAPI app on 0.0.0.0:19527, runs in daemon thread

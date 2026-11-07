@@ -556,11 +556,6 @@ class APIServer:
         logger.info("API 服务器已停止")
 
     @property
-    def is_running(self) -> bool:
-        """服务器是否正在运行。"""
-        return self._running
-
-    @property
     def is_thread_alive(self) -> bool:
         """服务线程是否还活着。
 

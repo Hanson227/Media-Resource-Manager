@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageFile, ImageOps
 
 # 允许 Pillow 加载截断/损坏的 JPEG 图片（与 Qt QPixmap 行为一致）
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -337,7 +337,6 @@ class ThumbnailGenerator:
         """生成 RAW 图片缩略图（rawpy → Pillow）。"""
         try:
             import rawpy
-            import numpy as np
             with rawpy.imread(str(source)) as raw:
                 rgb = raw.postprocess(
                     use_camera_wb=True,
