@@ -485,3 +485,89 @@ QToolTip {
     border: 1px solid #45475a;
     padding: 4px 8px;
 }
+
+/* ---- 一级导航 rail ---- */
+QFrame#navRail {
+    background: #16161d;
+    border-right: 1px solid #252530;
+}
+QLabel#navRailTitle {
+    color: #7c7c8a;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    padding: 4px 0 8px 0;
+}
+QToolButton#navButton {
+    color: #a0a0b0;
+    background: transparent;
+    border: none;
+    border-radius: 10px;
+    padding: 8px 4px;
+    font-size: 12px;
+}
+QToolButton#navButton:hover {
+    background: #1c1c26;
+    color: #f0f0f4;
+}
+QToolButton#navButton:checked {
+    background: #252530;
+    color: #f0f0f4;
+    font-weight: 600;
+}
+
+/* ---- 一级页面 / 操作卡片 ---- */
+QWidget#sectionPage {
+    background: #0e0e12;
+}
+QLabel#pageTitle {
+    color: #f0f0f4;
+    font-size: 22px;
+    font-weight: 700;
+}
+QLabel#pageSubtitle {
+    color: #a0a0b0;
+    font-size: 13px;
+    padding-bottom: 6px;
+}
+QLabel#pageHint {
+    color: #7c7c8a;
+    font-size: 12px;
+}
+QPushButton#primaryBtn {
+    background: #6366f1;
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-weight: 600;
+}
+QPushButton#primaryBtn:hover { background: #818cf8; }
+QCommandLinkButton#navCard {
+    text-align: left;
+    color: #f0f0f4;
+    background: #1c1c26;
+    border: 1px solid #252530;
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+QCommandLinkButton#navCard:hover {
+    border-color: #6366f1;
+    background: #252530;
+}
+QCommandLinkButton#navCard:pressed { background: #313244; }
+QListWidget#libraryRoots {
+    background: #16161d;
+    border: 1px solid #252530;
+    border-radius: 10px;
+    padding: 6px;
+}
+QListWidget#libraryRoots::item {
+    padding: 10px 12px;
+    border-radius: 6px;
+    color: #f0f0f4;
+}
+QListWidget#libraryRoots::item:hover { background: #252530; }
+QListWidget#libraryRoots::item:selected { background: #6366f1; color: #ffffff; }

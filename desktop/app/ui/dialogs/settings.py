@@ -78,6 +78,7 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         # 修复标签栏文字在深色主题下不可见的问题
         tabs.setPalette(palette)
+        self._tabs = tabs
 
         # ==== 数据库选项卡 ====
         db_tab = QWidget()
@@ -239,6 +240,11 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._on_save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def set_current_tab(self, index: int) -> None:
+        """打开时直接定位到某个分区（供一级导航的设置卡片使用）。"""
+        if 0 <= index < self._tabs.count():
+            self._tabs.setCurrentIndex(index)
 
     def _load_values(self) -> None:
         """从当前配置加载值到界面。"""

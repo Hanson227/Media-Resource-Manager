@@ -18,8 +18,9 @@ from PySide6.QtCore import Qt, QSize, QTimer, QThread, Signal, Slot
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow, QMenu, QToolBar, QSplitter, QWidget, QVBoxLayout,
+    QHBoxLayout, QGridLayout, QStackedWidget, QListWidget, QListWidgetItem,
     QLabel, QMessageBox, QSystemTrayIcon, QApplication,
-    QFileDialog, QPushButton, QLineEdit, QComboBox,
+    QFileDialog, QPushButton, QCommandLinkButton, QLineEdit, QComboBox,
     QInputDialog, QAbstractItemView, QStyle,
 )
 
@@ -27,6 +28,7 @@ from config import AppConfig
 from app.db.engine import DatabaseManager
 from app.db import queries as q
 from app.ui.widgets.accordion_manager import AccordionManager
+from app.ui.widgets.navigation_rail import NavigationRail
 from app.ui.widgets.status_bar import MainStatusBar
 from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView
 from app.ui.right_panel.thumbnail_grid import (
@@ -283,27 +285,9 @@ class MainWindow(QMainWindow):
         toolbar.setIconSize(QSize(24, 24))
         self.addToolBar(toolbar)
 
+        # 一级入口已移到左侧导航 rail；工具栏只保留全局筛选/排序/消息，
+        # 避免同一动作在菜单、工具栏、页面卡片里出现三次。
         _std = self.style().standardIcon
-        add_btn = QPushButton("添加根目录")
-        add_btn.setIcon(_std(QStyle.SP_DirOpenIcon))
-        add_btn.clicked.connect(self._on_add_root)
-        add_btn.setToolTip("添加媒体库根目录 (Ctrl+O)")
-        toolbar.addWidget(add_btn)
-
-        refresh_btn = QPushButton("刷新")
-        refresh_btn.setIcon(_std(QStyle.SP_BrowserReload))
-        refresh_btn.clicked.connect(self._on_refresh_all)
-        refresh_btn.setToolTip("重新扫描所有媒体库 (F5)")
-        toolbar.addWidget(refresh_btn)
-
-        dedup_btn = QPushButton("查重")
-        dedup_btn.setIcon(_std(QStyle.SP_FileDialogContentsView))
-        dedup_btn.clicked.connect(self._on_start_dedup)
-        dedup_btn.setToolTip("自动计算哈希索引（MD5/视频帧/感知哈希），然后执行查重 (Ctrl+D)")
-        toolbar.addWidget(dedup_btn)
-
-        toolbar.addSeparator()
-
         self._search_input = QLineEdit()
         self._search_input.setPlaceholderText("搜索文件名...")
         self._search_input.setMaximumWidth(180)
@@ -339,11 +323,165 @@ class MainWindow(QMainWindow):
         self._sort_size_btn.clicked.connect(lambda: self._on_sort("size"))
         toolbar.addWidget(self._sort_size_btn)
 
+        # 搜索/类型筛选/排序只对「单元」页的文件网格有意义，其他页面隐藏，
+        # 避免用户看到一排点了没反应的控件。
+        self._unit_toolbar_widgets = [
+            self._search_input, self._filter_combo,
+            self._sort_name_btn, self._sort_size_btn,
+        ]
+
     # ============================================================
     # 中央区域：左树 + 右网格
     # ============================================================
 
     def _setup_central_area(self) -> None:
+        """构建「一级导航 + 页面栈」。
+
+        五个一级入口固定在最左侧；原来散落在菜单/工具栏/对话框里的功能
+        分别归入对应页面的操作卡片，页面本身只做入口，不复制业务逻辑。
+        """
+        std = self.style().standardIcon
+        self._nav_rail = NavigationRail()
+        self._nav_rail.add_item(
+            "媒体库", std(QStyle.StandardPixmap.SP_DirHomeIcon),
+            "媒体库根目录、扫描与数据位置")
+        self._nav_rail.add_item(
+            "单元", std(QStyle.StandardPixmap.SP_DirIcon),
+            "资源单元与文件浏览")
+        self._nav_rail.add_item(
+            "查重", std(QStyle.StandardPixmap.SP_FileDialogContentsView),
+            "查重、合并与清理")
+        self._nav_rail.add_item(
+            "工具", std(QStyle.StandardPixmap.SP_FileDialogListView),
+            "HEIC、标签、路径与维护工具")
+        self._nav_rail.add_item(
+            "设置", std(QStyle.StandardPixmap.SP_FileDialogInfoView),
+            "应用设置与关于")
+        self._nav_rail.page_changed.connect(self._switch_page)
+
+        self._pages = QStackedWidget()
+        self._pages.addWidget(self._build_library_page())
+        self._pages.addWidget(self._build_unit_page())
+        self._pages.addWidget(self._build_dedup_page())
+        self._pages.addWidget(self._build_tools_page())
+        self._pages.addWidget(self._build_settings_page())
+
+        central = QWidget()
+        central.setObjectName("mainShell")
+        shell = QHBoxLayout(central)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        shell.addWidget(self._nav_rail)
+        shell.addWidget(self._pages, 1)
+        self.setCentralWidget(central)
+
+        # 默认落在「单元」页，保留启动即看到库内容的习惯
+        self._pages.setCurrentIndex(1)
+        self._nav_rail.set_current(1, emit=False)
+
+    # ---- 页面骨架 -------------------------------------------------
+
+    def _page_shell(self, title: str, subtitle: str):
+        page = QWidget()
+        page.setObjectName("sectionPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+        title_label = QLabel(title)
+        title_label.setObjectName("pageTitle")
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setObjectName("pageSubtitle")
+        subtitle_label.setWordWrap(True)
+        layout.addWidget(title_label)
+        layout.addWidget(subtitle_label)
+        return page, layout
+
+    def _add_nav_card(self, layout, title: str, desc: str, handler) -> QCommandLinkButton:
+        button = QCommandLinkButton(title, desc)
+        button.setObjectName("navCard")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setMinimumHeight(78)
+        button.clicked.connect(handler)
+        layout.addWidget(button)
+        return button
+
+    def _add_nav_card_grid(self, layout, cards: list[tuple[str, str, object]]) -> None:
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        for index, (title, desc, handler) in enumerate(cards):
+            button = QCommandLinkButton(title, desc)
+            button.setObjectName("navCard")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setMinimumHeight(86)
+            button.clicked.connect(handler)
+            grid.addWidget(button, index // 2, index % 2)
+        layout.addLayout(grid)
+
+    # ---- 媒体库页 -------------------------------------------------
+
+    def _build_library_page(self):
+        page, layout = self._page_shell(
+            "媒体库",
+            "这里管理媒体库根目录与扫描。数据位置、迁移和缩略图缓存在「设置 → 存储」中。")
+        row = QHBoxLayout()
+        add_btn = QPushButton("＋ 添加媒体库")
+        add_btn.setObjectName("primaryBtn")
+        add_btn.clicked.connect(self._on_add_root)
+        row.addWidget(add_btn)
+        scan_btn = QPushButton("扫描选中")
+        scan_btn.clicked.connect(self._on_library_scan_selected)
+        row.addWidget(scan_btn)
+        refresh_btn = QPushButton("刷新列表")
+        refresh_btn.clicked.connect(self._reload_library_roots)
+        row.addWidget(refresh_btn)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self._library_roots = QListWidget()
+        self._library_roots.setObjectName("libraryRoots")
+        self._library_roots.itemDoubleClicked.connect(self._on_library_root_activated)
+        layout.addWidget(self._library_roots, 1)
+
+        hint = QLabel("双击根目录开始扫描；盘符变化后请到「工具 → 修复媒体库路径」。")
+        hint.setObjectName("pageHint")
+        layout.addWidget(hint)
+        return page
+
+    def _reload_library_roots(self) -> None:
+        if not hasattr(self, "_library_roots"):
+            return
+        self._library_roots.clear()
+        try:
+            with DatabaseManager.session() as session:
+                roots = q.get_all_roots(session)
+        except Exception as exc:  # noqa: BLE001 — 页面刷新不能把异常抛到 Qt
+            logger.warning(f"刷新媒体库列表失败: {exc}")
+            return
+        for root in roots:
+            prefix = "" if root.enabled else "[已停用] "
+            name = Path(root.path).name or root.path
+            item = QListWidgetItem(f"{prefix}{name}    {root.path}")
+            item.setData(Qt.ItemDataRole.UserRole, root.id)
+            item.setData(Qt.ItemDataRole.UserRole + 1, root.path)
+            self._library_roots.addItem(item)
+
+    def _on_library_root_activated(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.ItemDataRole.UserRole + 1)
+        if path:
+            self._switch_page(1)
+            self._start_scan(path)
+
+    def _on_library_scan_selected(self) -> None:
+        item = self._library_roots.currentItem()
+        if item is None:
+            QMessageBox.information(self, "扫描", "请先在列表中选择一个媒体库根目录。")
+            return
+        self._on_library_root_activated(item)
+
+    # ---- 单元页（原有左树 + 右网格） -------------------------------
+
+    def _build_unit_page(self):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         left_pct = self._config.splitter_ratio_left
         total_w = self._config.window_width
@@ -397,7 +535,79 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right_panel)
 
         self._splitter = splitter
-        self.setCentralWidget(splitter)
+        return splitter
+
+    # ---- 查重页 ---------------------------------------------------
+
+    def _build_dedup_page(self):
+        page, layout = self._page_shell(
+            "查重",
+            "先建立哈希索引，再按 MD5 / 视频帧 / 感知哈希比对。"
+            "查重结果会在完成后以列表打开，可逐对查看并处置。")
+        self._add_nav_card_grid(layout, [
+            ("开始查重", "对当前选中的单元或全库执行查重（Ctrl+D）", self._on_start_dedup),
+            ("重扫视频人脸", "按定间隔多帧重新检测人脸，提升同演员线索准确度", self._on_rescan_faces),
+        ])
+        layout.addStretch(1)
+        return page
+
+    # ---- 工具页 ---------------------------------------------------
+
+    def _build_tools_page(self):
+        page, layout = self._page_shell(
+            "工具",
+            "媒体处理与维护类工具。设置项统一收在「设置」页，避免同一功能多个入口。")
+        self._add_nav_card_grid(layout, [
+            ("HEIC 检查与转换", "扫描媒体库中的 HEIC 并批量转换为 JPG", self._on_heic_convert),
+            ("管理标签", "创建、编辑、删除标签并分配给文件", self._on_manage_tags),
+            ("已排除文件夹", "查看并恢复被用户或扫描排除的单元", self._on_manage_excluded),
+            ("修复媒体库路径", "换盘符后把失效绝对路径改到新位置（先备份数据库）", self._on_repair_paths),
+            ("SMB 共享", "设置局域网 SMB 共享，供手机/平板访问", self._on_open_smb),
+            ("重扫视频人脸", "按定间隔多帧重新检测视频人脸", self._on_rescan_faces),
+            ("重置数据库", "删除所有扫描数据并重新初始化（危险操作）", self._on_reset_db),
+            ("消息中心", "查看扫描、查重、HEIC 等任务产生的消息", self._on_open_messages),
+        ])
+        layout.addStretch(1)
+        return page
+
+    # ---- 设置页 ---------------------------------------------------
+
+    def _build_settings_page(self):
+        page, layout = self._page_shell(
+            "设置",
+            "外观、播放、存储、网络与维护分区。后续会把现有 7 个设置 Tab 按用途重排。")
+        self._add_nav_card_grid(layout, [
+            ("打开完整设置", "数据库、数据位置、缩略图、API、文件监控、预览、HEIC", self._on_open_settings),
+            ("数据位置", "数据根目录、数据库与缩略图缓存位置、迁移", lambda: self._open_settings_tab(1)),
+            ("缩略图与缓存", "缩略图尺寸、质量、缓存清理", lambda: self._open_settings_tab(2)),
+            ("API 服务", "监听地址、端口与 PIN 访问", lambda: self._open_settings_tab(3)),
+            ("文件监控", "媒体库变化时自动刷新", lambda: self._open_settings_tab(4)),
+            ("预览与播放", "预览窗口与手势相关设置", lambda: self._open_settings_tab(5)),
+            ("关于", "版本与项目说明", self._show_about),
+        ])
+        layout.addStretch(1)
+        return page
+
+    def _switch_page(self, index: int) -> None:
+        """切换一级页面，并同步导航栏选中态。"""
+        if not hasattr(self, "_pages"):
+            return
+        if index < 0 or index >= self._pages.count():
+            return
+        self._pages.setCurrentIndex(index)
+        self._nav_rail.set_current(index, emit=False)
+        for widget in getattr(self, "_unit_toolbar_widgets", []):
+            widget.setVisible(index == 1)
+        if index == 0:
+            self._reload_library_roots()
+
+    def _open_settings_tab(self, index: int) -> None:
+        from app.ui.dialogs.settings import SettingsDialog
+        dialog = SettingsDialog(self._config, self)
+        dialog.settings_saved.connect(self._on_settings_saved)
+        dialog.data_root_migrated.connect(self._on_settings_saved)
+        dialog.set_current_tab(index)
+        dialog.exec()
 
     # ============================================================
     # 状态栏
@@ -619,6 +829,8 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_unit_double_clicked(self, unit_id: int) -> None:
         """双击进入文件夹：手风琴展开 + 加载文件 + 自动选中首文件。"""
+        # 从媒体库页进入单元时，保证用户看到的是「单元」页
+        self._switch_page(1)
         # 高亮树中的文件夹节点
         self._tree_view.select_unit_silent(unit_id)
 

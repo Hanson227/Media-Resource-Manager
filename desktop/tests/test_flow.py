@@ -8112,6 +8112,43 @@ def test_api_unit_management_endpoints():
         client.post(f"/api/units/{uid}/rename", json={"name": old_name})
 
 
+def test_desktop_navigation_rail():
+    """Phase 1: 桌面一级导航（媒体库/单元/查重/工具/设置）。"""
+    section("测试 42: 桌面一级导航 rail")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+
+    from app.ui.widgets.navigation_rail import NavigationRail
+    from app.ui.main_window import MainWindow
+
+    rail = NavigationRail()
+    for index in range(5):
+        rail.add_item(f"入口{index}")
+    seen = []
+    rail.page_changed.connect(seen.append)
+    rail.set_current(3)
+    check("NavigationRail 有 5 个入口", rail.count() == 5)
+    check("NavigationRail 点击发出页索引", seen == [3])
+    check("NavigationRail 选中态互斥", rail._buttons[3].isChecked())
+
+    for name in ("_build_library_page", "_build_unit_page", "_build_dedup_page",
+                 "_build_tools_page", "_build_settings_page", "_switch_page"):
+        check(f"MainWindow 实现 {name}", hasattr(MainWindow, name))
+
+    window = MainWindow(AppConfig())
+    try:
+        check("主窗口导航栏 5 个入口", window._nav_rail.count() == 5)
+        check("主窗口页面栈 5 页", window._pages.count() == 5)
+        check("默认落在单元页", window._pages.currentIndex() == 1)
+        for index in range(5):
+            window._switch_page(index)
+            check(f"切换到第 {index} 页", window._pages.currentIndex() == index)
+            check(f"第 {index} 页导航选中", window._nav_rail._buttons[index].isChecked())
+    finally:
+        window.stop_background_workers()
+        window.close()
+
+
 def main():
     global _passed, _failed
     _passed = 0
@@ -8269,6 +8306,7 @@ def main():
         test_convert_batch()
         test_api_features_and_library_endpoints()
         test_api_unit_management_endpoints()
+        test_desktop_navigation_rail()
         test_p0_regressions()
 
     finally:
