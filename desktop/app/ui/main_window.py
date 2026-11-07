@@ -1111,22 +1111,12 @@ class MainWindow(QMainWindow):
         self._status_bar.hide_progress()
 
         if dup_count > 0:
-            # 打开第一个重复结果的对比对话框
-            from app.ui.dialogs.dedup_compare import DedupCompareDialog
-            first_dup = session.duplicates_found[0]
-            dialog = DedupCompareDialog(first_dup, self._config, self)
-            dialog.keep_a_requested.connect(
-                lambda a, b: self._resolve_dedup_pair(a, b, "keep_a")
+            # 打开本轮全部重复结果的列表（与 Web 端「查重结果 → 详情处置」一致）
+            from app.ui.dialogs.dedup_results import DedupResultsDialog
+            dialog = DedupResultsDialog(
+                session.duplicates_found, self._config, self
             )
-            dialog.keep_b_requested.connect(
-                lambda a, b: self._resolve_dedup_pair(a, b, "keep_b")
-            )
-            dialog.whitelist_requested.connect(
-                lambda a, b: self._resolve_dedup_pair(a, b, "whitelist")
-            )
-            dialog.ignore_requested.connect(
-                lambda a, b: self._resolve_dedup_pair(a, b, "ignore")
-            )
+            dialog.action_requested.connect(self._resolve_dedup_pair)
             dialog.exec()
             if related_count:
                 QMessageBox.information(
