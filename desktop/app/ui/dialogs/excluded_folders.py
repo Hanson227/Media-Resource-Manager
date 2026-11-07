@@ -71,10 +71,10 @@ class ExcludedFoldersDialog(QDialog):
         self._list_widget.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self._list_widget.setStyleSheet(
-            f"QListWidget {{ background-color: #313244; color: {TEXT}; "
-            f"border: 1px solid #3b3b4e; border-radius: 6px; }}"
+            f"QListWidget {{ background-color: #252530; color: {TEXT}; "
+            f"border: 1px solid #363648; border-radius: 6px; }}"
             f"QListWidget::item {{ padding: 6px; }}"
-            f"QListWidget::item:selected {{ background-color: #3b3b4e; }}"
+            f"QListWidget::item:selected {{ background-color: #363648; }}"
         )
         layout.addWidget(self._list_widget)
 
@@ -125,7 +125,7 @@ class ExcludedFoldersDialog(QDialog):
                     item.setData(Qt.ItemDataRole.UserRole, unit.id)
                     if not path_exists:
                         from PySide6.QtGui import QColor
-                        item.setForeground(QColor("#6c7086"))  # 灰色标记
+                        item.setForeground(QColor("#7c7c8a"))  # 灰色标记
                     self._list_widget.addItem(item)
                 self._restore_btn.setEnabled(True)
                 self._restore_all_btn.setEnabled(True)

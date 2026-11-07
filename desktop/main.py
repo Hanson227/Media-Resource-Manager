@@ -53,13 +53,81 @@ def _fix_windows_encoding():
 _fix_windows_encoding()
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QObject, Signal
 from PySide6.QtGui import QIcon
 
 from config import AppConfig
 from app.db.engine import DatabaseManager
 from app.db.migrations import init_db, migrate_db
 from app.api.server import APIServer
+
+
+def _ensure_database_ready(config, resolved, data_root_override, prompt,
+                           resolve, apply_resolved,
+                           init=init_db, migrate=migrate_db):
+    """确保数据库可用；数据盘没插时允许重试而不是闪退。
+
+    抽成纯函数（prompt/resolve/init 都可注入）便于测试：
+    返回 (ok, config, resolved)。
+    """
+    while True:
+        if resolved.data_root is None:
+            logger.error(
+                f"未找到数据盘上的数据根（期望: {resolved.expected_data_root}）；"
+                "不会在本机新建空库，避免误以为数据丢失")
+            if not prompt(
+                "数据盘未连接",
+                "没有找到媒体数据所在的数据目录。",
+                "请插入/连接数据盘，或确认盘符后点「重试」。\n"
+                "程序不会在本地新建空库，以免你误以为数据丢失。",
+            ):
+                logger.info("用户选择退出（数据盘未连接）")
+                return False, config, resolved
+            resolved = resolve(config, explicit_data_root=data_root_override)
+            config = apply_resolved(config, resolved)
+            continue
+
+        try:
+            init(config.db_path)
+            migrate()
+            logger.info(f"数据库已初始化: {config.db_path}")
+            return True, config, resolved
+        except Exception as e:
+            logger.error(f"数据库初始化失败: {e}", exc_info=True)
+            if not prompt(
+                "数据库无法打开",
+                f"无法打开数据库：{e}",
+                "请检查数据盘是否已连接、文件是否被其它程序占用，然后点「重试」。",
+            ):
+                logger.info("用户选择退出（数据库初始化失败）")
+                return False, config, resolved
+            resolved = resolve(config, explicit_data_root=data_root_override)
+            config = apply_resolved(config, resolved)
+
+
+def _startup_retry_dialog(title: str, text: str, informative: str) -> bool:
+    """启动期阻塞错误的可重试对话框。
+
+    返回 True=用户选择重试，False=退出。桌面端以前在数据盘没插时直接
+    `sys.exit(1)`（窗口都不出现，用户以为程序坏了）；这里至少给出原因与
+    “插入数据盘后重试”的动作，而不是静默闪退。
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Critical)
+    box.setWindowTitle(title)
+    box.setText(text)
+    box.setInformativeText(informative)
+    retry = box.addButton("重试", QMessageBox.AcceptRole)
+    box.addButton("退出", QMessageBox.RejectRole)
+    box.setDefaultButton(retry)
+    box.exec()
+    return box.clickedButton() is retry
+
 
 # 日志配置 —— 指定 UTF-8 编码的 StreamHandler
 logging.basicConfig(
@@ -172,15 +240,17 @@ def main() -> None:
             logger.warning(f"配置写入失败: {e}")
 
     # ============================================================
-    # 2. 初始化数据库
+    # 2. 初始化数据库（数据盘没插时给出可重试提示，而不是闪退）
     # ============================================================
-    try:
-        init_db(config.db_path)
-        migrate_db()
-        logger.info(f"数据库已初始化: {config.db_path}")
-    except Exception as e:
-        logger.error(f"数据库初始化失败: {e}")
-        sys.exit(1)
+    ok, config, resolved = _ensure_database_ready(
+        config, resolved, data_root_override,
+        prompt=_startup_retry_dialog,
+        resolve=app_paths.resolve_paths,
+        apply_resolved=app_paths.apply_resolved_paths,
+    )
+    if not ok:
+        return 1
+
 
     # 启动后自动清理孤儿缩略图（DB 中已删除文件的残留缓存）
     try:
@@ -200,6 +270,10 @@ def main() -> None:
     # ============================================================
     api_server: APIServer | None = None
     if config.api_enabled:
+        # 监听 0.0.0.0 时若没有 PIN，自动生成（否则同一 WiFi 下任何人可
+        # 浏览/删除媒体库；桌面端用户可在设置里查看/修改）。
+        from app.services.web_security_service import ensure_web_pin
+        config = ensure_web_pin(config, config_path, config.api_host)
         try:
             api_server = APIServer(config, runtime={
                 "data_root": str(resolved.data_root or ""),
@@ -214,9 +288,12 @@ def main() -> None:
     # ============================================================
     # 4. 启动 GUI
     # ============================================================
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(config.window_title)
     app.setApplicationVersion("0.1.0")
+    # 统一字体：QSS 只对部分控件设了字体，原生对话框/未覆盖控件会回落到系统默认
+    from PySide6.QtGui import QFont
+    app.setFont(QFont("Microsoft YaHei UI", 10))
     # 树展开/收起指示器由 FolderTreeView 自定义绘制（干净三角形 ▶/▼）
 
     # 应用主题调色板
@@ -238,6 +315,19 @@ def main() -> None:
     from app.ui.main_window import MainWindow
     main_window = MainWindow(config)
     main_window.show()
+
+    # Web/API 改了配置（数据根/缓存目录）时把新配置送回 GUI。
+    # 用 Qt 信号跨线程投递：API 在 uvicorn 线程里回调，直接改控件会崩。
+    class _ApiConfigBridge(QObject):
+        changed = Signal(object)
+
+    _bridge = _ApiConfigBridge()
+    _bridge.changed.connect(main_window.apply_external_config)
+    if api_server:
+        api_server.set_config_changed_callback(_bridge.changed.emit)
+        main_window.apply_api_status(api_server.is_running, config.api_port)
+    else:
+        main_window.apply_api_status(False)
 
     logger.info("GUI 主窗口已显示")
 

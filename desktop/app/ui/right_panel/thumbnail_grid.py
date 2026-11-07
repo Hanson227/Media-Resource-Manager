@@ -808,7 +808,7 @@ class ThumbnailGridView(QListView):
         self._file_model.reload_tags()
 
     def _delete_file(self, file_path: str, file_id: int) -> None:
-        """将文件移至回收站并删除数据库记录。"""
+        """删除单个文件：统一走 unit_service（判卷 / 清缩略图 / 删库）。"""
         from PySide6.QtWidgets import QMessageBox
         reply = QMessageBox.question(
             self, "确认删除",
@@ -818,33 +818,21 @@ class ThumbnailGridView(QListView):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        file_deleted_from_disk = False
         try:
-            import send2trash
-            send2trash.send2trash(file_path)
-            file_deleted_from_disk = True
-        except ImportError:
-            QMessageBox.critical(self, "删除失败",
-                "send2trash 未安装，无法安全删除文件。\n请在终端执行: pip install send2trash")
+            from app.services import unit_service
+            result = unit_service.delete_file(file_id, config=self._config)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "删除失败", f"删除时发生异常: {e}")
             return
-        except Exception as e:
-            err_msg = str(e)
-            # 提供更具体的错误提示
-            if "used by another process" in err_msg or "being used" in err_msg:
+        if not result.ok:
+            err_msg = result.message or "删除失败"
+            if "未连接" in err_msg:
+                hint = "磁盘未连接，请先连接该磁盘后再删除。"
+            elif "占用" in err_msg or "used by another process" in err_msg:
                 hint = "文件被其他程序占用，请关闭可能正在使用该文件的程序后重试。"
-            elif "network" in err_msg.lower() or "UNC" in err_msg or file_path.startswith("\\\\"):
-                hint = "网络路径文件无法移至回收站，请手动删除。"
             else:
-                hint = f"错误详情: {err_msg}"
-            QMessageBox.critical(self, "删除失败", f"无法将文件移至回收站:\n{hint}")
+                hint = err_msg
+            QMessageBox.critical(self, "删除失败", f"无法删除文件:\n{hint}")
             return
-
-        try:
-            with DatabaseManager.session() as session:
-                q.delete_media_file(session, file_id)
-        except Exception as e:
-            logger.warning(f"数据库记录删除失败: {e}")
-            QMessageBox.warning(self, "部分成功",
-                f"文件已移至回收站，但数据库记录删除失败: {e}。\n请稍后手动重新扫描以清理。")
 
         self.file_deleted.emit()

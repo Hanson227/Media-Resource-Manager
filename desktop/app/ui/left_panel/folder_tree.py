@@ -16,7 +16,9 @@ from PySide6.QtCore import (
     Qt, QPointF, QAbstractItemModel, QModelIndex, Signal, Slot,
 )
 from PySide6.QtGui import QPainter, QColor, QPolygonF
-from PySide6.QtWidgets import QTreeView, QAbstractItemView, QHeaderView, QStyle, QProxyStyle
+from PySide6.QtWidgets import (
+    QTreeView, QAbstractItemView, QHeaderView, QStyle, QProxyStyle, QMessageBox,
+)
 
 from config import AppConfig
 from app.db.engine import DatabaseManager
@@ -60,6 +62,7 @@ class TreeNode:
     node_subtype: str = ""   # "" 普通 / "file" 文件节点
     created_at: Optional[str] = None  # ISO 时间
     tags_str: str = ""                # 文件标签（逗号分隔，仅文件节点）
+    cover_path: Optional[str] = None  # 用户手动封面（有才显示「清除封面」）
 
     def __post_init__(self):
         if self.children is None:
@@ -122,6 +125,7 @@ class FolderTreeModel(QAbstractItemModel):
                             status=unit.status or "active",
                             library_root_id=root.id,
                             created_at=_unit_date_str(unit),
+                            cover_path=getattr(unit, "cover_path", None),
                         )
                         root_node.children.append(unit_node)
                     self._roots.append(root_node)
@@ -233,6 +237,16 @@ class FolderTreeModel(QAbstractItemModel):
             )
             for f in files[:200]
         ]
+        if len(files) > 200:
+            # 树里只放前 200 个文件（避免几千个节点卡 UI），但必须让用户知道
+            # 还有更多、去右侧网格看，而不是以为文件丢了。
+            new_children.append(TreeNode(
+                node_type="unit",
+                node_subtype="hint",
+                node_id=-1,
+                name=f"仅显示前 200 个，共 {len(files)} 个（右侧网格可看全部）",
+                path=node.path,
+            ))
         self.beginInsertRows(parent, 0, len(new_children) - 1)
         node.children = new_children
         self.endInsertRows()
@@ -418,7 +432,7 @@ class _BranchIndicatorStyle(QProxyStyle):
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                 c = option.rect.center()
                 is_open = bool(option.state & QStyle.StateFlag.State_Open)
-                color = QColor("#7f849c")
+                color = QColor("#7c7c8a")
                 painter.setBrush(color)
                 painter.setPen(Qt.PenStyle.NoPen)
                 if is_open:
@@ -494,7 +508,7 @@ class FolderTreeView(QTreeView):
         self.setAnimated(True)
         self.setExpandsOnDoubleClick(False)
         self.setIndentation(20)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         # 自定义三角形展开/收起指示器
         self._branch_style = _BranchIndicatorStyle()
         self.setStyle(self._branch_style)
@@ -628,6 +642,12 @@ class FolderTreeView(QTreeView):
         if node.node_type == "unit" and node.node_subtype == "file":
             self.file_selected_from_tree.emit(node.node_id)
             return
+        if node.node_type == "unit" and node.node_subtype == "hint":
+            return
+
+        # 多选（Ctrl/Shift）时只更新选择，不进入文件夹，否则无法多选合并。
+        if len(self.selectionModel().selectedRows(0)) > 1:
+            return
 
         # 获取文件夹/根的 unit IDs
         unit_ids = self._model.get_selected_units(idx)
@@ -672,6 +692,40 @@ class FolderTreeView(QTreeView):
         finally:
             self._syncing_file = False
 
+    @Slot(list)
+    def _on_multi_merge_requested(self, unit_ids: list) -> None:
+        """多选合并：把选中单元合并到能覆盖全部路径的「最上层选中单元」。"""
+        nodes = [self._model.get_node_by_unit_id(uid) for uid in unit_ids]
+        nodes = [n for n in nodes if n is not None]
+        if len(nodes) < 2:
+            return
+        paths = [(n.node_id, str(n.path).rstrip("\\/")) for n in nodes]
+
+        def _under(child: str, parent: str) -> bool:
+            child_l, parent_l = child.lower(), parent.lower()
+            return (
+                child_l == parent_l
+                or child_l.startswith(parent_l + "\\")
+                or child_l.startswith(parent_l + "/")
+            )
+
+        candidates = [
+            (uid, path) for uid, path in paths
+            if all(_under(other, path) for _, other in paths)
+        ]
+        if not candidates:
+            QMessageBox.information(
+                self,
+                "无法合并",
+                "请选择同一父文件夹下的多个资源单元再合并；\n"
+                "如果它们不在同一个单元内，请先在父文件夹上手动标记为资源单元。",
+            )
+            return
+        parent_id, _ = min(candidates, key=lambda item: len(item[1]))
+        child_ids = [uid for uid, _ in paths if uid != parent_id]
+        if child_ids:
+            self.merge_requested.emit(parent_id, child_ids)
+
     @Slot()
     def _on_context_menu(self, pos) -> None:
         index = self.indexAt(pos)
@@ -691,6 +745,7 @@ class FolderTreeView(QTreeView):
 
         menu = FolderTreeContextMenu(self, unit_ids, self._model, root_id=root_id)
         menu.merge_requested.connect(self.merge_requested.emit)
+        menu.multi_merge_requested.connect(self._on_multi_merge_requested)
         menu.split_requested.connect(self.split_requested.emit)
         menu.mark_requested.connect(self.mark_requested.emit)
         menu.unmark_requested.connect(self.unmark_requested.emit)

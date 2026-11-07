@@ -1160,6 +1160,61 @@ def test_offline_volume_never_mass_excludes():
                 q.remove_library_root(session, root.id)
 
 
+def test_cleanup_skips_suspected_letter_change():
+    """测试 3.7b: "根目录可达但整库内容不在"时，启动复核不得批量排除。
+
+    实测事故（2026-11-04）：媒体库在 `E:\\Guofu`，硬盘插上后变成 `F:`，
+    而 `E:` 被另一块盘占用、上面有个空的 `Guofu` —— `Path(root).is_dir()` 为真，
+    启动后 100ms 的 `cleanup_missing_paths` 把整库 196 个单元标成 excluded，
+    界面全空。正确动作是**保留原样**，交给扫描守卫弹「修复媒体库路径」。
+
+    这里用 monkeypatch 模拟"已被识别为疑似换盘符"（真逻辑在 test_lite 的
+    L4b 用例里用临时卷验证），锁住桌面端复核路径不再误排除。
+    """
+    section("测试 3.7b: 疑似换盘符时不得批量排除")
+    from app.services import path_remap_service as remap
+
+    tmp = Path(tempfile.mkdtemp(prefix="letter_suspect_"))
+    root_id = None
+    original_detect = remap.detect_letter_change
+    try:
+        with DatabaseManager.session() as session:
+            root = q.add_library_root(session, str(tmp))
+            root_id = root.id
+            for i in range(3):
+                unit_dir = tmp / "gone" / f"u{i}"
+                unit = q.create_unit(session, str(unit_dir), f"u{i}", root.id,
+                                     file_count=1, total_size=0)
+                q.insert_media_file(
+                    session, path=str(unit_dir / "a.jpg"), filename="a.jpg",
+                    extension=".jpg", media_type="image", size_bytes=0,
+                    resource_unit_id=unit.id)
+
+        from app.ui.main_window import cleanup_missing_paths
+        remap.detect_letter_change = (
+            lambda path, **kw: {"root_id": root_id, "path": str(tmp),
+                                "candidates": []})
+        try:
+            cleanup_missing_paths(root_ids=[root_id])
+        finally:
+            remap.detect_letter_change = original_detect
+
+        with DatabaseManager.session() as session:
+            units = q.get_all_units_by_root(session, root_id)
+            excluded = [u.name for u in units if u.status != "active"]
+        check(f"疑似换盘符时单元保持 active（不得批量排除）: {excluded}",
+              not excluded)
+    finally:
+        remap.detect_letter_change = original_detect
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+        with DatabaseManager.session() as session:
+            row = next((r for r in q.get_all_roots(session) if r.id == root_id),
+                       None)
+            if row is not None:
+                q.remove_library_root(session, row.id)
+
+
 def test_auto_excluded_unit_recovers_when_path_returns():
     """测试 3.8: 扫描自动排除的单元，在内容回来后必须能自动恢复。
 
@@ -7758,6 +7813,247 @@ def test_content_modified_at():
                 session.delete(root)
 
 
+def test_p0_regressions():
+    """P0 回归：F1 合并事务边界 / F2 启动重试 / F5 改库前缀边界 / F8 默认 PIN。"""
+    section("P0 回归：合并事务 / 启动重试 / 前缀边界 / 默认 PIN")
+    import tempfile
+    import shutil
+    import types
+
+    # ---------- F5: 改库前缀必须按目录边界匹配 ----------
+    tmp_prefix = Path(tempfile.mkdtemp(prefix="p0_prefix_"))
+    try:
+        uid_media, _, _ = _make_temp_unit(tmp_prefix, "Media", ["a.jpg"])
+        uid_media2, _, _ = _make_temp_unit(tmp_prefix, "Media2", ["b.jpg"])
+        media_path = str(tmp_prefix / "Media")
+        with DatabaseManager.session() as session:
+            counts = q.count_paths_with_prefix(session, media_path)
+            check("F5 前缀只统计 Media 单元（不含 Media2）", counts["units"] == 1)
+            check("F5 前缀只统计 Media 文件（不含 Media2）", counts["files"] == 1)
+            q.rebase_path_prefix(session, media_path, str(tmp_prefix / "MediaNew"))
+        with DatabaseManager.session() as session:
+            u1 = q.get_unit_by_id(session, uid_media)
+            u2 = q.get_unit_by_id(session, uid_media2)
+            check("F5 Media 路径已改写", u1 is not None and u1.path.endswith("MediaNew"))
+            check("F5 Media2 路径保持不变",
+                  u2 is not None and u2.path == str(tmp_prefix / "Media2"))
+            for uid in (uid_media, uid_media2):
+                q.delete_resource_unit(session, uid)
+            root = q.get_root_by_path(session, str(tmp_prefix))
+            if root:
+                session.delete(root)
+    finally:
+        shutil.rmtree(tmp_prefix, ignore_errors=True)
+
+    # ---------- F1: 合并时磁盘操作在事务外，单文件失败可回滚且不污染其余 ----------
+    from app.services import merge_service
+    tmp_merge = Path(tempfile.mkdtemp(prefix="p0_merge_"))
+    try:
+        keep_uid, keep_ids, _ = _make_temp_unit(tmp_merge, "保留单元", ["keep.jpg"])
+        other_uid, other_ids, other_paths = _make_temp_unit(
+            tmp_merge, "被并单元", ["m1.jpg", "m2.jpg"])
+        with DatabaseManager.session() as session:
+            dr = q.upsert_dedup_result(
+                session, unit_a_id=keep_uid, unit_b_id=other_uid,
+                similarity_score=0.5, match_count=1,
+                total_files_a=1, total_files_b=2, match_types="md5",
+                match_level="related",
+            )
+            dr_id = dr.id
+        plan = merge_service.build_merge_plan(dr_id, "a", set())
+        original_commit = merge_service._commit_moved_file
+        calls = {"n": 0}
+
+        def _flaky_commit(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("模拟库写入失败")
+            return original_commit(*args, **kwargs)
+
+        merge_service._commit_moved_file = _flaky_commit
+        try:
+            outcome = merge_service.execute_merge_plan(plan)
+        finally:
+            merge_service._commit_moved_file = original_commit
+
+        check("F1 单个文件失败不影响另一个文件搬移", outcome.moved_count == 1)
+        check("F1 失败被记录而非静默成功", len(outcome.failed) == 1)
+        with DatabaseManager.session() as session:
+            row = q.get_file_by_id(session, other_ids[0])
+            check("F1 库写入失败时文件记录仍在", row is not None)
+            check("F1 库写入失败时文件已搬回原路径",
+                  row is not None and Path(row.path) == other_paths[0])
+            dr_after = q.get_dedup_by_id(session, dr_id)
+            check("F1 部分失败时不标记已合并",
+                  dr_after is not None and dr_after.is_resolved is False)
+            for uid in (keep_uid, other_uid):
+                q.delete_resource_unit(session, uid)
+            root = q.get_root_by_path(session, str(tmp_merge))
+            if root:
+                session.delete(root)
+    finally:
+        shutil.rmtree(tmp_merge, ignore_errors=True)
+
+    # ---------- F2: 数据盘缺失/建库失败允许重试，不直接退出 ----------
+    import main as desktop_main
+    resolved_missing = types.SimpleNamespace(
+        data_root=None, expected_data_root=Path("F:/Guofu/Date"))
+    prompts = []
+
+    def _prompt(title, text, informative):
+        prompts.append(title)
+        return False
+
+    ok, _, _ = desktop_main._ensure_database_ready(
+        types.SimpleNamespace(db_path=Path("X:/nope.db")),
+        resolved_missing, None, _prompt,
+        lambda cfg, explicit_data_root=None: resolved_missing,
+        lambda cfg, resolved: cfg,
+        init=lambda db: None, migrate=lambda: None,
+    )
+    check("F2 数据盘未连接且用户选择退出时返回 False", ok is False)
+    check("F2 数据盘未连接会弹重试对话框", len(prompts) == 1)
+
+    init_calls = []
+
+    def _init_fail(db):
+        init_calls.append(db)
+        raise RuntimeError("db locked")
+
+    responses = [True, False]
+    ok2, _, _ = desktop_main._ensure_database_ready(
+        types.SimpleNamespace(db_path=Path("X:/nope.db")),
+        types.SimpleNamespace(data_root=Path("X:/tmp"), expected_data_root=None),
+        None, lambda *a: responses.pop(0),
+        lambda cfg, explicit_data_root=None: types.SimpleNamespace(
+            data_root=Path("X:/tmp"), expected_data_root=None),
+        lambda cfg, resolved: cfg,
+        init=_init_fail, migrate=lambda: None,
+    )
+    check("F2 建库失败重试仍失败时返回 False", ok2 is False)
+    check("F2 建库失败会重试而不是首次失败就退出", len(init_calls) == 2)
+
+    # ---------- F8: 监听 0.0.0.0 且无 PIN 时自动生成 4 位 PIN ----------
+    import config as config_module
+    from app.services.web_security_service import ensure_web_pin
+    tmp_pin = Path(tempfile.mkdtemp(prefix="p0_pin_"))
+    try:
+        config_module.configure_pin_dir(None)
+        cfg_path = tmp_pin / "config.json"
+        cfg = AppConfig()
+        out = ensure_web_pin(cfg, cfg_path, "0.0.0.0")
+        pin = out.web_pin
+        check("F8 局域网监听自动生成 PIN", cfg.web_pin == "" and pin != "")
+        check("F8 自动 PIN 为 4 位数字", len(pin) == 4 and pin.isdigit())
+        check("F8 PIN 已落盘",
+              (tmp_pin / "data" / ".web_pin").read_text(encoding="utf-8") == pin)
+        loop = ensure_web_pin(cfg, cfg_path, "127.0.0.1")
+        check("F8 仅回环监听不强制 PIN", loop.web_pin == "")
+    finally:
+        config_module.configure_pin_dir(None)
+        shutil.rmtree(tmp_pin, ignore_errors=True)
+
+
+    # ---------- F3: 删除必须统一走「卷可用 + 三模式」而不是直接 send2trash ----------
+    from app.services import unit_service
+    from app.services import file_ops as file_ops_module
+    tmp_del = Path(tempfile.mkdtemp(prefix="p0_delete_"))
+    try:
+        uid_del, file_ids_del, paths_del = _make_temp_unit(
+            tmp_del, "删除单元", ["d1.jpg", "d2.jpg"])
+        with DatabaseManager.session() as session:
+            unit_history = q.get_operation_history(session, "unit", uid_del) \
+                if hasattr(q, "get_operation_history") else None
+        result = unit_service.delete_unit(
+            uid_del, mode=file_ops_module.MODE_RECORD)
+        check("F3 仅移出库返回成功", result.ok is True)
+        check("F3 仅移出库不删磁盘文件",
+              all(Path(p).exists() for p in paths_del))
+        with DatabaseManager.session() as session:
+            check("F3 仅移出库后单元记录已删除",
+                  q.get_unit_by_id(session, uid_del) is None)
+            for fid in file_ids_del:
+                check("F3 仅移出库后文件记录已删除",
+                      q.get_file_by_id(session, fid) is None)
+            root = q.get_root_by_path(session, str(tmp_del))
+            if root:
+                session.delete(root)
+    finally:
+        shutil.rmtree(tmp_del, ignore_errors=True)
+
+    # ---------- F9 配套：落库失败不能发 finished（界面会误当扫描成功） ----------
+    from app.ui.workers import scan_worker as scan_worker_module
+    from app.ui.workers.scan_worker import ScanWorker
+    tmp_scan = Path(tempfile.mkdtemp(prefix="p0_scan_"))
+    try:
+        worker = ScanWorker(AppConfig(), tmp_scan)
+        finished = []
+        errors = []
+        worker.finished.connect(lambda r: finished.append(r))
+        worker.error_occurred.connect(lambda msg: errors.append(msg))
+        original_save = scan_worker_module.save_scan_result
+        scan_worker_module.save_scan_result = (
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("磁盘写入失败")))
+        try:
+            ok_save = worker._save_to_database(object())
+        finally:
+            scan_worker_module.save_scan_result = original_save
+        check("F9 落库失败返回 False", ok_save is False)
+        check("F9 落库失败会报错", len(errors) == 1 and "磁盘写入失败" in errors[0])
+    finally:
+        shutil.rmtree(tmp_scan, ignore_errors=True)
+
+
+def test_api_unit_management_endpoints():
+    """Phase 1: 单元管理能力（改名/封面/排除/恢复）HTTP 端点。"""
+    section("测试 41: 单元管理 HTTP 端点")
+    from fastapi.testclient import TestClient
+    from app.api.server import create_app
+
+    client = TestClient(create_app(AppConfig()))
+    resp = client.get("/api/units")
+    check("GET /api/units 返回 200", resp.status_code == 200)
+    units = resp.json().get("units", [])
+    if not units:
+        check("单元管理测试：无单元，跳过", True)
+        return
+
+    unit = units[0]
+    uid = unit["id"]
+    old_name = unit["name"]
+    try:
+        new_name = old_name + "（接口测试）"
+        r = client.post(f"/api/units/{uid}/rename", json={"name": new_name})
+        check("POST rename 返回 200", r.status_code == 200)
+        detail = client.get(f"/api/units/{uid}").json()
+        check("重命名已落库", detail.get("name") == new_name)
+        r = client.post(f"/api/units/{uid}/rename", json={"name": ""})
+        check("空名称被拒绝", r.status_code == 409)
+
+        files = client.get(f"/api/units/{uid}/files").json().get("files", [])
+        if files:
+            fid = files[0]["id"]
+            r = client.post(f"/api/units/{uid}/cover", json={"file_id": fid})
+            check("POST cover 返回 200", r.status_code == 200)
+            detail = client.get(f"/api/units/{uid}").json()
+            check("封面 file_id 已生效", detail.get("cover_file_id") == fid)
+            r = client.delete(f"/api/units/{uid}/cover")
+            check("DELETE cover 返回 200", r.status_code == 200)
+
+        r = client.post(f"/api/units/{uid}/exclude")
+        check("POST exclude 返回 200", r.status_code == 200)
+        active_ids = [x["id"] for x in client.get("/api/units").json().get("units", [])]
+        check("排除后不再出现在活跃列表", uid not in active_ids)
+        excluded = client.get("/api/units/excluded").json().get("units", [])
+        check("排除后出现在已排除列表", any(x["id"] == uid for x in excluded))
+        r = client.post(f"/api/units/{uid}/restore")
+        check("POST restore 返回 200", r.status_code == 200)
+        active_ids = [x["id"] for x in client.get("/api/units").json().get("units", [])]
+        check("恢复后重新出现在活跃列表", uid in active_ids)
+    finally:
+        client.post(f"/api/units/{uid}/rename", json={"name": old_name})
+
+
 def main():
     global _passed, _failed
     _passed = 0
@@ -7811,6 +8107,7 @@ def main():
         test_scan_worker_path_chunking()
         test_path_revalidation()
         test_offline_volume_never_mass_excludes()
+        test_cleanup_skips_suspected_letter_change()
         test_auto_excluded_unit_recovers_when_path_returns()
         test_excluded_folders_dialog_bulk_restore()
         test_scan_reconciles_empty_units()
@@ -7913,6 +8210,8 @@ def main():
         test_api_detail_endpoints()
         test_convert_batch()
         test_api_features_and_library_endpoints()
+        test_api_unit_management_endpoints()
+        test_p0_regressions()
 
     finally:
         # 清理数据库连接

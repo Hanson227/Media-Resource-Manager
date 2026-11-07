@@ -95,6 +95,19 @@ def get_unit_by_path(session: Session, path: str) -> Optional[ResourceUnit]:
     return session.query(ResourceUnit).filter(ResourceUnit.path == path).first()
 
 
+def get_all_units_by_root(session: Session, root_id: int) -> list[ResourceUnit]:
+    """获取指定根目录下的所有资源单元（含已排除，不含已合并）。
+
+    与 `get_units_by_root`（只取 active）区分：换盘符判断与改库预演必须看到
+    "当初扫描出来过、后来被排除"的单元 —— 否则整库不可达会被误判成空库，
+    连"这是不是盘符变了"都判断不出来（实测事故见 docs/portable-lite.md §3）。
+    """
+    return session.query(ResourceUnit).filter(
+        ResourceUnit.library_root_id == root_id,
+        ResourceUnit.status != UnitStatus.MERGED.value,
+    ).all()
+
+
 def get_units_by_root(session: Session, root_id: int) -> list[ResourceUnit]:
     """获取指定根目录下的所有资源单元。"""
     return session.query(ResourceUnit).filter(
@@ -446,7 +459,7 @@ def get_unindexed_files(session: Session, limit: int = 1000) -> list[MediaFile]:
             MediaFile.md5_hash == None,
             MediaFile.phash == None,
         )
-    ).limit(limit).all()
+    ).order_by(MediaFile.id).limit(limit).all()
 
 
 def get_unindexed_file_count(session: Session) -> int:
@@ -1613,9 +1626,21 @@ _PATH_TABLES = (
 )
 
 
+def _normalize_prefix(prefix: str) -> str:
+    """去掉尾部分隔符，便于做"目录边界"比较（`E:\\Media\\` → `E:\\Media`）。"""
+    return str(prefix or "").rstrip("\\/")
+
+
 def _path_prefix_filter(column, prefix: str):
-    """构造"路径以 prefix 开头"的条件（大小写不敏感）。"""
-    return func.lower(column).like(prefix.lower() + "%")
+    """构造"路径位于 prefix 目录下（或等于它）"的条件（大小写不敏感）。
+
+    不能直接 `LIKE prefix + '%'`：那样 `E:\\Media` 会命中 `E:\\Media2`，
+    改库会把另一个目录的记录一起改写（数据错乱，比不改更糟）。边界必须是
+    路径分隔符（Windows 的 `\\` 或 POSIX 的 `/`）。
+    """
+    p = _normalize_prefix(prefix).lower()
+    col = func.lower(column)
+    return or_(col == p, col.like(p + "\\%"), col.like(p + "/%"))
 
 
 def _path_prefix_column(model, column_name: str):
@@ -1694,7 +1719,12 @@ def rebase_path_prefix(session: Session, old_prefix: str, new_prefix: str,
         前缀相同（含仅大小写不同）时视为无需改动，直接返回全 0 ——
         否则 LOWER() 比较会把"同一个路径"当成命中，产生无意义的 UPDATE。
     """
-    if old_prefix == new_prefix:
+    old_prefix = _normalize_prefix(old_prefix)
+    new_prefix = _normalize_prefix(new_prefix)
+    if not old_prefix or not new_prefix:
+        return {"library_roots": 0, "units": 0, "unit_covers": 0,
+                "files": 0, "whitelist": 0}
+    if old_prefix.lower() == new_prefix.lower():
         return {"library_roots": 0, "units": 0, "unit_covers": 0,
                 "files": 0, "whitelist": 0}
 

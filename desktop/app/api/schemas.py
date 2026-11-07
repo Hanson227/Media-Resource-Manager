@@ -553,3 +553,29 @@ class RemapSuggestResponse(BaseModel):
     suggestions: list[RemapSuggestionItem] = []
     broken_roots: int = 0
     message: str = ""
+
+
+class UnitMergeRequest(BaseModel):
+    """把若干子单元并入父单元（Web 端多选合并）。"""
+
+    parent_id: int
+    child_ids: list[int]
+
+
+class UnitMarkRequest(BaseModel):
+    """把文件夹标记为资源单元。"""
+
+    folder_path: str
+
+
+class UnitCoverRequest(BaseModel):
+    """设置封面：优先 file_id（在该单元内查路径），也可直接给绝对路径。"""
+
+    file_id: int | None = None
+    path: str | None = None
+
+
+class UnitRenameRequest(BaseModel):
+    """给资源单元改名（只改库内显示名，不动磁盘目录）。"""
+
+    name: str

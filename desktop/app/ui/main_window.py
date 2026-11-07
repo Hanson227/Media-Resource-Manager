@@ -14,13 +14,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Sequence
 
-from PySide6.QtCore import Qt, QSize, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QSize, QTimer, QThread, Signal, Slot
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow, QMenu, QToolBar, QSplitter, QWidget, QVBoxLayout,
     QLabel, QMessageBox, QSystemTrayIcon, QApplication,
     QFileDialog, QPushButton, QLineEdit, QComboBox,
-    QInputDialog, QAbstractItemView,
+    QInputDialog, QAbstractItemView, QStyle,
 )
 
 from config import AppConfig
@@ -33,16 +33,34 @@ from app.ui.right_panel.thumbnail_grid import (
     ThumbnailGridModel, ThumbnailGridView, FolderCardModel,
 )
 from app.ui.right_panel.thumbnail_delegate import ThumbnailDelegate
-from app.ui.widgets.progress_panel import ProgressPanel
 from app.ui.workers.scan_worker import ScanWorker
 from app.ui.workers.hash_worker import HashWorker
 from app.ui.workers.dedup_worker import DedupWorker
 from app.services.file_ops import volume_available, volume_label
+from app.core.watcher import FileWatcher, MediaFileEventHandler
 from app.utils.constants import ExcludeReason, MediaType
 from app.utils.file_helpers import format_size
 from app.utils.media_types import is_media_file
 
 logger = logging.getLogger(__name__)
+
+
+class _CleanupWorker(QThread):
+    """后台执行路径复核（启动时对整库逐个 stat，放 GUI 线程会卡窗口）。"""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, root_ids=None, parent=None) -> None:
+        super().__init__(parent)
+        self._root_ids = root_ids
+
+    def run(self) -> None:
+        try:
+            self.done.emit(cleanup_missing_paths(self._root_ids))
+        except Exception as e:  # noqa: BLE001 — 后台线程不能把异常抛给 Qt
+            logger.error(f"路径清理失败: {e}", exc_info=True)
+            self.failed.emit(str(e))
 
 
 def cleanup_missing_paths(root_ids: Optional[Sequence[int]] = None) -> tuple[int, int, int]:
@@ -67,6 +85,8 @@ def cleanup_missing_paths(root_ids: Optional[Sequence[int]] = None) -> tuple[int
     cleaned_roots = 0
     cleaned_units = 0
     healed_roots = 0
+    from app.services.path_remap_service import detect_letter_change
+
     with DatabaseManager.session() as session:
         roots = q.get_all_roots(session)
         if root_ids is not None:
@@ -86,6 +106,12 @@ def cleanup_missing_paths(root_ids: Optional[Sequence[int]] = None) -> tuple[int
                 logger.info(f"根目录已恢复，重新参与扫描: {root.path}")
                 q.set_root_enabled(session, root.id, True)
                 healed_roots += 1
+            # 盘符被另一块磁盘占用时"根路径可达"、但库里内容其实全不在（实测事故）：
+            # 这种情况绝不能按"内容没了"批量排除 —— 否则界面全空，而对话框里又
+            # 没有可改库的条目。保留原样，交给扫描守卫弹「修复媒体库路径」。
+            if detect_letter_change(root.path) is not None:
+                logger.warning(f"疑似盘符变化，保留全部单元不排除: {root.path}")
+                continue
             for stale in q.get_units_by_root(session, root.id):
                 if stale.status != "active" or Path(stale.path).is_dir():
                     continue
@@ -108,6 +134,7 @@ class MainWindow(QMainWindow):
     root_added = Signal(str)
     dedup_requested = Signal()
     refresh_requested = Signal()
+    filesystem_changed = Signal(str)
 
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
@@ -119,6 +146,8 @@ class MainWindow(QMainWindow):
         self._hash_worker: Optional[HashWorker] = None
         self._dedup_worker: Optional[DedupWorker] = None
         self._scan_queue: list[str] = []  # 串行扫描队列
+        self._cleanup_worker: Optional[_CleanupWorker] = None
+        self._watcher = None
 
         # 搜索防抖定时器 — 每次按键重置，150ms 空闲后触发放行
         self._filter_timer = QTimer()
@@ -136,6 +165,7 @@ class MainWindow(QMainWindow):
         self._setup_central_area()
         self._setup_status_bar()
         self._setup_system_tray()
+        self._restore_window_geometry()
 
         # 手风琴管理器（需在 _tree_view 创建后初始化）
         self._accordion = AccordionManager(self._tree_view)
@@ -147,6 +177,8 @@ class MainWindow(QMainWindow):
         # 初始加载文件夹树 + 自动清理已删除的路径
         self._tree_view.refresh_model()
         QTimer.singleShot(100, self._cleanup_missing_paths)
+        self.filesystem_changed.connect(self._on_filesystem_changed)
+        self._setup_file_watcher()
 
         logger.info("主窗口初始化完成")
 
@@ -177,52 +209,54 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self._on_exit)
         file_menu.addAction(exit_action)
 
-        # 工具
+        # 工具（按用途分组，避免 13 项平铺）
         tools_menu = menubar.addMenu("工具(&T)")
+
+        organize_menu = tools_menu.addMenu("查重与整理")
         dedup_action = QAction("查重(&D)...", self)
         dedup_action.setShortcut(QKeySequence("Ctrl+D"))
         dedup_action.setStatusTip("对选中的资源单元执行查重比对")
         dedup_action.triggered.connect(self._on_start_dedup)
-        tools_menu.addAction(dedup_action)
+        organize_menu.addAction(dedup_action)
 
         tag_action = QAction("管理标签(&T)...", self)
         tag_action.setStatusTip("创建、编辑或删除文件标签")
         tag_action.triggered.connect(self._on_manage_tags)
-        tools_menu.addAction(tag_action)
-
-        heic_action = QAction("HEIC 检查与转换(&H)...", self)
-        heic_action.setStatusTip("检查媒体库里全部 HEIC 文件并批量转换为 JPG")
-        heic_action.triggered.connect(self._on_heic_convert)
-        tools_menu.addAction(heic_action)
-
-        tools_menu.addSeparator()
-
-        excluded_action = QAction("管理已排除文件夹(&L)...", self)
-        excluded_action.setStatusTip("查看和管理已被排除的文件夹列表")
-        excluded_action.triggered.connect(self._on_manage_excluded)
-        tools_menu.addAction(excluded_action)
-
-        repair_action = QAction("修复媒体库路径(&P)...", self)
-        repair_action.setStatusTip(
-            "移动盘换了盘符后，把库里失效的绝对路径改到新位置（改前自动备份数据库）")
-        repair_action.triggered.connect(self._on_repair_paths)
-        tools_menu.addAction(repair_action)
-
-        smb_action = QAction("SMB 共享(&S)...", self)
-        smb_action.setStatusTip("设置局域网 SMB 文件共享，供手机访问媒体库")
-        smb_action.triggered.connect(self._on_open_smb)
-        tools_menu.addAction(smb_action)
-
-        reset_db_action = QAction("重置数据库(&Z)...", self)
-        reset_db_action.setStatusTip("删除所有扫描数据并重新初始化数据库")
-        reset_db_action.triggered.connect(self._on_reset_db)
-        tools_menu.addAction(reset_db_action)
+        organize_menu.addAction(tag_action)
 
         face_rescan_action = QAction("重扫视频人脸(&F)...", self)
         face_rescan_action.setStatusTip(
             "按定间隔多帧重新检测视频人脸（旧数据只取了中间一帧，线索不准）")
         face_rescan_action.triggered.connect(self._on_rescan_faces)
-        tools_menu.addAction(face_rescan_action)
+        organize_menu.addAction(face_rescan_action)
+
+        media_menu = tools_menu.addMenu("文件与媒体")
+        heic_action = QAction("HEIC 检查与转换(&H)...", self)
+        heic_action.setStatusTip("检查媒体库里全部 HEIC 文件并批量转换为 JPG")
+        heic_action.triggered.connect(self._on_heic_convert)
+        media_menu.addAction(heic_action)
+
+        excluded_action = QAction("管理已排除文件夹(&L)...", self)
+        excluded_action.setStatusTip("查看和管理已被排除的文件夹列表")
+        excluded_action.triggered.connect(self._on_manage_excluded)
+        media_menu.addAction(excluded_action)
+
+        repair_action = QAction("修复媒体库路径(&P)...", self)
+        repair_action.setStatusTip(
+            "移动盘换了盘符后，把库里失效的绝对路径改到新位置（改前自动备份数据库）")
+        repair_action.triggered.connect(self._on_repair_paths)
+        media_menu.addAction(repair_action)
+
+        maintenance_menu = tools_menu.addMenu("网络与维护")
+        smb_action = QAction("SMB 共享(&S)...", self)
+        smb_action.setStatusTip("设置局域网 SMB 文件共享，供手机访问媒体库")
+        smb_action.triggered.connect(self._on_open_smb)
+        maintenance_menu.addAction(smb_action)
+
+        reset_db_action = QAction("重置数据库(&Z)...", self)
+        reset_db_action.setStatusTip("删除所有扫描数据并重新初始化数据库")
+        reset_db_action.triggered.connect(self._on_reset_db)
+        maintenance_menu.addAction(reset_db_action)
 
         tools_menu.addSeparator()
         settings_action = QAction("设置(&E)...", self)
@@ -251,17 +285,21 @@ class MainWindow(QMainWindow):
         toolbar.setIconSize(QSize(24, 24))
         self.addToolBar(toolbar)
 
+        _std = self.style().standardIcon
         add_btn = QPushButton("添加根目录")
+        add_btn.setIcon(_std(QStyle.SP_DirOpenIcon))
         add_btn.clicked.connect(self._on_add_root)
         add_btn.setToolTip("添加媒体库根目录 (Ctrl+O)")
         toolbar.addWidget(add_btn)
 
         refresh_btn = QPushButton("刷新")
+        refresh_btn.setIcon(_std(QStyle.SP_BrowserReload))
         refresh_btn.clicked.connect(self._on_refresh_all)
         refresh_btn.setToolTip("重新扫描所有媒体库 (F5)")
         toolbar.addWidget(refresh_btn)
 
         dedup_btn = QPushButton("查重")
+        dedup_btn.setIcon(_std(QStyle.SP_FileDialogContentsView))
         dedup_btn.clicked.connect(self._on_start_dedup)
         dedup_btn.setToolTip("自动计算哈希索引（MD5/视频帧/感知哈希），然后执行查重 (Ctrl+D)")
         toolbar.addWidget(dedup_btn)
@@ -285,6 +323,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
 
         self._msg_btn = QPushButton("消息")
+        self._msg_btn.setIcon(_std(QStyle.SP_MessageBoxInformation))
         self._msg_btn.setToolTip("打开消息中心 (Ctrl+M)")
         self._msg_btn.clicked.connect(self._on_open_messages)
         toolbar.addWidget(self._msg_btn)
@@ -369,8 +408,18 @@ class MainWindow(QMainWindow):
     def _setup_status_bar(self) -> None:
         self._status_bar = MainStatusBar(self._config)
         self.setStatusBar(self._status_bar)
-        self._status_bar.set_api_status(True)
+        # 先按配置给个初值；main.py 在 API 真正启动后会再调
+        # apply_api_status(True/False)，避免"启动失败仍显示运行中"。
+        self._status_bar.set_api_status(self._config.api_enabled)
         self._status_bar.cancel_requested.connect(self._on_cancel_current_task)
+
+    def apply_api_status(self, running: bool, port: int | None = None) -> None:
+        """由入口在 API 服务器真实启动/失败后调用，状态栏不再硬编码。"""
+        self._status_bar.set_api_status(bool(running))
+        if port:
+            from app.ui.widgets.status_bar import _get_local_ip
+            self._status_bar._ip_label.setText(
+                f"📋 {_get_local_ip()}:{port}")
 
     # ============================================================
     # 系统托盘
@@ -1258,22 +1307,16 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        # 移至回收站
+        # 删除语义统一走 unit_service（判卷 / 三模式 / 清缩略图 / 删库）
         try:
-            import send2trash
-            send2trash.send2trash(unit_path)
-        except Exception as e:
-            QMessageBox.critical(self, "删除失败", f"无法将文件夹移至回收站: {e}")
+            from app.services import unit_service
+            result = unit_service.delete_unit(unit_id, config=self._config)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "删除失败", f"删除时发生异常: {e}")
             return
-
-        # 删除 DB 记录
-        try:
-            with DatabaseManager.session() as session:
-                q.delete_resource_unit(session, unit_id)
-        except Exception as e:
-            logger.warning(f"数据库记录删除失败: {e}")
-            QMessageBox.warning(self, "部分成功",
-                f"文件夹已移至回收站，但数据库记录删除失败: {e}。\n请稍后手动重新扫描以清理。")
+        if not result.ok:
+            QMessageBox.warning(self, "删除失败", result.message or "删除失败")
+            return
 
         self._tree_view.refresh_model()
         self._grid_view.clear()
@@ -1418,6 +1461,29 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "重置失败", f"数据库重置失败:\n{e}")
             logger.error(f"重置数据库失败: {e}")
+
+    @Slot(object)
+    def apply_external_config(self, new_config: AppConfig) -> None:
+        """Web/API 侧改了配置（数据根、缓存目录、PIN）后同步到 GUI。
+
+        只刷新运行态，不再写 config.json —— 配置已由 API 侧落盘，
+        桌面端再写一次会在"共享配置"场景下产生竞争。
+        """
+        old_pin = self._config.web_pin
+        self._config = new_config
+        try:
+            from app.services.cleanup_service import configure_thumbnail_cache_dir
+            configure_thumbnail_cache_dir(new_config.thumbnail_cache_dir)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"缩略图缓存目录注入失败: {e}")
+        if new_config.web_pin != old_pin:
+            from app.api.server import _revoke_all_auth_tokens
+            _revoke_all_auth_tokens()
+        try:
+            self._tree_view.refresh_model()
+        except Exception as e:  # noqa: BLE001 — 界面刷新失败不应影响 API
+            logger.warning(f"外部配置同步后刷新树失败: {e}")
+        self._status_bar.set_status("设置已从 Web 端同步")
 
     @Slot(object)
     def _on_settings_saved(self, new_config: AppConfig) -> None:
@@ -1602,17 +1668,83 @@ class MainWindow(QMainWindow):
     # 刷新
     # ============================================================
 
-    def _cleanup_missing_paths(self) -> None:
-        """检查所有根目录和单元，把路径确实不在了的关掉/排除（磁盘没连则不动）。"""
+    def _setup_file_watcher(self) -> None:
+        """启动实时文件监控（设置里 watcher_enabled 之前只是个空开关）。"""
+        if not self._config.watcher_enabled:
+            return
         try:
-            cleaned_roots, cleaned_units, healed_roots = cleanup_missing_paths()
-            if cleaned_roots or cleaned_units or healed_roots:
-                logger.info(
-                    f"清理完成: {cleaned_roots} 个根目录, {cleaned_units} 个单元, "
-                    f"{healed_roots} 个根目录恢复")
-                self._tree_view.refresh_model()
-        except Exception as e:
-            logger.error(f"路径清理失败: {e}")
+            with DatabaseManager.session() as session:
+                roots = [r.path for r in q.get_all_roots(session) if r.enabled]
+            handler = MediaFileEventHandler(
+                frozenset(self._config.media_extensions),
+                lambda ev: self.filesystem_changed.emit(str(ev.path)),
+                debounce_ms=self._config.watcher_debounce_ms,
+            )
+            watcher = FileWatcher(handler)
+            for root in roots:
+                if Path(root).is_dir():
+                    watcher.add_root(Path(root))
+            watcher.start()
+            self._watcher = watcher
+        except Exception as e:  # noqa: BLE001 — 监控不可用不应阻止程序启动
+            logger.warning(f"实时文件监控启动失败: {e}")
+
+    @Slot(str)
+    def _on_filesystem_changed(self, path: str) -> None:
+        """watchdog 线程通过 Qt 信号投递到这里（已在 GUI 线程）。"""
+        logger.info(f"检测到媒体文件变化: {path}")
+        self._status_bar.set_status("检测到文件变化，正在刷新…")
+        try:
+            self._tree_view.refresh_model()
+            if self._current_unit_id is not None:
+                self._on_reload_current_unit()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"文件变化后刷新失败: {e}")
+
+    def _stop_file_watcher(self) -> None:
+        if self._watcher is not None:
+            try:
+                self._watcher.stop()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"停止文件监控失败: {e}")
+            self._watcher = None
+
+    def _cleanup_missing_paths(self, background: bool = True) -> None:
+        """检查所有根目录和单元，把路径确实不在了的关掉/排除（磁盘没连则不动）。
+
+        background=True（启动路径）放到 QThread：整库逐个 `Path.is_dir()` +
+        卷探测在弱机/移动盘上要几秒，放 GUI 线程会让窗口"白屏几秒"。
+        """
+        if not background:
+            try:
+                cleaned_roots, cleaned_units, healed_roots = cleanup_missing_paths()
+                if cleaned_roots or cleaned_units or healed_roots:
+                    logger.info(
+                        f"清理完成: {cleaned_roots} 个根目录, {cleaned_units} 个单元, "
+                        f"{healed_roots} 个根目录恢复")
+                    self._tree_view.refresh_model()
+            except Exception as e:
+                logger.error(f"路径清理失败: {e}")
+            return
+
+        if self._cleanup_worker is not None and self._cleanup_worker.isRunning():
+            return
+        worker = _CleanupWorker(parent=self)
+        worker.done.connect(self._on_cleanup_finished)
+        worker.failed.connect(lambda msg: logger.error(f"路径清理失败: {msg}"))
+        worker.finished.connect(worker.deleteLater)
+        self._cleanup_worker = worker
+        worker.start()
+
+    @Slot(object)
+    def _on_cleanup_finished(self, result) -> None:
+        self._cleanup_worker = None
+        cleaned_roots, cleaned_units, healed_roots = result
+        if cleaned_roots or cleaned_units or healed_roots:
+            logger.info(
+                f"清理完成: {cleaned_roots} 个根目录, {cleaned_units} 个单元, "
+                f"{healed_roots} 个根目录恢复")
+            self._tree_view.refresh_model()
 
     @Slot()
     def _on_refresh_all(self) -> None:
@@ -1620,7 +1752,7 @@ class MainWindow(QMainWindow):
         # 先停止所有后台线程
         self._cancel_all_workers()
 
-        self._cleanup_missing_paths()
+        self._cleanup_missing_paths(background=False)
 
         try:
             with DatabaseManager.session() as session:
@@ -1656,6 +1788,9 @@ class MainWindow(QMainWindow):
         # 先解除引用，确保 worker 信号不会访问过期指针
         workers = [self._scan_worker, self._hash_worker, self._dedup_worker]
         self._scan_worker = self._hash_worker = self._dedup_worker = None
+        if self._cleanup_worker is not None:
+            workers.append(self._cleanup_worker)
+            self._cleanup_worker = None
 
         for w in workers:
             if w and w.isRunning():
@@ -1669,6 +1804,7 @@ class MainWindow(QMainWindow):
 
     def stop_background_workers(self) -> None:
         """停止全部后台任务（退出流程与测试用）。"""
+        self._stop_file_watcher()
         self._cancel_all_workers()
         self._status_bar.set_cancellable(False)
 
@@ -1695,6 +1831,31 @@ class MainWindow(QMainWindow):
                 logger.error(f"取消 {type(w).__name__} 失败: {e}")
         self._status_bar.set_status("正在停止...")
 
+    def _settings_store(self):
+        """窗口布局持久化（QSettings 落在用户配置目录，不写 config.json）。"""
+        from PySide6.QtCore import QSettings
+        return QSettings("MediaManager", "Desktop")
+
+    def _restore_window_geometry(self) -> None:
+        try:
+            store = self._settings_store()
+            geo = store.value("window/geometry")
+            if geo:
+                self.restoreGeometry(geo)
+            sizes = store.value("window/splitter")
+            if sizes:
+                self._splitter.setSizes([int(x) for x in sizes])
+        except Exception as e:  # noqa: BLE001 — 布局恢复失败不应影响启动
+            logger.warning(f"恢复窗口布局失败: {e}")
+
+    def _save_window_geometry(self) -> None:
+        try:
+            store = self._settings_store()
+            store.setValue("window/geometry", self.saveGeometry())
+            store.setValue("window/splitter", self._splitter.sizes())
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"保存窗口布局失败: {e}")
+
     def closeEvent(self, event) -> None:
         """关闭窗口前先停掉后台线程。
 
@@ -1703,6 +1864,7 @@ class MainWindow(QMainWindow):
         后台 worker 仍在写库就被析构 —— 既可能丢数据也可能崩溃。
         """
         logger.info("关闭主窗口，停止后台任务...")
+        self._save_window_geometry()
         self._cancel_all_workers()
         super().closeEvent(event)
 

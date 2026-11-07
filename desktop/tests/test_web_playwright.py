@@ -2362,6 +2362,27 @@ def test_settings_data_location(page):
           page.locator(".settings-actions button", has_text="缩略图目录").count() >= 1)
 
 
+def test_settings_tools_sections(page):
+    """设置页里的工具入口：标签管理、已排除文件夹（与桌面端同一能力）。"""
+    section("Web 测试 34b: 设置里的工具入口")
+    page.goto(f"http://127.0.0.1:{_PORT}/#/settings")
+    page.wait_for_load_state("networkidle")
+
+    tags_entry = page.locator(".setting-item", has_text="标签管理").first
+    tags_entry.wait_for(state="attached", timeout=8000)
+    tags_entry.click()
+    page.wait_for_timeout(600)
+    check("标签管理区块可展开",
+          page.locator("button", has_text="新建标签").count() >= 1)
+
+    excluded_entry = page.locator(".setting-item", has_text="已排除文件夹").first
+    excluded_entry.click()
+    page.wait_for_timeout(600)
+    text = page.locator(".settings-block").all_text_contents()
+    joined = "".join(text)
+    check("已排除文件夹区块可展开", "没有已排除" in joined or "恢复" in joined)
+
+
 def test_data_root_wizard(page):
     """便携版没找到数据盘 → 自动进「选择数据目录」向导（而不是给一个空库）。
 
@@ -2499,6 +2520,10 @@ def test_lite_mode_hides_dedup(page):
 
         page.goto(f"{base}/")
         page.evaluate(f"() => localStorage.setItem('media_server_url', '{base}')")
+        # 必须整页重载：首次进 lite origin 时 localStorage 还是空的，应用已经跳到
+        # #/connect；此时再 goto #/units 只是同文档 hash 变化，不会重新读
+        # localStorage → 根组件 serverUrl 永远为空、导航整块不渲染（实测踩到）。
+        page.reload()
         page.goto(f"{base}/#/units")
         page.wait_for_load_state("networkidle")
         page.locator(".app-main").wait_for(state="attached", timeout=8000)
@@ -2525,6 +2550,13 @@ def test_lite_mode_hides_dedup(page):
         if not final_nav:
             body = (page.locator("#app").text_content() or "")[:120]
             print(f"     [诊断] url={page.url} 页面首段={body!r}")
+            print("     [诊断2]", page.evaluate(
+                "() => ({ls: localStorage.getItem('media_server_url'),"
+                " side: document.querySelectorAll('.sidebar').length,"
+                " nav: document.querySelectorAll('.sidebar-nav').length,"
+                " tabs: document.querySelectorAll('.bottom-tabs').length,"
+                " unlock: !!document.querySelector('.layout-wrap'),"
+                " pin: !!document.querySelector('.pin-overlay')})"))
         check("导航里保留「查重」（便携版功能同步）", nav_updated)
         check("导航里保留「媒体库」", "媒体库" in final_nav)
 
@@ -2689,6 +2721,7 @@ def main():
             # 注意顺序：轻量档用例会 create_app → 吊销令牌，必须排在 PIN 用例之前
             test_library_page_and_scan(page)
             test_settings_data_location(page)
+            test_settings_tools_sections(page)
             test_data_root_wizard(page)
             test_lite_mode_hides_dedup(page)
 

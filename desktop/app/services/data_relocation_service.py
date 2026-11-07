@@ -558,7 +558,10 @@ def inspect_data_root(target_root, *, marker_name: str = "") -> dict:
     thumb_dir = root / "data" / ".thumbnails"
     try:
         if thumb_dir.is_dir():
-            info["thumbnail_files"] = sum(1 for _ in thumb_dir.glob("*.jpg"))
+            info["thumbnail_files"] = sum(
+                1 for p in thumb_dir.iterdir()
+                if p.is_file() and not p.name.endswith(".meta")
+            )
     except OSError:
         pass
 

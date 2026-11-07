@@ -10,6 +10,8 @@
 import hashlib
 import json
 import logging
+import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -27,6 +29,16 @@ from app.utils.media_types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 同一缩略图可能被 GUI 网格、Web 网格、预览页并发请求。旧实现直接写最终路径：
+# 两个请求同时生成时，一个可能读到另一个刚写了一半的 jpg（Pillow 报 "image file
+# is truncated"），或后写者覆盖前者。这里按 file_id 分片加锁，并把写盘改成
+# 「写临时文件 → os.replace 原子替换」，任何时刻最终路径只会是完整文件。
+_GEN_LOCKS = [threading.Lock() for _ in range(16)]
+
+
+def _gen_lock(key: int) -> threading.Lock:
+    return _GEN_LOCKS[abs(int(key)) % len(_GEN_LOCKS)]
 
 
 @dataclass(frozen=True)
@@ -148,47 +160,58 @@ class ThumbnailGenerator:
         # 确保缓存目录存在
         cache_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 检查缓存（同时校验源文件匹配）
-        if cache_path.is_file() and self.is_cache_valid(cache_path, source_path):
+        with _gen_lock(file_id):
+            # 检查缓存（同时校验源文件匹配）—— 锁内再查一次，避免并发重复生成
+            if cache_path.is_file() and self.is_cache_valid(cache_path, source_path):
+                try:
+                    with Image.open(cache_path) as im:
+                        w, h = im.size
+                    return ThumbnailInfo(
+                        source_path=source_path,
+                        thumbnail_path=cache_path,
+                        width=w, height=h,
+                        generation_method="cache",
+                    )
+                except Exception:
+                    pass  # 缓存损坏，重新生成
+
+            ext = source_path.suffix.lower()
+            # 先写同目录临时文件，成功后再原子替换；中途失败不会留下半张图
+            tmp_path = cache_path.with_name(cache_path.name + ".tmp")
             try:
-                with Image.open(cache_path) as im:
-                    w, h = im.size
-                return ThumbnailInfo(
-                    source_path=source_path,
-                    thumbnail_path=cache_path,
-                    width=w, height=h,
-                    generation_method="cache",
-                )
-            except Exception:
-                pass  # 缓存损坏，重新生成
+                # 扩展名判定统一走 utils.media_types（单一事实源），
+                # 否则 .m2ts/.rmvb/.vob/.ogv/.asf 等会被误判为不支持
+                if is_raw_extension(ext):
+                    w, h = self._generate_raw_thumb(source_path, tmp_path)
+                    method = "rawpy"
+                elif is_image_extension(ext):
+                    w, h = self._generate_image_thumb(source_path, tmp_path)
+                    method = "pillow"
+                elif is_video_extension(ext):
+                    w, h = self._generate_video_thumb(source_path, tmp_path)
+                    method = "opencv_mid"
+                else:
+                    raise UnsupportedFormatError(str(source_path), "无法生成缩略图")
+                os.replace(tmp_path, cache_path)
+            finally:
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    pass
 
-        ext = source_path.suffix.lower()
-        # 扩展名判定统一走 utils.media_types（单一事实源），
-        # 否则 .m2ts/.rmvb/.vob/.ogv/.asf 等会被误判为不支持
-        if is_raw_extension(ext):
-            w, h = self._generate_raw_thumb(source_path, cache_path)
-            method = "rawpy"
-        elif is_image_extension(ext):
-            w, h = self._generate_image_thumb(source_path, cache_path)
-            method = "pillow"
-        elif is_video_extension(ext):
-            w, h = self._generate_video_thumb(source_path, cache_path)
-            method = "opencv_mid"
-        else:
-            raise UnsupportedFormatError(str(source_path), "无法生成缩略图")
+            # 缓存元数据写入（生成后才写，确保sidecar与缩略图一致）
+            try:
+                self._write_cache_meta(cache_path, source_path)
+            except Exception as e:
+                logger.warning(f"写入缩略图元数据失败: {cache_path} - {e}")
 
-        # 缓存元数据写入（生成后才写，确保sidecar与缩略图一致）
-        try:
-            self._write_cache_meta(cache_path, source_path)
-        except Exception as e:
-            logger.warning(f"写入缩略图元数据失败: {cache_path} - {e}")
-
-        return ThumbnailInfo(
-            source_path=source_path,
-            thumbnail_path=cache_path,
-            width=w, height=h,
-            generation_method=method,
-        )
+            return ThumbnailInfo(
+                source_path=source_path,
+                thumbnail_path=cache_path,
+                width=w, height=h,
+                generation_method=method,
+            )
 
     def generate_batch(
         self,
@@ -283,7 +306,10 @@ class ThumbnailGenerator:
             "source_size": st.st_size,
         }
         meta_path = ThumbnailGenerator._get_meta_path(thumbnail_path)
-        meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        # sidecar 也原子写：Web/GUI 读到半截 JSON 会判定缓存无效并触发重复生成
+        tmp = meta_path.with_name(meta_path.name + ".tmp")
+        tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, meta_path)
 
     def _generate_image_thumb(self, source: Path, dest: Path) -> tuple[int, int]:
         """生成图片缩略图（Pillow）。"""

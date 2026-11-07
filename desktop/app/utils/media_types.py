@@ -107,3 +107,29 @@ def get_video_extensions() -> FrozenSet[str]:
 def get_all_media_extensions() -> FrozenSet[str]:
     """返回所有支持的媒体文件扩展名集合。"""
     return _IMAGE_EXTENSIONS | _VIDEO_EXTENSIONS
+
+
+# 浏览器可播放/可展示的 MIME 唯一来源（API 流式端与前端提示共用）。
+# 注意：mkv/avi/flv/ts 多数浏览器不原生支持，仍返回真实 MIME，前端据此提示
+# 「建议在桌面端播放」，而不是伪装成 mp4 让播放器静默失败。
+MIME_TYPES: dict[str, str] = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".gif": "image/gif",
+    ".webp": "image/webp", ".bmp": "image/bmp",
+    ".mp4": "video/mp4", ".m4v": "video/mp4",
+    ".mov": "video/quicktime", ".webm": "video/webm",
+    ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+    ".flv": "video/x-flv", ".ts": "video/mp2t",
+    ".wmv": "video/x-ms-wmv",
+    ".heic": "image/heic", ".heif": "image/heif",
+}
+
+
+def get_mime_type(extension: str) -> str:
+    """按扩展名取 MIME；未知返回 application/octet-stream。"""
+    return MIME_TYPES.get(str(extension or "").lower(), "application/octet-stream")
+
+
+def is_browser_playable_video(extension: str) -> bool:
+    """浏览器原生能播的容器（mkv/avi/flv/ts/wmv 明确不行）。"""
+    return str(extension or "").lower() in {".mp4", ".m4v", ".mov", ".webm"}

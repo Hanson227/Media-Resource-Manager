@@ -76,7 +76,10 @@ class ScanWorker(QThread):
                 logger.info(f"扫描已取消: {self._root_path}")
                 return
 
-            self._save_to_database(result)
+            if not self._save_to_database(result):
+                # 落库失败绝不能发 finished：界面会当成"扫描成功"记时间、
+                # 收起进度条，用户以为文件已入库，实际一条都没写。
+                return
 
             self.finished.emit(result)
             logger.info(f"扫描完成: {self._root_path}")
@@ -100,8 +103,12 @@ class ScanWorker(QThread):
         self._cancelled = True
         logger.info("扫描已取消")
 
-    def _save_to_database(self, result: ScanResult) -> None:
-        """将扫描结果写入数据库（委托 scan_service，保持与 API 侧同一实现）。"""
+    def _save_to_database(self, result: ScanResult) -> bool:
+        """将扫描结果写入数据库（委托 scan_service，保持与 API 侧同一实现）。
+
+        返回 False 表示落库失败（错误已通过 error_occurred 报出），
+        调用方不应再发 finished。
+        """
         try:
             save_scan_result(
                 result,
@@ -114,3 +121,5 @@ class ScanWorker(QThread):
         except Exception as e:
             logger.error(f"数据库写入失败: {e}")
             self.error_occurred.emit(f"数据库写入失败: {e}")
+            return False
+        return True

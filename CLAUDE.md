@@ -219,7 +219,9 @@ The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "reso
   → `docs/portable-lite.md`
 - **换盘符只能"改库"，不能重扫** — 重扫会新建一套同名单单元、旧记录变幽灵；
   改库必须 dry-run + 单事务 + 幂等 + **同步改写缩略图 `.meta` 的 source_path**
-  （不改写则盘符一变缓存全部失效，弱机上等于全量重生成）。
+  （不改写则盘符一变缓存全部失效，弱机上等于全量重生成）。**旧盘符被另一块盘占用时
+  `Path.is_dir()` 会骗人**（那块盘上可能有个同名空目录）：判"内容没了"之前必须过
+  `path_remap_service.detect_letter_change()`，否则整库被批量排除。
   → `docs/portable-lite.md`
 - **功能开关只能来自能力探测，不能来自运行档位** — 便携版与桌面档**同一套代码、
   同一套功能**；某功能能不能用，读 `app/utils/capabilities.py`（包里有没有

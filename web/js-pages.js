@@ -226,6 +226,14 @@ const UnitsPage = {
                     <button class="card-more" @click.stop="$root.showSheet(u.name, [
                       { label: u.is_starred ? '取消收藏' : '收藏', icon: u.is_starred ? 'mdi-star-off' : 'mdi-star-outline',
                         action: () => toggleStar(u) },
+                      { label: '重命名显示名', icon: 'mdi-rename-outline',
+                        action: () => renameUnit(u) },
+                      { label: '合并到其他单元…', icon: 'mdi-call-merge',
+                        action: () => openMergeSheet(u) },
+                      { label: '拆分为子单元', icon: 'mdi-call-split',
+                        action: () => splitUnit(u) },
+                      { label: '移出媒体库（保留文件）', icon: 'mdi-eye-off-outline',
+                        action: () => excludeUnit(u) },
                       { label: '删除文件夹', icon: 'mdi-delete-outline', danger: true,
                         action: () => deleteUnit(u) }
                     ])" :title="u.is_starred ? '取消收藏' : '收藏'"><span class="mdi mdi-dots-horizontal"></span></button>
@@ -346,6 +354,68 @@ const UnitsPage = {
             '/api/units/' + ids[0] + '?mode=' + mode, { method: 'DELETE' }),
           drop);
       }
+    },
+
+    /** 管理类操作（Web 与桌面端同步）：改名 / 移出媒体库 */
+    async renameUnit(unit) {
+      const name = prompt('新的单元显示名（只改库里名字，不动磁盘目录）:', unit.name);
+      if (name === null) return;
+      const trimmed = name.trim();
+      if (!trimmed) { alert('名称不能为空'); return; }
+      try {
+        await api(this.serverUrl, '/api/units/' + unit.id + '/rename', {
+          method: 'POST', body: JSON.stringify({ name: trimmed }),
+        });
+        unit.name = trimmed;
+        this.roots = this.roots.map(g => ({ ...g, units: [...g.units] }));
+      } catch (e) { alert('重命名失败: ' + e.message); }
+    },
+
+    async excludeUnit(unit) {
+      if (!confirm('将「' + unit.name + '」移出媒体库？\n\n磁盘文件不会删除，可在桌面端「已排除文件夹」里恢复。')) return;
+      try {
+        await api(this.serverUrl, '/api/units/' + unit.id + '/exclude', { method: 'POST' });
+        for (const g of this.roots) g.units = g.units.filter(x => x.id !== unit.id);
+        this.roots = this.roots.filter(g => g.units.length > 0);
+      } catch (e) { alert('移出失败: ' + e.message); }
+    },
+
+    /** 合并：把当前单元并入用户选中的另一个单元（目标保留，当前变子目录） */
+    openMergeSheet(unit) {
+      const candidates = [];
+      for (const g of this.roots) {
+        for (const other of g.units) {
+          if (other.id !== unit.id) candidates.push(other);
+        }
+      }
+      if (candidates.length === 0) { alert('没有可合并的其他单元'); return; }
+      const items = candidates.slice(0, 30).map(other => ({
+        label: other.name,
+        icon: 'mdi-folder-arrow-right-outline',
+        action: () => this.mergeInto(unit, other),
+      }));
+      this.$root.showSheet('把「' + unit.name + '」并入…', items);
+    },
+
+    async mergeInto(child, parent) {
+      if (!confirm('将「' + child.name + '」合并进「' + parent.name + '」？\n\n只移动媒体库记录/文件，重复内容按查重规则处理。')) return;
+      try {
+        const data = await api(this.serverUrl, '/api/units/merge', {
+          method: 'POST',
+          body: JSON.stringify({ parent_id: parent.id, child_ids: [child.id] }),
+        });
+        if (this.$root.toast) this.$root.toast(data.message || '合并完成');
+        await this.refresh();
+      } catch (e) { alert('合并失败: ' + e.message); }
+    },
+
+    async splitUnit(unit) {
+      if (!confirm('把「' + unit.name + '」拆回按目录自动判定的子单元？')) return;
+      try {
+        const data = await api(this.serverUrl, '/api/units/' + unit.id + '/split', { method: 'POST' });
+        if (this.$root.toast) this.$root.toast(data.message || '拆分完成');
+        await this.refresh();
+      } catch (e) { alert('拆分失败: ' + e.message); }
     },
 
     setSort(field) {
@@ -526,6 +596,8 @@ const UnitFilesPage = {
                   <div class="meta">{{ formatSize(f.size_bytes) }}</div>
                 </div>
                 <button v-if="!selectMode" class="card-more" @click.stop="$root.showSheet(f.filename, [
+                  { label: '设为单元封面', icon: 'mdi-image-outline',
+                    action: () => setAsCover(f) },
                   { label: '多选管理', icon: 'mdi-checkbox-multiple-marked-outline',
                     action: () => enterSelectMode(f.id) },
                   { label: '删除文件', icon: 'mdi-delete-outline', danger: true,
@@ -712,6 +784,17 @@ const UnitFilesPage = {
         state: { files: JSON.parse(JSON.stringify(sorted)), fileIndex: idx },
       });
     },
+    async setAsCover(f) {
+      const uid = this.$route.params.id;
+      try {
+        await api(this.serverUrl, '/api/units/' + uid + '/cover', {
+          method: 'POST', body: JSON.stringify({ file_id: f.id }),
+        });
+        if (this.$root.toast) this.$root.toast('已设为单元封面');
+        else alert('已设为单元封面');
+      } catch (e) { alert('设置封面失败: ' + e.message); }
+    },
+
     setSort(field) {
       if (this.sortBy === field) {
         if (this.sortOrder === 'desc') {
@@ -835,8 +918,27 @@ const PreviewPage = {
           <div class="gesture-zone"></div>
         </template>
         <template v-else-if="mediaType === 'video'">
-          <video ref="videoEl" preload="metadata" playsinline webkit-playsinline @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @ended="playing=false" @play="playing=true" @pause="playing=false" @click.stop @contextmenu.prevent :src="streamUrl" :poster="posterUrl"
+          <video ref="videoEl" preload="metadata" playsinline webkit-playsinline
+            @timeupdate="onTimeUpdate" @loadedmetadata="onMeta"
+            @play="onPlay" @pause="onPause" @ended="onPause"
+            @waiting="buffering = true" @stalled="buffering = true"
+            @canplay="onCanPlay" @error="onVideoError"
+            @click.stop @contextmenu.prevent :src="streamUrl" :poster="posterUrl"
   class="gesture-follow" :class="{ dragging: navSwiping }"></video>
+
+          <!-- 加载/缓冲/失败反馈：旧版黑屏且无任何提示，用户以为卡死 -->
+          <div v-if="formatWarning" class="format-warning">
+            <span class="mdi mdi-information-outline"></span> {{ formatWarning }}
+          </div>
+          <div class="video-status" v-if="mediaType === 'video' && (loading || buffering) && !videoError">
+            <span class="mdi mdi-loading mdi-spin"></span>
+            <span>{{ loading ? '正在加载视频…' : '缓冲中…' }}</span>
+          </div>
+          <div class="video-status error" v-if="mediaType === 'video' && videoError">
+            <span class="mdi mdi-alert-circle-outline"></span>
+            <p>{{ videoError }}</p>
+            <button class="video-retry" @click.stop="retryVideo">重试</button>
+          </div>
 
           <!-- Gesture Zone：触摸事件由 js-gesture 引擎在 mounted 统一接管（报告 §6） -->
           <div class="gesture-zone" :class="{ 'seek-active': gestureSwiping }"></div>
@@ -914,6 +1016,7 @@ const PreviewPage = {
       navigateFeedback: '',
       navigateFeedbackTimer: null,
       posterUrl: '',
+      loading: false, buffering: false, videoError: '',
       _navigating: false,
       navSwiping: false,
       zoomed: false,
@@ -921,6 +1024,15 @@ const PreviewPage = {
   },
   computed: {
     videoEl() { return this.$refs.videoEl; },
+    /** 浏览器原生不支持的容器：提前说明，别让用户对着黑屏等 */
+    formatWarning() {
+      const m = /\.([a-z0-9]+)$/i.exec(this.filename || '');
+      const ext = m ? m[1].toLowerCase() : '';
+      if (['mkv', 'avi', 'flv', 'ts', 'wmv', 'rmvb', 'rm'].includes(ext)) {
+        return '该格式（.' + ext + '）浏览器通常无法直接播放，建议在桌面端打开；或先转成 MP4。';
+      }
+      return '';
+    },
   },
   methods: {
     goBack() {
@@ -1061,7 +1173,37 @@ const PreviewPage = {
       this.duration = this.videoEl.duration || 0;
       this.progressPct = this.duration ? (this.currentTime / this.duration) * 100 : 0;
     },
-    onMeta() { if (this.videoEl) this.duration = this.videoEl.duration || 0; },
+    onMeta() { if (this.videoEl) { this.duration = this.videoEl.duration || 0; this.loading = false; } },
+    onCanPlay() { this.buffering = false; this.loading = false; this.videoError = ''; },
+    onPlay() { this.playing = true; this.buffering = false; this.startHideTimer(); },
+    onPause() {
+      this.playing = false;
+      // 暂停时控制条必须常驻（旧逻辑只在 playing 时启动 4.5s 自动隐藏，
+      // 暂停后控制条会被上一次计时器藏掉，用户找不到播放键）。
+      this.controlsHidden = false;
+      if (this.hideTimer) { clearTimeout(this.hideTimer); this.hideTimer = null; }
+    },
+    onVideoError() {
+      this.buffering = false;
+      this.loading = false;
+      const err = this.videoEl && this.videoEl.error;
+      const code = err ? err.code : 0;
+      if (code === 4) {
+        this.videoError = '浏览器不支持该视频格式或编码（可尝试 MP4/H.264）';
+      } else if (code === 2) {
+        this.videoError = '视频加载失败，请检查数据盘是否已连接';
+      } else {
+        this.videoError = '视频播放失败，请重试';
+      }
+    },
+    retryVideo() {
+      if (!this.videoEl) return;
+      this.videoError = '';
+      this.loading = true;
+      const base = this.streamUrl.split('&_r=')[0];
+      this.streamUrl = base + (base.includes('?') ? '&' : '?') + '_r=' + Date.now();
+      try { this.videoEl.load(); } catch (e) { /* 忽略 */ }
+    },
     /* ---- Gestures（统一手势管线，报告 §6 状态机）----
      * 引擎（js-gesture.createZone）负责：identifier 跟踪、多指中止、
      * 方向锁定（|主轴|≥|副轴|×1.15）、touchcancel=中止、速度采样。
@@ -1512,6 +1654,9 @@ const PreviewPage = {
       this.currentTime = 0;
       this.duration = 0;
       this.progressPct = 0;
+      this.buffering = false;
+      this.videoError = '';
+      this.loading = this.mediaType === 'video';
       // Update URL without reload — deep-clone to avoid Vue reactive proxy $el
       history.replaceState({ files: JSON.parse(JSON.stringify(this.fileList)), fileIndex: newIndex }, '', '#/preview/' + file.id);
       return true;
@@ -1592,11 +1737,23 @@ const PreviewPage = {
         this.fileIndex = history.state.fileIndex ?? -1;
       }
       const id = this.$route.params.id;
+      // 先用列表里已有的元数据立刻起播（少一个 RTT）：旧实现在 await
+      // 文件详情返回前不设 src，弱网/大库下每次进预览都多等一整圈。
+      const known = this.fileList.find(f => String(f.id) === String(id))
+        || (this.fileIndex >= 0 ? this.fileList[this.fileIndex] : null);
+      if (known && String(known.id) === String(id)) {
+        this.filename = known.filename || '';
+        this.mediaType = known.media_type || 'image';
+        this.streamUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/stream');
+        this.posterUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/thumbnail');
+        this.loading = this.mediaType === 'video';
+      }
       const data = await api(this.serverUrl, '/api/files/' + id);
-      this.filename = data.filename || '';
-      this.mediaType = data.media_type || 'image';
+      this.filename = data.filename || this.filename;
+      this.mediaType = data.media_type || this.mediaType || 'image';
       this.streamUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/stream');
       this.posterUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/thumbnail');
+      this.loading = this.mediaType === 'video';
       // 如果 fileIndex 没设置，从 fileList 中查找匹配
       if (this.fileIndex < 0 && this.fileList.length) {
         this.fileIndex = this.fileList.findIndex(f => f.id == id);
@@ -3796,6 +3953,46 @@ const SettingsPage = {
         <span class="mdi mdi-chevron-right"></span>
       </div>
 
+      <!-- 标签管理：与桌面端「工具 → 管理标签」同一能力（Web 只做增删，分配标签在文件卡片） -->
+      <div class="setting-item" @click="toggleTags">
+        <span class="label"><span class="mdi mdi-tag-multiple-outline" style="font-size:16px;margin-right:6px"></span>标签管理</span>
+        <span class="mdi" :class="showTags ? 'mdi-chevron-up' : 'mdi-chevron-right'"></span>
+      </div>
+      <div v-if="showTags" class="settings-block">
+        <div v-if="tagsLoading" class="settings-row">正在读取…</div>
+        <div v-else-if="tags.length === 0" class="settings-row">还没有标签，点下面「新建标签」</div>
+        <div v-for="t in tags" :key="t.id" class="settings-row">
+          <span class="settings-key">
+            <span class="tag-dot" :style="{ background: t.color || 'var(--accent)' }"></span>{{ t.name }}
+          </span>
+          <span class="settings-val">
+            <button class="btn btn-small" @click.stop="deleteTag(t)">删除</button>
+          </span>
+        </div>
+        <div class="settings-actions">
+          <button class="btn btn-small" @click.stop="addTag">
+            <span class="mdi mdi-tag-plus-outline"></span> 新建标签
+          </button>
+        </div>
+      </div>
+
+      <!-- 已排除文件夹：与桌面端「工具 → 管理已排除文件夹」同一能力 -->
+      <div class="setting-item" @click="toggleExcluded">
+        <span class="label"><span class="mdi mdi-folder-off-outline" style="font-size:16px;margin-right:6px"></span>已排除文件夹</span>
+        <span class="mdi" :class="showExcluded ? 'mdi-chevron-up' : 'mdi-chevron-right'"></span>
+      </div>
+      <div v-if="showExcluded" class="settings-block">
+        <div v-if="excludedLoading" class="settings-row">正在读取…</div>
+        <div v-else-if="excludedUnits.length === 0" class="settings-row">没有已排除的文件夹</div>
+        <div v-for="u in excludedUnits" :key="u.id" class="settings-row">
+          <span class="settings-key">{{ u.name }}</span>
+          <span class="settings-val">
+            {{ reasonText(u.exclude_reason) }}
+            <button class="btn btn-small" @click="restoreExcluded(u)">恢复</button>
+          </span>
+        </div>
+      </div>
+
       <!-- 数据位置：便携版核心设置（数据放哪块盘） -->
       <div class="setting-item" @click="toggleDataSection">
         <span class="label"><span class="mdi mdi-harddisk" style="font-size:16px;margin-right:6px"></span>数据位置</span>
@@ -3857,6 +4054,9 @@ const SettingsPage = {
           </button>
           <button class="btn" @click="changeThumbDir">
             <span class="mdi mdi-image-multiple-outline"></span> 修改缩略图目录
+          </button>
+          <button class="btn" @click="clearThumbCache">
+            <span class="mdi mdi-delete-sweep-outline"></span> 清理缩略图缓存
           </button>
         </div>
         <div v-if="pickerMode" class="settings-picker">
@@ -3922,6 +4122,13 @@ const SettingsPage = {
     heicRunning: false,
     // 数据位置（便携版核心）
     showData: false,
+    showExcluded: false,
+    excludedLoading: false,
+    excludedUnits: [],
+    // 标签管理（与桌面端同一能力）
+    showTags: false,
+    tagsLoading: false,
+    tags: [],
     settings: {},
     features: {},
     pickerMode: '',
@@ -3945,6 +4152,69 @@ const SettingsPage = {
       this.showData = !this.showData;
       if (this.showData) this.loadSettings();
     },
+
+    reasonText(reason) {
+      return ({ user: '手动排除', missing: '磁盘不可达', empty: '空目录' })[reason] || (reason || '已排除');
+    },
+
+    async toggleExcluded() {
+      this.showExcluded = !this.showExcluded;
+      if (!this.showExcluded) return;
+      this.excludedLoading = true;
+      try {
+        const data = await api(this.serverUrl, '/api/units/excluded');
+        this.excludedUnits = data.units || [];
+      } catch (e) {
+        this.excludedUnits = [];
+      } finally {
+        this.excludedLoading = false;
+      }
+    },
+
+    async restoreExcluded(unit) {
+      if (!confirm('恢复「' + unit.name + '」到媒体库？')) return;
+      try {
+        await api(this.serverUrl, '/api/units/' + unit.id + '/restore', { method: 'POST' });
+        this.excludedUnits = this.excludedUnits.filter(x => x.id !== unit.id);
+      } catch (e) { alert('恢复失败: ' + e.message); }
+    },
+
+    async toggleTags() {
+      this.showTags = !this.showTags;
+      if (!this.showTags) return;
+      await this.loadTags();
+    },
+
+    async loadTags() {
+      this.tagsLoading = true;
+      try {
+        const data = await api(this.serverUrl, '/api/tags');
+        this.tags = data.tags || [];
+      } catch (e) {
+        this.tags = [];
+      } finally {
+        this.tagsLoading = false;
+      }
+    },
+
+    async addTag() {
+      const name = prompt('新标签名称');
+      if (!name || !name.trim()) return;
+      try {
+        await api(this.serverUrl,
+          '/api/tags?name=' + encodeURIComponent(name.trim()), { method: 'POST' });
+        await this.loadTags();
+      } catch (e) { alert('新建失败: ' + e.message); }
+    },
+
+    async deleteTag(tag) {
+      if (!confirm('删除标签「' + tag.name + '」？文件本身不会被删除。')) return;
+      try {
+        await api(this.serverUrl, '/api/tags/' + tag.id, { method: 'DELETE' });
+        this.tags = this.tags.filter(t => t.id !== tag.id);
+      } catch (e) { alert('删除失败: ' + e.message); }
+    },
+
     async loadSettings() {
       try {
         this.settings = await api(this.serverUrl, '/api/settings');
@@ -3961,6 +4231,14 @@ const SettingsPage = {
     changeThumbDir() {
       this.migrateMsg = '';
       this.pickerMode = 'thumb';
+    },
+    async clearThumbCache() {
+      if (!confirm('清空缩略图缓存？下次浏览会重新生成（大库会慢一阵）。')) return;
+      try {
+        const res = await api(this.serverUrl, '/api/settings/clear-thumbnail-cache', { method: 'POST' });
+        alert(res.message || '缩略图缓存已清理');
+        await this.loadSettings();
+      } catch (e) { alert('清理失败: ' + e.message); }
     },
     async onDirPicked(path) {
       const mode = this.pickerMode;

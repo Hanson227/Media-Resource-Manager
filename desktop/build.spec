@@ -14,6 +14,12 @@ import os
 import sys
 from pathlib import Path
 
+# 平台范围：只出 Windows x64（见 docs/portable-lite.md「平台范围」）。
+if sys.maxsize <= 2 ** 32:
+    raise SystemExit(
+        "本项目只发 Windows x64：请用 64 位 Python 运行 pyinstaller（当前解释器是 32 位）。"
+    )
+
 # SPECPATH = 本 spec 所在目录（desktop/）；所有源都用绝对路径拼出来，
 # 避免"_root 上溯到仓库根"以及"必须从 desktop/ 执行 pyinstaller"这两个坑。
 _root = Path(SPECPATH).resolve()          # desktop/

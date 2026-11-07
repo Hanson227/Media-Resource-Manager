@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import FrozenSet, Optional, Union, get_args, get_origin, get_type_hints
 import json
+import os
 import warnings
 
 # 仅依赖无第三方依赖的常量模块，保持 config 可在早期安全导入
@@ -361,8 +362,12 @@ class AppConfig:
             f.name: _to_json(getattr(self, f.name))
             for f in fields(self) if f.name not in skip
         }
-        with open(path, "w", encoding="utf-8") as f:
+        tmp_path = str(path) + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
 
         try:
             _write_pin_file(path, self.web_pin)

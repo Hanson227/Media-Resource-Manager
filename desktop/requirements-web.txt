@@ -4,11 +4,12 @@
 # 与 requirements.txt 的差别：
 #   - 不含 PySide6（桌面 GUI，体积大头，便携版不需要）
 #   - 不含 pystray / win10toast（系统托盘通知，仅桌面端使用）
-#   - 不含 ffmpeg-python（当前代码未使用）
+#   - 不含 ffmpeg-python（当前代码未使用；Web 播放不做服务端转码）
 #
 # 打包后（onedir）约 200~300 MB：Python 运行时 + fastapi/uvicorn + SQLAlchemy
 # + Pillow + opencv-python-headless + numpy + pillow-heif。
-# 查重/人脸相关依赖（人脸模型 38MB）不在此列 —— 轻量档不加载它们。
+# 查重/人脸依赖不在本文件：便携版与桌面版同一套代码，能力由打包时是否带
+# 模型决定（见 build_web.spec 的 MEDIA_BUILD_WITH_FACE）。
 
 # 图像处理
 Pillow>=10.0.0
@@ -25,7 +26,7 @@ SQLAlchemy>=2.0.0
 fastapi>=0.100.0
 uvicorn>=0.22.0
 
-# 文件系统监控（app/core/watcher.py 依赖；当前主流程未启用，保留以免导入失败）
+# 文件系统监控（app/core/watcher.py 依赖；实时监视开关在设置里）
 watchdog>=3.0.0
 
 # 回收站操作（删除语义：绝不用永久删除代替回收站）

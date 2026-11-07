@@ -192,8 +192,8 @@ class QuickLookPreviewDialog(QDialog):
         self._seek_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 不抢键盘
         self._seek_slider.setStyleSheet(
             f"QSlider::groove:horizontal {{ background: {OVERLAY_0}; height: 4px; border-radius: 2px; }}"
-            f"QSlider::handle:horizontal {{ background: #c6a0f6; width: 12px; margin: -5px 0; border-radius: 6px; }}"
-            f"QSlider::sub-page:horizontal {{ background: #c6a0f6; border-radius: 2px; }}"
+            f"QSlider::handle:horizontal {{ background: #6366f1; width: 12px; margin: -5px 0; border-radius: 6px; }}"
+            f"QSlider::sub-page:horizontal {{ background: #6366f1; border-radius: 2px; }}"
         )
         # 拖动 & 点击进度条的处理
         self._seek_slider.sliderPressed.connect(lambda: setattr(self, '_seeking', True))

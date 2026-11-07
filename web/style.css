@@ -26,11 +26,13 @@
   --blue:        #60a5fa;
   --green:       #22c55e;
   --red:         #ef4444;
+  --danger:      #ef4444;
   --amber:       #f59e0b;
 
   /* Spacing scale */
   --space-1: 2px;  --space-2: 4px;  --space-3: 6px;
-  --space-4: 8px;  --space-6: 12px; --space-8: 16px;
+  --space-4: 8px;  --space-5: 10px; --space-6: 12px;
+  --space-8: 16px;
   --space-10: 20px; --space-12: 24px; --space-16: 32px;
 
   /* Radius */
@@ -459,6 +461,25 @@ body {
   width: 100%; height: 100%; object-fit: contain;
   pointer-events: none;
 }
+/* 加载/缓冲/失败反馈：叠加在视频上，不拦截手势 */
+.video-status {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  z-index: 6; display: flex; flex-direction: column; align-items: center;
+  gap: var(--space-2); padding: var(--space-4) var(--space-6);
+  border-radius: var(--radius-lg); background: rgba(0, 0, 0, .62);
+  color: #fff; font-size: 14px; pointer-events: none;
+  max-width: 80%; text-align: center;
+}
+.video-status .mdi { font-size: 30px; color: var(--accent); }
+.video-status.error { pointer-events: auto; }
+.video-status.error .mdi { color: var(--danger); }
+.video-status.error p { margin: 0; line-height: 1.5; }
+.video-retry {
+  margin-top: var(--space-1); padding: 6px 18px; border-radius: 999px;
+  border: 1px solid var(--accent); background: transparent; color: #fff;
+  font-size: 14px; cursor: pointer;
+}
+.video-retry:hover { background: var(--accent); }
 
 /* ========== Gesture Zone ========== */
 .gesture-zone {
@@ -1269,6 +1290,11 @@ body {
 }
 .unit-card:hover .card-more,
 .feed-item:hover .card-more { opacity: 1; }
+/* 触屏没有 hover：旧实现把按钮 opacity:0 藏起来，手机上星标/删除/多选
+   完全点不到（按钮仍占 28px 会误触）。触屏设备常显，且放大到 36px。 */
+@media (hover: none), (pointer: coarse) {
+  .card-more { opacity: 1; width: 36px; height: 36px; }
+}
 .card-more:hover, .card-more:active {
   background: var(--bg-card-hover); color: var(--text-primary);
 }
@@ -1486,4 +1512,59 @@ body {
 .cand-path {
   flex: 1; font-family: ui-monospace, monospace; font-size: 12px;
   word-break: break-all; color: var(--text-primary);
+}
+
+/* 设置页内联小按钮（已排除文件夹「恢复」等） */
+.btn-small {
+    padding: 3px 10px;
+    font-size: 12px;
+    min-height: 26px;
+    margin-left: 8px;
+}
+
+/* ---- 可访问性 / 触控目标（审计 P0） ---- */
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.top-btn, .sidebar-item, .bottom-tab, .setting-item { min-height: 40px; }
+.sort-btn {
+    min-height: 32px;
+    padding: 6px 10px;
+    font-size: 12px;
+}
+/* 搜索框 sticky 在顶，组标题跟着往下排，避免被盖住 */
+.units-search { z-index: 30; background: var(--bg-primary); }
+.units-search ~ .root-group .root-header { top: 56px; z-index: 20; }
+
+/* 窄屏单列：两列在 <420px 会挤到看不见标题 */
+@media (max-width: 419px) {
+    .unit-grid, .file-grid { grid-template-columns: 1fr; }
+}
+
+/* 浏览器不支持的容器提前提示（不是错误，不挡播放） */
+.format-warning {
+    position: absolute;
+    top: 52px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 92%;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, .62);
+    color: #fde68a;
+    font-size: 12px;
+    line-height: 1.4;
+    z-index: 6;
+    pointer-events: none;
+}
+
+/* 标签管理里的小圆点 */
+.tag-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
 }

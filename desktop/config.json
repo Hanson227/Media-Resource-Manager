@@ -1,5 +1,9 @@
 {
-  "db_path": "data\\media_manager.db",
+  "data_root": "F:\\Guofu\\Date",
+  "data_root_id": "f19fab4826f84cabadb355daae5f9566",
+  "data_root_marker": ".media_manager_data.json",
+  "data_root_search_depth": 2,
+  "db_path": "F:\\Guofu\\Date\\data\\media_manager.db",
   "media_extensions": [
     ".3fr",
     ".3gp",
@@ -63,7 +67,7 @@
   "face_video_max_frames": 10,
   "thumbnail_max_size": 256,
   "thumbnail_cache_subdir": ".thumbnails",
-  "thumbnail_cache_dir": "data\\.thumbnails",
+  "thumbnail_cache_dir": "F:\\Guofu\\Date\\data\\.thumbnails",
   "thumbnail_format": "jpg",
   "thumbnail_quality": 80,
   "heic_jpeg_quality": 95,

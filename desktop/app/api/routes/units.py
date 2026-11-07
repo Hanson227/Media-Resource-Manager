@@ -9,11 +9,15 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import func
 
-from app.api.schemas import StatusResponse, UnitItem, UnitListResponse
+from app.api.schemas import (
+    StatusResponse, UnitCoverRequest, UnitItem, UnitListResponse,
+    UnitMarkRequest, UnitMergeRequest, UnitRenameRequest,
+)
 from app.db.engine import DatabaseManager
 from app.db import queries as q
 from app.db.models import MediaFile
-from app.services.file_ops import MODE_PATTERN, MODE_TRASH, apply_mode
+from app.services import unit_service
+from app.services.file_ops import MODE_PATTERN, MODE_TRASH
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +44,14 @@ def list_units():
             )
             first_map = {row.resource_unit_id: row.first_id for row in cover_rows}
 
-            # 手动封面（cover_path）→ file_id：单次 IN 查询全部命中单元
+            # 手动封面（cover_path）→ file_id：按「单元 + 路径」精确匹配，
+            # 不能只看 path（不同单元可能有同名字段），否则会串封面。
             cover_file_map: dict[int, int] = {}
             covers = [u for u in units if u.cover_path]
             if covers:
                 cover_unit_ids = [u.id for u in covers]
                 cover_paths = [u.cover_path for u in covers]
+                cover_by_unit = {u.id: u.cover_path for u in covers}
                 rows = session.query(
                     MediaFile.resource_unit_id, MediaFile.id, MediaFile.path,
                 ).filter(
@@ -53,7 +59,7 @@ def list_units():
                     MediaFile.path.in_(cover_paths),
                 ).all()
                 for uid, fid, path in rows:
-                    if path in cover_paths and uid not in cover_file_map:
+                    if cover_by_unit.get(uid) == path and uid not in cover_file_map:
                         cover_file_map[uid] = fid
 
             # 根目录名（单次查询）
@@ -83,6 +89,55 @@ def list_units():
     except Exception as e:
         logger.error(f"操作失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="内部服务器错误")
+
+
+@router.post("/merge")
+def merge_units(payload: UnitMergeRequest, request: Request):
+    """把一个或多个子单元并入父单元（Web 端多选合并）。"""
+    cfg = getattr(request.app.state, "config", None)
+    result = unit_service.merge_units(payload.parent_id, payload.child_ids, config=cfg)
+    if not result.ok:
+        raise HTTPException(status_code=409, detail=result.message)
+    return {
+        "success": True,
+        "message": result.message,
+        "unit_ids": list(result.unit_ids),
+    }
+
+
+@router.post("/mark")
+def mark_manual_unit(payload: UnitMarkRequest):
+    """把文件夹标记为资源单元（手动单元）。"""
+    result = unit_service.mark_manual_unit(payload.folder_path)
+    if not result.ok:
+        raise HTTPException(status_code=409, detail=result.message)
+    return {
+        "success": True,
+        "message": result.message,
+        "unit_ids": list(result.unit_ids),
+    }
+
+
+@router.get("/excluded")
+def list_excluded_units():
+    """已排除/失效单元列表（Web「已排除文件夹」管理用）。"""
+    with DatabaseManager.session() as session:
+        units = q.get_excluded_units(session)
+        return {
+            "units": [
+                {
+                    "id": u.id,
+                    "name": u.name,
+                    "path": u.path,
+                    "file_count": u.file_count,
+                    "total_size": u.total_size,
+                    "status": u.status,
+                    "exclude_reason": u.exclude_reason,
+                    "library_root_id": u.library_root_id,
+                }
+                for u in units
+            ]
+        }
 
 
 @router.get("/{unit_id}", response_model=UnitItem)
@@ -162,6 +217,77 @@ def get_unit_files(unit_id: int):
         raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
+@router.post("/{unit_id}/split")
+def split_unit(unit_id: int):
+    """把一个多文件夹单元拆回按目录自动判定的子单元。"""
+    result = unit_service.split_unit(unit_id)
+    if not result.ok:
+        raise HTTPException(status_code=409, detail=result.message)
+    return {
+        "success": True,
+        "message": result.message,
+        "unit_ids": list(result.unit_ids),
+    }
+
+
+@router.post("/{unit_id}/rename")
+def rename_unit(unit_id: int, payload: UnitRenameRequest):
+    """修改单元显示名（只改库，不动磁盘目录）。"""
+    result = unit_service.rename_unit(unit_id, payload.name)
+    if not result.ok:
+        status = 404 if "找不到资源单元" in result.message else 409
+        raise HTTPException(status_code=status, detail=result.message)
+    return {"success": True, "message": result.message}
+
+
+@router.post("/{unit_id}/cover")
+def set_unit_cover(unit_id: int, payload: UnitCoverRequest):
+    """设置手动封面：优先用单元内 file_id，也可传绝对路径。"""
+    path = (payload.path or "").strip()
+    if payload.file_id is not None:
+        with DatabaseManager.session() as session:
+            row = session.query(MediaFile).filter(
+                MediaFile.id == payload.file_id,
+                MediaFile.resource_unit_id == unit_id,
+            ).first()
+            if row is None:
+                raise HTTPException(status_code=404, detail="该文件不存在或不属于此单元")
+            path = row.path
+    if not path:
+        raise HTTPException(status_code=422, detail="必须提供 file_id 或 path")
+    result = unit_service.set_cover(unit_id, path)
+    if not result.ok:
+        raise HTTPException(status_code=409, detail=result.message)
+    return {"success": True, "message": result.message}
+
+
+@router.delete("/{unit_id}/cover")
+def clear_unit_cover(unit_id: int):
+    """清除手动封面，恢复自动取第一张。"""
+    result = unit_service.clear_cover(unit_id)
+    if not result.ok:
+        raise HTTPException(status_code=409, detail=result.message)
+    return {"success": True, "message": result.message}
+
+
+@router.post("/{unit_id}/exclude")
+def exclude_unit(unit_id: int):
+    """把单元移出媒体库（保留磁盘文件与记录，状态置 excluded）。"""
+    result = unit_service.exclude_unit(unit_id)
+    if not result.ok:
+        raise HTTPException(status_code=409, detail=result.message)
+    return {"success": True, "message": result.message}
+
+
+@router.post("/{unit_id}/restore")
+def restore_excluded_unit(unit_id: int):
+    """恢复一个被排除的单元。"""
+    result = unit_service.restore_excluded_unit(unit_id)
+    if not result.ok:
+        raise HTTPException(status_code=409, detail=result.message)
+    return {"success": True, "message": result.message}
+
+
 @router.post("/{unit_id}/star")
 def star_unit(unit_id: int):
     """收藏资源单元。"""
@@ -199,33 +325,23 @@ def unstar_unit(unit_id: int):
 @router.delete("/{unit_id}", response_model=StatusResponse)
 def delete_unit(
     unit_id: int,
+    request: Request,
     mode: str = Query(MODE_TRASH, pattern=MODE_PATTERN,
                       description="trash=整个文件夹移至回收站（默认）；record=仅移除媒体库记录"),
 ):
     """删除资源单元（文件夹）。
 
-    默认与桌面端「删除文件夹」一致：把**整个文件夹**移至回收站，再删除
-    数据库记录（media_files / face_vectors / video_frames 级联删除）。
-    mode=record 时只删库记录，磁盘文件夹保留。
+    统一走 `unit_service.delete_unit`：先判卷（磁盘没连不删库）、再按 mode
+    处理磁盘、最后删库并清缩略图。默认与桌面端「删除文件夹」一致：把
+    **整个文件夹**移至回收站。
     """
     try:
-        with DatabaseManager.session() as session:
-            u = q.get_unit_by_id(session, unit_id)
-            if not u:
-                raise HTTPException(status_code=404, detail=f"单元不存在: {unit_id}")
-            unit_name = u.name
-            unit_path = u.path
-
-        ok, reason = apply_mode(unit_path, mode)
-        if not ok:
-            raise HTTPException(status_code=409, detail=reason)
-
-        with DatabaseManager.session() as session:
-            q.delete_resource_unit(session, unit_id)
-
-        return StatusResponse(
-            success=True, message=f"已删除文件夹: {unit_name}（{reason}）"
-        )
+        cfg = getattr(request.app.state, "config", None)
+        result = unit_service.delete_unit(unit_id, mode=mode, config=cfg)
+        if not result.ok:
+            status = 404 if "找不到资源单元" in result.message else 409
+            raise HTTPException(status_code=status, detail=result.message)
+        return StatusResponse(success=True, message=result.message)
     except HTTPException:
         raise
     except Exception as e:

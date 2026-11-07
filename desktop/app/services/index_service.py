@@ -387,6 +387,13 @@ def run_index_pipeline(
 
             except Exception as e:
                 logger.error(f"哈希计算失败 [file_id={fid}]: {e}")
+                # 写空哈希占位，否则这一批失败的文件下一轮仍会排在最前，
+                # 索引永远推不动后面的文件（get_unindexed_files 按 id 升序）。
+                # 文件恢复/变化后由 clear_stale_hash_placeholders() 重置为 NULL。
+                try:
+                    _retry_db(lambda: _mark_hashed(fid))
+                except Exception as mark_error:  # noqa: BLE001
+                    logger.warning(f"写入失败占位也失败 [file_id={fid}]: {mark_error}")
 
             if progress_callback:
                 progress_callback(min(hashed_count, total), total)

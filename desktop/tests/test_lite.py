@@ -407,6 +407,92 @@ def test_broken_root_and_guard():
 # 4. 数据迁移服务
 # ============================================================
 
+
+def test_letter_change_with_root_still_present():
+    """测试 L4b: 盘符被另一块磁盘占用（根目录"看起来可达"、内容全不在）。
+
+    实测事故（2026-11-04）：媒体库在 `E:\\Guofu`，硬盘插上后变成 `F:`，而 `E:`
+    被另一块盘占用、上面恰好也有个空的 `Guofu` 目录。于是 `Path(root).is_dir()`
+    为真 → 不可达根报告漏掉它、扫描守卫也不拦 → 扫描得到 0 个单元 →
+    `exclude_empty_units` 把整库 196 个单元批量标成 excluded，界面全空；而
+    「修复媒体库路径」对话框只列"路径不存在"的根，用户连改库入口都找不到。
+
+    这里构造同形态，锁定三件事：能认出这种"冒名根"、不可达根报告要包含它、
+    扫描守卫必须在落库前拦下（而不是把整库排除）。
+    """
+    section("测试 L4b: 盘符被别的磁盘占用（根目录还在）")
+    from app.services import path_remap_service as remap
+
+    tmp = Path(tempfile.mkdtemp(prefix="lite_letter_"))
+    db_path = tmp / "m.db"
+    original_detect = remap.detect_letter_change
+    try:
+        DatabaseManager.dispose()
+        init_db(db_path)
+        migrate_db()
+
+        old_root = tmp / "volE" / "Guofu"
+        old_root.mkdir(parents=True)
+        _make_media_tree(old_root, unit_count=6, files_per_unit=2)
+
+        from app.services.scan_service import RootRemapRequired, run_scan
+        cfg = AppConfig().with_updates(db_path=db_path,
+                                       thumbnail_cache_dir=tmp / "th")
+        outcome = run_scan(cfg, old_root)
+        check("前置：首次扫描落库", outcome.ok and outcome.saved.new_files == 12)
+
+        # 模拟换盘符：真身在另一个卷的同名目录，旧盘符上只剩一个空壳同名目录
+        new_root = tmp / "volF" / "Guofu"
+        new_root.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old_root), str(new_root))
+        old_root.mkdir(parents=True)
+        check("旧根目录仍然存在（is_dir 会骗人）", old_root.is_dir())
+
+        hit = remap.detect_letter_change(old_root, volumes=[tmp])
+        check("识别出疑似换盘符", hit is not None)
+        if hit:
+            check("候选指向真身",
+                  hit["candidates"][0]["path"] == str(new_root))
+            check("统计出整库不可达",
+                  hit["unit_total"] == 6 and hit["unit_missing"] == 6)
+
+        broken = remap.find_broken_roots(volumes=[tmp])
+        check("不可达根报告必须包含这种冒名根（否则对话框空无一物）",
+              any(b["path"] == str(old_root) for b in broken))
+        check("报告里带上候选位置",
+              any(c["path"] == str(new_root)
+                  for b in broken for c in b.get("candidates", [])))
+
+        # 扫描守卫：扫那个"冒名"空目录时必须在落库前拦下（否则整库被批量排除）。
+        # 生产环境在真实卷里搜候选，这里把 volumes 注入进去，等价于同一个函数。
+        remap.detect_letter_change = (
+            lambda path, **kw: original_detect(path, volumes=[tmp]))
+        try:
+            run_scan(cfg, old_root)
+            check("扫描守卫必须拦下冒名根扫描", False)
+        except RootRemapRequired as e:
+            check("扫描守卫必须拦下冒名根扫描", True)
+            check("守卫携带候选位置", bool(e.candidates))
+            check("守卫提示语说明是盘符问题", "路径可能已变化" in str(e))
+        finally:
+            remap.detect_letter_change = original_detect
+
+        with DatabaseManager.session() as session:
+            check("被拦下时整库没有被排除（记录原样保留）",
+                  len(q.get_excluded_units(session)) == 0)
+            check("6 个单元仍然全部在库里",
+                  len(q.get_all_units_by_root(
+                      session, q.get_all_roots(session)[0].id)) == 6)
+    finally:
+        remap.detect_letter_change = original_detect
+        DatabaseManager.dispose()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ============================================================
+# 4. 数据迁移服务
+# ============================================================
+
 def test_lan_access_urls():
     """手机访问地址：回环 vs 0.0.0.0 的区别必须清晰（用户的真实困惑点）。
 
@@ -1309,6 +1395,7 @@ def main() -> bool:
         test_data_root_resolution()
         test_path_remap()
         test_broken_root_and_guard()
+        test_letter_change_with_root_still_present()
         test_lan_access_urls()
         test_api_settings_lan_urls()
         test_portable_default_host()

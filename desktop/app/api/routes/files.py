@@ -16,7 +16,7 @@ from app.api.schemas import (
     BatchDeleteFailure, BatchDeleteRequest, BatchDeleteResponse,
     FileItem, FileDetailResponse, FileListResponse, StatusResponse,
 )
-from app.services.file_ops import MODE_PATTERN, MODE_TRASH, apply_mode
+from app.services.file_ops import MODE_PATTERN, MODE_TRASH
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # 注册实现收敛在 image_helpers（幂等，导入即生效），避免这里漏注册时
 # pHash/dHash/缩略图静默解不开 HEIC。
 from app.utils.image_helpers import ensure_heif_support, open_image_rgb_oriented
+from app.utils.media_types import get_mime_type
 
 _HEIF_OK = ensure_heif_support()
 
@@ -31,21 +32,22 @@ from app.core.thumbnail_generator import ThumbnailGenerator
 from app.db.engine import DatabaseManager
 from app.db import queries as q
 
-# 全局缩略图生成器（按 max_size 缓存，尺寸来自 config.thumbnail_max_size）
-_thumb_gens: dict[int, ThumbnailGenerator] = {}
+# 全局缩略图生成器（按 max_size + 格式缓存，尺寸/格式来自 config）
+_thumb_gens: dict[tuple[int, str], ThumbnailGenerator] = {}
 _DEFAULT_THUMB_SIZE = 256
 
 
-def _get_thumb_gen(max_size: int) -> ThumbnailGenerator:
-    """按配置尺寸取缩略图生成器（避免硬编码 256 忽略用户设置）。"""
-    gen = _thumb_gens.get(max_size)
+def _get_thumb_gen(max_size: int, fmt: str = "jpg") -> ThumbnailGenerator:
+    """按配置尺寸与格式取缩略图生成器（避免硬编码 256/.jpg 忽略用户设置）。"""
+    key = (max_size, (fmt or "jpg").lower())
+    gen = _thumb_gens.get(key)
     if gen is None:
-        gen = ThumbnailGenerator(max_size=max_size)
-        _thumb_gens[max_size] = gen
+        gen = ThumbnailGenerator(max_size=max_size, format=key[1])
+        _thumb_gens[key] = gen
     return gen
 
 # 缩略图 HTTP 缓存头：封面变更后手机端能较快更新
-_THUMB_HEADERS = {"Cache-Control": "private, max-age=300"}
+_THUMB_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
 router = APIRouter(prefix="/api/files", tags=["文件"])
 
@@ -102,75 +104,15 @@ def get_file(file_id: int):
         raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
-def _purge_thumbnail_cache(file_id: int, unit_path: Optional[Path], cfg) -> None:
-    """删除某文件的缩略图缓存（集中缓存 + 旧版单元内缓存）。
-
-    缩略图与它的 `.meta` sidecar 必须一起删：只删图会在目录里留下孤儿 meta，
-    而 meta 正是判断"缓存属于哪个文件"的依据（见 ThumbnailGenerator.is_cache_valid）。
-    """
-    dirs: list[Path] = []
-    if cfg and getattr(cfg, "thumbnail_cache_dir", None):
-        dirs.append(Path(cfg.thumbnail_cache_dir))
-    if unit_path:
-        dirs.append(unit_path / ".thumbnails")
-    for d in dirs:
-        for suffix in ("", ".meta"):
-            target = d / f"{file_id}_thumb.jpg{suffix}"
-            if target.exists():
-                target.unlink()
-
-
-def _refresh_unit_stats(unit_id: Optional[int]) -> None:
-    """删除文件后重算单元统计。
-
-    unit.file_count / total_size 是落库的快照列，删文件不会自动变，
-    而 Web 的单元卡片直接显示它们 —— 不重算就会显示"6 个文件"却只剩 5 个，
-    直到下次扫描才纠正。
-    """
-    if not unit_id:
-        return
-    from sqlalchemy import func
-    from app.db.models import MediaFile
-    with DatabaseManager.session() as session:
-        row = (
-            session.query(
-                func.count(MediaFile.id),
-                func.coalesce(func.sum(MediaFile.size_bytes), 0),
-            )
-            .filter(MediaFile.resource_unit_id == unit_id)
-            .one()
-        )
-        q.update_unit_stats(session, unit_id, int(row[0]), int(row[1]))
-
-
 def _delete_one(file_id: int, mode: str, cfg) -> tuple[bool, str]:
     """删除一个媒体文件（按 mode 决定是否真的动磁盘）。
 
-    返回:
-        (是否成功, 说明)。
+    统一走 `unit_service.delete_file`：GUI 与 API 共用同一份删除语义
+    （判卷、三模式、清缩略图、重算统计），避免两处实现漂移。
     """
-    with DatabaseManager.session() as session:
-        f = q.get_file_by_id(session, file_id)
-        if not f:
-            return False, f"文件不存在: {file_id}"
-        path_str = f.path
-        filename = f.filename
-        unit_id = f.resource_unit_id
-        unit = q.get_unit_by_id(session, unit_id) if unit_id else None
-        unit_path = Path(unit.path) if unit else None
-
-    # 先把磁盘文件安置好，再删数据库记录：反过来做的话，移回收站失败时
-    # 记录已经没了，文件变成"库外的孤儿"，用户再也看不到它。
-    ok, reason = apply_mode(path_str, mode)
-    if not ok:
-        return False, reason
-
-    with DatabaseManager.session() as session:
-        q.delete_media_file(session, file_id)
-
-    _purge_thumbnail_cache(file_id, unit_path, cfg)
-    _refresh_unit_stats(unit_id)
-    return True, f"已删除: {filename}（{reason}）"
+    from app.services import unit_service
+    result = unit_service.delete_file(file_id, mode=mode, config=cfg)
+    return result.ok, result.message
 
 
 @router.post("/batch-delete", response_model=BatchDeleteResponse)
@@ -233,65 +175,64 @@ def delete_file(
 
 @router.get("/{file_id}/thumbnail")
 def get_file_thumbnail(file_id: int, request: Request):
-    """返回缩略图图片二进制（供手机端直接显示）。"""
+    """返回缩略图图片二进制（供手机端直接显示）。
+
+    关键：**缩略图生成在 DB 会话之外**。旧实现把 OpenCV 抽帧放在
+    `with DatabaseManager.session()` 里，一个大视频抽帧几秒就占着连接；
+    网格一次滚出十几个封面时连接池（默认 5）被打满，其它请求排队超时。
+    """
+    cfg = getattr(request.app.state, "config", None)
+    max_size = (cfg.thumbnail_max_size if cfg and cfg.thumbnail_max_size
+                else _DEFAULT_THUMB_SIZE)
+    fmt = ((cfg.thumbnail_format if cfg and cfg.thumbnail_format else "jpg")
+           or "jpg").lower()
+    gen = _get_thumb_gen(max_size, fmt)
+    media_type = "image/png" if fmt == "png" else "image/jpeg"
+
+    unit_path: Path | None = None
+    src: Path | None = None
     try:
         with DatabaseManager.session() as session:
             f = q.get_file_by_id(session, file_id)
             if not f:
                 raise HTTPException(status_code=404, detail=f"文件不存在: {file_id}")
-
-            cfg = getattr(request.app.state, "config", None)
             src = Path(f.path) if f.path else None
-            max_size = (cfg.thumbnail_max_size if cfg and cfg.thumbnail_max_size
-                        else _DEFAULT_THUMB_SIZE)
-            gen = _get_thumb_gen(max_size)
 
             # 缓存文件名只带 file_id，而 file_id 会被复用（重置数据库后从 1 重新
             # 分配；删除最大 id 后下一条也拿到同一 id）。"文件存在"不等于"内容
-            # 属于这个文件" —— 必须用 .meta（源路径+mtime+size）校验归属，
-            # 否则新文件会显示上一个文件的图（实测：重置后重新扫描显示旧库照片）。
+            # 属于这个文件" —— 必须用 .meta（源路径+mtime+size）校验归属。
             if cfg and cfg.thumbnail_cache_dir:
                 hit = gen.valid_cache_path(file_id, Path(cfg.thumbnail_cache_dir), src)
                 if hit:
-                    return FileResponse(str(hit), media_type="image/jpeg", headers=_THUMB_HEADERS)
+                    return FileResponse(str(hit), media_type=media_type,
+                                        headers=_THUMB_HEADERS)
 
             unit = q.get_unit_by_id(session, f.resource_unit_id)
             if unit:
-                hit = gen.valid_cache_path(
-                    file_id, Path(unit.path) / ".thumbnails", src)
+                unit_path = Path(unit.path)
+                hit = gen.valid_cache_path(file_id, unit_path / ".thumbnails", src)
                 if hit:
-                    return FileResponse(str(hit), media_type="image/jpeg", headers=_THUMB_HEADERS)
-
-            # 缓存缺失或不属于本文件：按需生成（会覆盖掉失效的残留缓存）
-            if unit and src and src.is_file():
-                cache_dir = (cfg.thumbnail_cache_dir if cfg and cfg.thumbnail_cache_dir
-                             else Path(unit.path) / ".thumbnails")
-                try:
-                    info = gen.generate(src, cache_dir, file_id=file_id)
-                    if info.thumbnail_path.exists():
-                        return FileResponse(str(info.thumbnail_path), media_type="image/jpeg",
-                                            headers=_THUMB_HEADERS)
-                except Exception as gen_e:
-                    logger.warning(f"缩略图按需生成失败: {f.path} - {gen_e}")
-
-        raise HTTPException(status_code=404, detail="缩略图未生成")
+                    return FileResponse(str(hit), media_type=media_type,
+                                        headers=_THUMB_HEADERS)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"操作失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="内部服务器错误")
 
+    # ---- 缓存缺失或不属于本文件：在会话外按需生成（不占 DB 连接）----
+    if unit_path and src and src.is_file():
+        cache_dir = (cfg.thumbnail_cache_dir if cfg and cfg.thumbnail_cache_dir
+                     else unit_path / ".thumbnails")
+        try:
+            info = gen.generate(src, Path(cache_dir), file_id=file_id)
+            if info.thumbnail_path.exists():
+                return FileResponse(str(info.thumbnail_path), media_type=media_type,
+                                    headers=_THUMB_HEADERS)
+        except Exception as gen_e:
+            logger.warning(f"缩略图按需生成失败: {src} - {gen_e}")
 
-MIME_MAP = {
-    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-    ".png": "image/png", ".gif": "image/gif",
-    ".webp": "image/webp", ".bmp": "image/bmp",
-    ".mp4": "video/mp4", ".mkv": "video/x-matroska",
-    ".avi": "video/x-msvideo", ".mov": "video/quicktime",
-    ".webm": "video/webm", ".flv": "video/x-flv",
-    ".ts": "video/mp2t", ".m4v": "video/mp4",
-    ".heic": "image/heic", ".heif": "image/heif",
-}
+    raise HTTPException(status_code=404, detail="缩略图未生成")
 
 
 @router.get("/{file_id}/stream")
@@ -306,7 +247,7 @@ def stream_file(file_id: int):
     if not path.is_file():
         raise HTTPException(status_code=404, detail="文件已在磁盘上移除")
 
-    media_type = MIME_MAP.get(f.extension.lower(), "application/octet-stream")
+    media_type = get_mime_type(f.extension)
     # HEIC/HEIF 浏览器不原生支持，转为 JPEG 传输。
     # 注意 .heif 必须走同一分支：此前只判 "image/heic"，.heif 被原样返回，
     # 浏览器直接打不开（列表里显示成裂图）。
@@ -324,8 +265,16 @@ def stream_file(file_id: int):
             finally:
                 rgb_img.close()
             return Response(content=buf.read(), media_type="image/jpeg",
-                            headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(f.filename + '.jpg')}"})
+                            headers={
+                                "Content-Disposition": f"inline; filename*=UTF-8''{quote(f.filename + '.jpg')}",
+                                "Cache-Control": "private, max-age=3600",
+                            })
         except Exception as e:
             logger.error(f"HEIC 转换失败 {f.path}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="内部服务器错误")
-    return FileResponse(str(path), media_type=media_type, filename=f.filename)
+    # 媒体流必须 inline：Starlette 的 FileResponse 传 filename 默认发
+    # `Content-Disposition: attachment`，iOS Safari 等会把它当下载而不是播放。
+    return FileResponse(str(path), media_type=media_type,
+                        filename=f.filename,
+                        content_disposition_type="inline",
+                        headers={"Cache-Control": "private, max-age=3600"})

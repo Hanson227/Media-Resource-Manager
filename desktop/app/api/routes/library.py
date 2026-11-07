@@ -197,24 +197,49 @@ def add_root(body: schemas.AddRootRequest):
 @router.delete("/roots/{root_id}", response_model=schemas.StatusResponse)
 def remove_root(root_id: int, purge_records: bool = Query(
         default=True, description="是否同时删除该根下的单元与文件记录")):
-    """移除媒体库根目录（默认一并删除库内记录，不动磁盘文件）。"""
+    """移除媒体库根目录（默认一并删除库内记录，不动磁盘文件）。
+
+    `purge_records=false` 在现有表结构下无法成立：`resource_units.library_root_id`
+    是非空外键且根→单元是 cascade delete-orphan，删根必然连带删单元。以前这里
+    静默跳过删除却返回 success=True（"点了没反应"），现在明确 409 而不是假装成功。
+    """
+    if not purge_records:
+        raise HTTPException(
+            status_code=409,
+            detail=("仅移除根记录、保留单元会破坏根与单元的归属关系；"
+                    "请使用 purge_records=true（同时删除库内记录，磁盘文件不动），"
+                    "或先处理该根下的资源单元。"),
+        )
+
+    with DatabaseManager.session() as session:
+        root = q.get_root_by_id(session, root_id)
+        if root is None:
+            raise HTTPException(status_code=404, detail=f"媒体库不存在: {root_id}")
+        path = root.path
+
+    # 与扫描/改库/查重互斥：移除根会级联删单元，跑到一半被并发写会留下孤儿缓存。
+    if not acquire_dedup_gate():
+        raise HTTPException(status_code=409, detail="扫描/查重/改库正在进行，请稍后再试")
     try:
         with DatabaseManager.session() as session:
-            root = q.get_root_by_id(session, root_id)
-            if root is None:
-                raise HTTPException(status_code=404, detail=f"媒体库不存在: {root_id}")
-            path = root.path
-            if purge_records:
-                q.remove_library_root(session, root_id)
+            q.remove_library_root(session, root_id)
+        try:
+            from app.services.cleanup_service import CleanupService
+            CleanupService.remove_root_thumbnails(root_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"移除根后清理缩略图失败 root_id={root_id}: {e}")
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
         logger.error(f"移除媒体库失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="内部服务器错误")
+    finally:
+        release_dedup_gate()
+
     return schemas.StatusResponse(
         success=True,
-        message=f"已移除媒体库: {path}（磁盘文件未改动）" if purge_records
-        else f"已移除媒体库: {path}")
+        message=f"已移除媒体库: {path}（库内记录已删除，磁盘文件未改动）",
+    )
 
 
 # ============================================================

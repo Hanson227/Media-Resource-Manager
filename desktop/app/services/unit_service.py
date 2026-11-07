@@ -21,6 +21,7 @@ from typing import List, Optional, Sequence
 
 from app.db.engine import DatabaseManager
 from app.db import queries as q
+from app.services import file_ops
 from app.utils.constants import ExcludeReason
 from app.utils.media_types import is_media_file
 
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "UnitActionResult", "merge_units", "split_unit", "mark_manual_unit",
     "unmark_manual_unit", "exclude_unit", "restore_excluded_unit",
-    "set_cover", "clear_cover",
+    "set_cover", "clear_cover", "rename_unit", "delete_unit", "delete_file",
 ]
 
 
@@ -253,3 +254,180 @@ def clear_cover(unit_id: int, *, config=None) -> UnitActionResult:
     except Exception as e:  # noqa: BLE001
         logger.error(f"清除封面异常: {e}", exc_info=True)
         return _fail(f"清除封面失败: {e}")
+
+
+def rename_unit(unit_id: int, new_name: str, *, config=None) -> UnitActionResult:
+    """只改库内显示名，不动磁盘目录（与桌面端右键重命名一致）。"""
+    name = str(new_name or "").strip()
+    if not unit_id:
+        return _fail("无效的单元 ID")
+    if not name:
+        return _fail("名称不能为空")
+    if len(name) > 200:
+        return _fail("名称过长（最多 200 字）")
+    try:
+        with DatabaseManager.session() as session:
+            unit = q.get_unit_by_id(session, unit_id)
+            if unit is None:
+                return _fail(f"找不到资源单元 (ID={unit_id})")
+            q.rename_unit(session, unit_id, name)
+        return UnitActionResult(ok=True, unit_ids=(unit_id,), message=f"已改名为: {name}")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"重命名单元异常: {e}", exc_info=True)
+        return _fail(f"重命名失败: {e}")
+
+
+def _purge_thumbnails(file_ids, unit_path, config) -> None:
+    """删除这些文件的缩略图缓存（含 `.meta` sidecar）。
+
+    清理必须与生成同源：缓存名只带 file_id，而 file_id 会被复用；只删图
+    会留下孤儿 meta。集中缓存与旧版单元内 `.thumbnails` 都要处理。
+    """
+    dirs = []
+    cache_dir = getattr(config, "thumbnail_cache_dir", None) if config else None
+    if cache_dir:
+        dirs.append(Path(cache_dir))
+    if unit_path:
+        dirs.append(Path(unit_path) / ".thumbnails")
+    for fid in file_ids:
+        for d in dirs:
+            # 两种扩展名都清：配置从 jpg 改成 png 后，旧 jpg 仍可能命中
+            for fmt in ("jpg", "png"):
+                for suffix in ("", ".meta"):
+                    target = d / f"{fid}_thumb.{fmt}{suffix}"
+                    try:
+                        if target.exists():
+                            target.unlink()
+                    except OSError:
+                        pass
+
+
+def _refresh_unit_stats(unit_id: int) -> None:
+    """按库内实际文件重算单元统计（删除文件后快照列不会自己变）。"""
+    if not unit_id:
+        return
+    from sqlalchemy import func
+    from app.db.models import MediaFile
+    with DatabaseManager.session() as session:
+        row = (
+            session.query(
+                func.count(MediaFile.id),
+                func.coalesce(func.sum(MediaFile.size_bytes), 0),
+            )
+            .filter(MediaFile.resource_unit_id == unit_id)
+            .one()
+        )
+        q.update_unit_stats(session, unit_id, int(row[0]), int(row[1]))
+
+
+def delete_unit(unit_id: int, *, mode: str = file_ops.MODE_TRASH,
+                config=None) -> UnitActionResult:
+    """删除整个资源单元（磁盘 + 库记录），GUI/API 的唯一实现。
+
+    先判卷再动磁盘：磁盘没连时绝不删库记录（否则重扫又回来，且用户以为
+    数据没了）。mode 语义见 `file_ops.DELETE_MODES`。
+    """
+    if mode not in file_ops.DELETE_MODES:
+        return _fail(f"未知删除模式: {mode}")
+    if not unit_id:
+        return _fail("无效的单元 ID")
+
+    try:
+        with DatabaseManager.session() as session:
+            unit = q.get_unit_by_id(session, unit_id)
+            if unit is None:
+                return _fail(f"找不到资源单元 (ID={unit_id})")
+            unit_path = unit.path
+            files = q.get_files_by_unit(session, unit_id) or []
+            file_ids = [f.id for f in files]
+            file_count = len(files)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"查询待删除单元失败: {e}", exc_info=True)
+        return _fail(f"查询单元信息失败: {e}")
+
+    if not file_ops.volume_available(unit_path):
+        return _fail(
+            f"磁盘{file_ops.OFFLINE_REASON}: {file_ops.volume_label(unit_path)}"
+            "（请先连接该磁盘再删除）")
+
+    ok, reason = file_ops.apply_mode(unit_path, mode)
+    if not ok:
+        return _fail(reason or "磁盘删除失败")
+
+    try:
+        _purge_thumbnails(file_ids, unit_path, config)
+        with DatabaseManager.session() as session:
+            q.delete_resource_unit(session, unit_id)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"磁盘已处理但删库失败 unit_id={unit_id}: {e}", exc_info=True)
+        return UnitActionResult(
+            ok=False,
+            message=(f"磁盘已{('移出媒体库' if mode == file_ops.MODE_RECORD else '删除')}，"
+                     f"但数据库记录删除失败: {e}"),
+            unit_ids=(unit_id,),
+        )
+
+    verb = {
+        file_ops.MODE_TRASH: "已移至回收站",
+        file_ops.MODE_RECORD: "已移出媒体库（磁盘文件保留）",
+        file_ops.MODE_DELETE: "已永久删除",
+    }.get(mode, "已删除")
+    return UnitActionResult(
+        ok=True, unit_ids=(unit_id,), message=f"{verb}（{file_count} 个文件）",
+        changed={"file_count": file_count, "mode": mode},
+    )
+
+
+def delete_file(file_id: int, *, mode: str = file_ops.MODE_TRASH,
+                config=None) -> UnitActionResult:
+    """删除单个文件（磁盘 + 库记录），GUI/API 的唯一实现。"""
+    if mode not in file_ops.DELETE_MODES:
+        return _fail(f"未知删除模式: {mode}")
+    if not file_id:
+        return _fail("无效的文件 ID")
+
+    try:
+        with DatabaseManager.session() as session:
+            f = q.get_file_by_id(session, file_id)
+            if f is None:
+                return _fail(f"文件不存在 (ID={file_id})")
+            file_path = f.path
+            unit_id = f.resource_unit_id
+            is_cover = False
+            if unit_id:
+                unit = q.get_unit_by_id(session, unit_id)
+                is_cover = bool(unit and unit.cover_path == file_path)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"查询待删除文件失败: {e}", exc_info=True)
+        return _fail(f"查询文件信息失败: {e}")
+
+    if not file_ops.volume_available(file_path):
+        return _fail(
+            f"磁盘{file_ops.OFFLINE_REASON}: {file_ops.volume_label(file_path)}"
+            "（请先连接该磁盘再删除）")
+
+    ok, reason = file_ops.apply_mode(file_path, mode)
+    if not ok:
+        return _fail(reason or "磁盘删除失败")
+
+    try:
+        _purge_thumbnails([file_id], Path(file_path).parent, config)
+        with DatabaseManager.session() as session:
+            q.delete_media_file(session, file_id)
+            if is_cover and unit_id:
+                q.clear_unit_cover(session, unit_id)
+        if unit_id:
+            _refresh_unit_stats(unit_id)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"磁盘已处理但删库失败 file_id={file_id}: {e}", exc_info=True)
+        return UnitActionResult(ok=False, message=f"数据库记录删除失败: {e}")
+
+    verb = {
+        file_ops.MODE_TRASH: "已移至回收站",
+        file_ops.MODE_RECORD: "已移出媒体库（磁盘文件保留）",
+        file_ops.MODE_DELETE: "已永久删除",
+    }.get(mode, "已删除")
+    return UnitActionResult(
+        ok=True, message=f"{verb}: {Path(file_path).name}",
+        changed={"unit_id": unit_id, "mode": mode},
+    )

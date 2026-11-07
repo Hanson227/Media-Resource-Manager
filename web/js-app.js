@@ -121,6 +121,11 @@ const App = {
       const p = this.$route.path;
       return p === '/units' || p === '/dedup' || p === '/heic' || p === '/messages'
         || p === '/library';
+    },
+    showBack() {
+      const p = this.$route.path;
+      return p.startsWith('/units/') || p.startsWith('/dedup/')
+        || p.startsWith('/heic') || p.startsWith('/setup');
     }
   },
   watch: {
@@ -286,6 +291,14 @@ const App = {
     },
     refresh() {
       this.$router.go(0);
+    },
+    goBack() {
+      const p = this.$route.path;
+      if (p.startsWith('/units/')) { this.$router.push('/units'); return; }
+      if (p.startsWith('/dedup/')) { this.$router.push('/dedup'); return; }
+      if (p.startsWith('/heic')) { this.$router.push('/settings'); return; }
+      if (p.startsWith('/setup')) { this.$router.push('/library'); return; }
+      this.$router.back();
     },
     goTab(path) {
       if (this.$route.path === path) return;

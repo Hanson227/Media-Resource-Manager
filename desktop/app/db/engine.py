@@ -78,6 +78,47 @@ class DatabaseManager:
                 logger.error("数据库自动修复失败，建议恢复备份")
 
     @classmethod
+    def is_ready(cls) -> bool:
+        """引擎与会话工厂是否都可用（数据端点能否安全访问库）。"""
+        return cls._engine is not None and cls._session_factory is not None
+
+    @classmethod
+    def switch_to(cls, db_path: Path, echo: bool = False) -> None:
+        """原子切换数据库（先建好新引擎，成功后才释放旧引擎）。
+
+        切换数据根时旧实现先 `dispose()` 再 `init_db()`：新库打不开就变成
+        "没有任何引擎"的裸状态，所有数据端点 500，服务只能重启。这里失败时
+        自动回滚到旧引擎（旧库还在的话），把"切换失败"限制在这一次请求里。
+        """
+        if cls._engine is not None and cls._db_path == db_path:
+            return
+        old = (cls._engine, cls._session_factory, cls._db_path)
+        cls._engine = None
+        cls._session_factory = None
+        cls._db_path = None
+        try:
+            cls.initialize(db_path, echo=echo)
+        except Exception:
+            failed = cls._engine
+            cls._engine, cls._session_factory, cls._db_path = old
+            if failed is not None and failed is not old[0]:
+                try:
+                    failed.dispose()
+                except Exception:  # noqa: BLE001
+                    pass
+            if old[0] is None and old[2] is not None and Path(old[2]).exists():
+                try:
+                    cls.initialize(Path(old[2]), echo=echo)
+                except Exception:  # noqa: BLE001
+                    logger.error(f"回滚旧数据库也失败: {old[2]}", exc_info=True)
+            raise
+        if old[0] is not None:
+            try:
+                old[0].dispose()
+            except Exception:  # noqa: BLE001
+                logger.warning("释放旧数据库引擎失败", exc_info=True)
+
+    @classmethod
     @contextmanager
     def session(cls) -> Generator[Session, None, None]:
         """创建数据库会话的上下文管理器。

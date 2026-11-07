@@ -410,77 +410,36 @@ def merge_dedup_result(result_id: int, body: DedupMergeRequest, request: Request
       - face-only ：无 counted 匹配 → 纯移动，零删除
     部分失败返回 200（success=false + failed 明细），成功项照常落库，可重试。
     """
-    from pathlib import Path as _Path
-
-    from app.services.file_ops import OFFLINE_REASON, volume_available, volume_label
-    from app.services.merge_service import perform_merge
-    from app.utils.constants import ResolutionStatus
+    from app.services.merge_service import MergeError, perform_merge_by_ids
 
     cfg = getattr(request.app.state, "config", None)
     try:
-        with DatabaseManager.session() as session:
-            dr = q.get_dedup_by_id(session, result_id)
-            if not dr:
-                raise HTTPException(status_code=404, detail=f"查重结果不存在: {result_id}")
-            # resolution='merge' 允许重入（上次收尾失败后的幂等重试）
-            if dr.is_resolved and dr.resolution != ResolutionStatus.MERGE.value:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"该结果已处理（{dr.resolution}），不能执行合并",
-                )
-            unit_a = q.get_unit_by_id(session, dr.unit_a_id)
-            unit_b = q.get_unit_by_id(session, dr.unit_b_id)
-            if not unit_a or not unit_b:
-                raise HTTPException(status_code=404, detail="单元记录不存在（请先重新扫描）")
-
-            kept = unit_a if body.keep == "a" else unit_b
-            other = unit_b if body.keep == "a" else unit_a
-            for unit in (unit_a, unit_b):
-                if not volume_available(unit.path):
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"磁盘{OFFLINE_REASON}: {volume_label(unit.path)}"
-                               f"（请先连接该磁盘再合并）",
-                    )
-            if _Path(unit_a.path).anchor != _Path(unit_b.path).anchor:
-                raise HTTPException(
-                    status_code=409,
-                    detail="两个文件夹不在同一磁盘卷，暂不支持跨盘合并（请手动移动文件）",
-                )
-            if not _Path(kept.path).is_dir():
-                raise HTTPException(
-                    status_code=409, detail=f"目标文件夹不存在: {kept.path}")
-            if not _Path(other.path).is_dir():
-                # 重入重试时被并入目录可能已被上次收尾删除（空目录 rmdir）。
-                # 只要该单元在库里已无文件，就没什么可移/可删的，直接进收尾；
-                # 还有文件却找不到目录才是真异常（被外部删除），拒绝并说明。
-                if q.get_files_by_unit(session, other.id):
-                    raise HTTPException(
-                        status_code=409, detail=f"被并入文件夹已不存在: {other.path}")
-
-            if not acquire_dedup_gate():
-                raise HTTPException(
-                    status_code=409, detail="已有查重任务正在运行，请稍后再试")
-            try:
-                outcome = perform_merge(
-                    session, dr, unit_a, unit_b, body.keep,
-                    set(body.retain_matches or []), cfg,
-                )
-            finally:
-                release_dedup_gate()
-
-            return DedupMergeResponse(
-                success=outcome.success,
-                message=("合并完成" if outcome.success
-                         else f"合并部分完成，{len(outcome.failed)} 个文件失败（可重试）"),
-                kept_unit_id=outcome.kept_unit_id,
-                merged_unit_id=outcome.merged_unit_id,
-                moved_count=outcome.moved_count,
-                trashed_count=outcome.trashed_count,
-                renamed=outcome.renamed,
-                failed=outcome.failed,
-                merged_dir_removed=outcome.merged_dir_removed,
+        # 不在路由层开数据库事务：合并的磁盘操作必须在事务外逐文件提交，
+        # 否则一次合并几百文件会长时间锁库，异常时还会 DB 回滚 / 磁盘已动。
+        if not acquire_dedup_gate():
+            raise HTTPException(
+                status_code=409, detail="已有查重任务正在运行，请稍后再试")
+        try:
+            outcome = perform_merge_by_ids(
+                result_id, body.keep, set(body.retain_matches or []), cfg,
             )
+        except MergeError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail)
+        finally:
+            release_dedup_gate()
+
+        return DedupMergeResponse(
+            success=outcome.success,
+            message=("合并完成" if outcome.success
+                     else f"合并部分完成，{len(outcome.failed)} 个文件失败（可重试）"),
+            kept_unit_id=outcome.kept_unit_id,
+            merged_unit_id=outcome.merged_unit_id,
+            moved_count=outcome.moved_count,
+            trashed_count=outcome.trashed_count,
+            renamed=outcome.renamed,
+            failed=outcome.failed,
+            merged_dir_removed=outcome.merged_dir_removed,
+        )
     except HTTPException:
         raise
     except Exception as e:

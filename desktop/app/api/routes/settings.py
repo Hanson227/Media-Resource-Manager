@@ -106,9 +106,31 @@ def _apply_runtime_config(request: Request, config) -> None:
     if app is not None:
         app.state.config = config
     try:
+        from app.db.engine import DatabaseManager
+        runtime = getattr(getattr(app, "state", None), "runtime", None)
+        if isinstance(runtime, dict) and DatabaseManager.is_ready():
+            runtime["db_status"] = "ready"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         configure_thumbnail_cache_dir(config.thumbnail_cache_dir)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"缩略图缓存目录注入失败: {e}")
+    # 通知 GUI（桌面档内嵌 API 时）：GUI 手里的 AppConfig 是启动时那份，
+    # 不刷新就会继续用旧 db_path/缓存目录，出现"Web 已切库、桌面还查旧库"。
+    callback = getattr(getattr(app, "state", None), "on_config_changed", None)
+    if callable(callback):
+        try:
+            callback(config)
+        except Exception as e:  # noqa: BLE001 — 通知失败不能影响配置已生效
+            logger.warning(f"配置变更回调失败: {e}")
+
+
+def _mark_db_unavailable(request: Request) -> None:
+    """数据库引擎不可用时置位，数据端点由闸门返回 503 而不是裸 500。"""
+    runtime = getattr(getattr(request.app, "state", None), "runtime", None)
+    if isinstance(runtime, dict):
+        runtime["db_status"] = "unavailable"
 
 
 def _mark_data_root_ready(request: Request, data_root, *,
@@ -356,15 +378,30 @@ def set_data_root(body: schemas.DataRootRequest, request: Request):
             try:
                 from app.db.engine import DatabaseManager
                 from app.db.migrations import init_db, migrate_db
-                DatabaseManager.dispose()
-                init_db(new_cfg.db_path)
-                migrate_db()
+                # 原子切换：新库建不起来时自动回滚旧引擎，不会出现"无引擎"裸状态
+                DatabaseManager.switch_to(new_cfg.db_path)
+                try:
+                    init_db(new_cfg.db_path)
+                    migrate_db()
+                except Exception:
+                    # 新库初始化/迁移失败：尽量切回旧库，让服务保持可用
+                    if Path(cfg.db_path).exists():
+                        try:
+                            DatabaseManager.switch_to(Path(cfg.db_path))
+                            migrate_db()
+                        except Exception as rollback_error:  # noqa: BLE001
+                            logger.error(f"回滚旧数据根失败: {rollback_error}", exc_info=True)
+                    _mark_db_unavailable(request)
+                    raise
+                runtime = getattr(request.app.state, "runtime", None)
+                if isinstance(runtime, dict):
+                    runtime["db_status"] = "ready"
                 restart_required = False
                 message = f"{result['message']}；已切换到新位置（无需重启）"
             except Exception as e:  # noqa: BLE001
                 logger.error(f"新数据根初始化失败: {e}", exc_info=True)
                 message = (f"{result['message']}；但新库初始化失败（{e}），"
-                           "请立即重启程序")
+                           "已尽量保持旧库可用；若数据异常请立即重启程序")
         if warning:
             message += f"；{warning}"
         return schemas.DataMigrationResponse(

@@ -27,6 +27,13 @@ import os
 import sys
 from pathlib import Path
 
+# 平台范围：只出 Windows x64（见 docs/portable-lite.md「平台范围」）。
+# 32 位解释器会静默产出 x86 包，而项目已不再维护 32 位/ARM 分支，直接拒绝。
+if sys.maxsize <= 2 ** 32:
+    raise SystemExit(
+        "本项目只发 Windows x64：请用 64 位 Python 运行 pyinstaller（当前解释器是 32 位）。"
+    )
+
 # SPECPATH = 本 spec 所在目录（desktop/）。**不要**再用 .parent 上溯：
 # 那样 _root 会变成仓库根，`_root / "main_web.py"` 就找不到了（实测构建报
 # "script '...\Media\main_web.py' not found"）。datas 也一律用绝对路径，

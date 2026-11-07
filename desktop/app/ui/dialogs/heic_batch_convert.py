@@ -196,7 +196,7 @@ class HeicBatchConvertDialog(QDialog):
         scope_layout.addWidget(self._scan_label)
         self._warn_label = QLabel("")
         self._warn_label.setWordWrap(True)
-        self._warn_label.setStyleSheet("color: #f1c40f;")
+        self._warn_label.setStyleSheet("color: #f59e0b;")
         scope_layout.addWidget(self._warn_label)
         layout.addWidget(scope_box)
 

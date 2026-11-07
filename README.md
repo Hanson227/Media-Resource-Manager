@@ -126,6 +126,9 @@ PYTHONIOENCODING=utf-8 python tests/test_web_playwright.py
 
 ### 便携版（无桌面 GUI）
 
+> 日常使用直接源码运行桌面端 `python desktop/main.py` 即可；**便携包不再作为交付产物**。
+> 下面的 `main_web.py` 仅作为「没有桌面界面、只用浏览器」的可选运行方式保留。
+
 系统盘紧张、主要用手机/平板浏览器访问时，用便携版：**不含桌面 GUI（不打包 PySide6）**，
 功能与桌面档**完全一致**，并可以把数据放在移动硬盘上。
 
@@ -156,7 +159,7 @@ $env:MEDIA_BUILD_WITH_FACE="1"; pyinstaller build_web.spec   # +38MB（人脸线
   `手机/平板访问: http://<局域网IP>:19527`，手机连同一 WiFi 直接输入即可；
 - 打包产物内置本地 Vue/vue-router，**断网也能打开页面**。
 
-完整说明（数据根解析规则、改库边界、手机访问与防火墙、ARM 平板注意事项、排障表）见
+完整说明（数据根解析规则、改库边界、手机访问与防火墙、x64 平台范围、排障表）见
 [docs/portable-lite.md](docs/portable-lite.md)。
 
 ### 配置

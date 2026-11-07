@@ -30,7 +30,10 @@ from pathlib import Path
 
 DESKTOP = Path(__file__).resolve().parent.parent
 REPO = DESKTOP.parent
-PKG = DESKTOP / "dist" / "win32" / "影视资源管理器-便携版"
+PKG = DESKTOP / "dist" / "影视资源管理器-便携版"
+if not PKG.is_dir():
+    # 兼容旧包：以前产物在 dist/win32/ 下
+    PKG = DESKTOP / "dist" / "win32" / "影视资源管理器-便携版"
 SIM = Path(r"D:\_dsh_sim\tablet")
 DRIVE_PHYS = SIM / "drive"          # subst 成 X:
 APP_DIR = SIM / "tablet_app"

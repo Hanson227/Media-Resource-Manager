@@ -319,6 +319,10 @@ def main(argv=None) -> int:
         logger.error(str(e))
         return 1
     config = config.with_updates(api_enabled=True, api_host=host, api_port=port)
+    # 局域网监听必须带 PIN：空 PIN + 0.0.0.0 = 同 WiFi 下任何人可读写/删除。
+    # 首次启动生成随机 4 位密码并打印，用户可在 Web 设置里改。
+    from app.services.web_security_service import ensure_web_pin
+    config = ensure_web_pin(config, config_path, host)
     logger.info(f"监听地址: {host}"
                 f"（{'所有网卡，手机可访问' if host == '0.0.0.0' else '注意：非 0.0.0.0 时外部设备可能访问不到'}）")
 

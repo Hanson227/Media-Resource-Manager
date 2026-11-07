@@ -24,7 +24,12 @@ import urllib.request
 from pathlib import Path
 
 DESKTOP = Path(r"D:\Claude-code-Project\Media\desktop")
-PACKAGE = DESKTOP / "dist" / "win32" / "影视资源管理器-便携版"
+# 现在只构建 x64：PyInstaller 默认输出 dist/<name>；旧包曾在 dist/win32/，留作回退。
+_PKG_CANDIDATES = [
+    DESKTOP / "dist" / "影视资源管理器-便携版",
+    DESKTOP / "dist" / "win32" / "影视资源管理器-便携版",
+]
+PACKAGE = next((p for p in _PKG_CANDIDATES if p.is_dir()), _PKG_CANDIDATES[0])
 EXE_NAME = "影视资源管理器-便携版.exe"
 PORT = 19555
 DRIVE_DIR = Path(r"D:\_dsh_sim\deep\drive")

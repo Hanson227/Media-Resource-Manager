@@ -9,6 +9,7 @@
 """
 
 import logging
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -93,6 +94,8 @@ class CleanupService:
                         delete_media_file(session, file_id)
                 except Exception as e:
                     logger.error(f"删除数据库记录失败 (file_id={file_id}): {e}")
+                    # 磁盘已动而记录没删：不能报成功，否则上层以为一致
+                    return False
 
             return True
 
@@ -140,6 +143,8 @@ class CleanupService:
                         delete_media_file(session, file_id)
                 except Exception as e:
                     logger.error(f"删除数据库记录失败 (file_id={file_id}): {e}")
+                    # 磁盘已动而记录没删：不能报成功，否则上层以为一致
+                    return False
 
             return True
 
@@ -177,6 +182,8 @@ class CleanupService:
                         delete_media_file(session, file_id)
                 except Exception as e:
                     logger.error(f"删除数据库记录失败 (file_id={file_id}): {e}")
+                    # 磁盘已动而记录没删：不能报成功，否则上层以为一致
+                    return False
 
             return True
 
@@ -191,7 +198,11 @@ class CleanupService:
         sidecar 记录源路径/mtime/size，是判断"缓存属于哪个文件"的依据
         （见 ThumbnailGenerator.is_cache_valid），只删图会留下永远没人回收的碎 meta。
         """
-        return [cache_dir / f"{file_id}_thumb.jpg{suffix}" for suffix in ("", ".meta")]
+        return [
+            cache_dir / f"{file_id}_thumb.{fmt}{suffix}"
+            for fmt in ("jpg", "png")
+            for suffix in ("", ".meta")
+        ]
 
     @staticmethod
     def _cache_entry_id(name: str) -> Optional[int]:
@@ -200,11 +211,14 @@ class CleanupService:
         无法识别的名字返回 None（调用方据此跳过无关文件）。
         """
         base = name[: -len(".meta")] if name.endswith(".meta") else name
-        suffix = "_thumb.jpg"
-        if not base.endswith(suffix):
+        stem = base
+        for fmt in (".jpg", ".png"):
+            if base.endswith(f"_thumb{fmt}"):
+                stem = base[: -len(f"_thumb{fmt}")]
+                break
+        else:
             return None
-        id_str = base[: -len(suffix)]
-        return int(id_str) if id_str.isdigit() else None
+        return int(stem) if stem.isdigit() else None
 
     @staticmethod
     def remove_thumbnail(file_id: int, cache_dir=None) -> None:
@@ -368,7 +382,7 @@ class CleanupService:
         count = 0
         try:
             for dirpath, dirnames, filenames in sorted(
-                directory.walk(), key=lambda x: -len(str(x[0]))
+                os.walk(directory), key=lambda x: -len(str(x[0]))
             ):
                 current = Path(dirpath)
                 if current == directory:

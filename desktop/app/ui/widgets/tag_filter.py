@@ -23,7 +23,7 @@ class TagChip(QPushButton):
         super().__init__(parent)
         self._tag_id = tag_id
         self._tag_name = name
-        self._tag_color = color or "#888888"
+        self._tag_color = color or "#a0a0b0"
         self.setCheckable(True)
         self.setText(f" {name} ")
         self.setCursor(Qt.CursorShape.PointingHandCursor)

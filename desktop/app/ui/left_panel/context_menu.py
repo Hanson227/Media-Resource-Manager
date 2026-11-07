@@ -29,6 +29,7 @@ class FolderTreeContextMenu(QMenu):
     """
 
     merge_requested = Signal(int, list)
+    multi_merge_requested = Signal(list)  # 多选合并：由树视图推算公共父单元
     split_requested = Signal(int)
     mark_requested = Signal(str)
     unmark_requested = Signal(int)
@@ -143,7 +144,7 @@ class FolderTreeContextMenu(QMenu):
         cover_action.triggered.connect(lambda *args, uid=unit_id: self.cover_requested.emit(uid))
         self.addAction(cover_action)
 
-        if node.is_manual or node.is_starred:
+        if getattr(node, "cover_path", None):
             clear_cover_action = QAction("清除封面", self)
             clear_cover_action.setToolTip("恢复为默认缩略图")
             clear_cover_action.triggered.connect(lambda *args, uid=unit_id: self.clear_cover_requested.emit(uid))
@@ -171,5 +172,7 @@ class FolderTreeContextMenu(QMenu):
     def _build_multi_menu(self) -> None:
         merge_action = QAction(f"合并 {len(self._unit_ids)} 个资源单元", self)
         merge_action.setToolTip("将选中的资源单元合并到它们的公共父文件夹")
-        # TODO: 多选合并需要确定父单元，当前仅为界面占位
+        merge_action.triggered.connect(
+            lambda *args, ids=list(self._unit_ids): self.multi_merge_requested.emit(ids)
+        )
         self.addAction(merge_action)

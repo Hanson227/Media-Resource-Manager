@@ -60,6 +60,9 @@
         <div class="top-bar">
           <h1>{{ pageTitle }}</h1>
           <div class="top-actions">
+            <button v-if="showBack" class="top-btn" @click="goBack" title="返回">
+              <span class="mdi mdi-arrow-left"></span>
+            </button>
             <button v-if="showRefresh" class="top-btn" @click="refresh" :title="'刷新'">
               <span class="mdi mdi-refresh"></span>
             </button>

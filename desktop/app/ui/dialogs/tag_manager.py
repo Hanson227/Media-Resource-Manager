@@ -30,7 +30,7 @@ class TagManageDialog(QDialog):
         self.setModal(True)
 
         self._current_tag_id: Optional[int] = None
-        self._selected_color: str = "#888888"
+        self._selected_color: str = "#a0a0b0"
 
         layout = QVBoxLayout(self)
 
@@ -50,7 +50,7 @@ class TagManageDialog(QDialog):
 
         color_row = QHBoxLayout()
         self._color_preview = QLabel("■")
-        self._color_preview.setStyleSheet("font-size: 20px; color: #888888;")
+        self._color_preview.setStyleSheet("font-size: 20px; color: #a0a0b0;")
         color_row.addWidget(self._color_preview)
         self._color_btn = QPushButton("选择颜色...")
         self._color_btn.clicked.connect(self._on_pick_color)
@@ -67,7 +67,7 @@ class TagManageDialog(QDialog):
         btn_row.addWidget(self._cancel_btn)
         btn_row.addStretch()
         self._delete_btn = QPushButton("删除")
-        self._delete_btn.setStyleSheet("color: #e74c3c;")
+        self._delete_btn.setStyleSheet("color: #ef4444;")
         self._delete_btn.clicked.connect(self._on_delete)
         self._delete_btn.setEnabled(False)
         btn_row.addWidget(self._delete_btn)
@@ -109,7 +109,7 @@ class TagManageDialog(QDialog):
 
         for tag in tags:
             item = QListWidgetItem()
-            color = tag.color or "#888888"
+            color = tag.color or "#a0a0b0"
             item.setText(tag.name)
             item.setIcon(self._make_color_icon(color))
             item.setData(Qt.ItemDataRole.UserRole, tag.id)
@@ -124,7 +124,7 @@ class TagManageDialog(QDialog):
             return
         self._current_tag_id = current.data(Qt.ItemDataRole.UserRole)
         self._name_input.setText(current.data(Qt.ItemDataRole.UserRole + 1))
-        self._selected_color = current.data(Qt.ItemDataRole.UserRole + 2) or "#888888"
+        self._selected_color = current.data(Qt.ItemDataRole.UserRole + 2) or "#a0a0b0"
         self._color_preview.setStyleSheet(f"font-size: 20px; color: {self._selected_color};")
         self._delete_btn.setEnabled(True)
 
@@ -188,7 +188,7 @@ class TagManageDialog(QDialog):
     def _clear_form(self) -> None:
         self._current_tag_id = None
         self._name_input.clear()
-        self._selected_color = "#888888"
-        self._color_preview.setStyleSheet("font-size: 20px; color: #888888;")
+        self._selected_color = "#a0a0b0"
+        self._color_preview.setStyleSheet("font-size: 20px; color: #a0a0b0;")
         self._delete_btn.setEnabled(False)
         self._list.clearSelection()

@@ -192,13 +192,12 @@ def create_app(config: AppConfig, runtime: Optional[dict] = None) -> FastAPI:
         redoc_url="/redoc",
     )
 
-    # CORS 中间件：允许局域网内 Android 设备访问
-    # 注意：allow_origins=["*"] 与 allow_credentials=True 并存时，Starlette 会
-    # 回显任意 Origin，等于允许任意网页跨域读写本机 API；前端用 Bearer 令牌
-    # 而非 Cookie，因此关闭凭据模式即可（不影响手机端/SPA）。
+    # CORS：只允许本机开发源（前端与 API 同源时根本不需要 CORS）。
+    # 旧实现 allow_origins=["*"]：任何网页都能跨域读本机 API，配合可空 PIN
+    # 等于"局域网内任意页面可读写媒体库"。同源部署不受影响。
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -228,9 +227,22 @@ def create_app(config: AppConfig, runtime: Optional[dict] = None) -> FastAPI:
     @app.middleware("http")
     async def _data_root_gate(request: Request, call_next):
         runtime_state = getattr(request.app.state, "runtime", None) or {}
+        path = request.url.path
+
+        # 数据库引擎不可用（切数据根失败且回滚也失败）：数据端点返回 503，
+        # 前端能看到"数据库不可用"而不是一个没有上下文的 500。
+        if str(runtime_state.get("db_status") or "") == "unavailable":
+            if (not path.startswith("/api/")
+                    or request.method == "OPTIONS"
+                    or path.startswith(_GATE_ALLOW_PREFIXES)):
+                return await call_next(request)
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "数据库不可用：请重启程序；若仍失败请检查数据盘连接"},
+            )
+
         if str(runtime_state.get("data_root_status") or "") != "blocked_no_root":
             return await call_next(request)
-        path = request.url.path
         # 非 /api/ 的请求全部放行：静态资源、/docs、SPA 壳 —— 拦了页面都打不开
         if (not path.startswith("/api/")
                 or request.method == "OPTIONS"
@@ -316,9 +328,13 @@ def create_app(config: AppConfig, runtime: Optional[dict] = None) -> FastAPI:
                 _record_auth_failure(client_ip)
                 return JSONResponse(status_code=403, content={"success": False, "error": "当前密码错误"})
             _clear_auth_failures(client_ip)
-        new_pin = body.new_pin
-        if len(new_pin) > 4:
-            return JSONResponse(status_code=400, content={"success": False, "error": "密码最长4位"})
+        new_pin = (body.new_pin or "").strip()
+        # 空字符串 = 关闭密码；否则必须是 4 位数字。
+        # 旧实现只挡 len>4，允许 1-2 位 PIN，暴力破解成本极低。
+        if new_pin and (len(new_pin) != 4 or not new_pin.isdigit()):
+            return JSONResponse(status_code=400,
+                                content={"success": False,
+                                         "error": "密码必须是 4 位数字（留空表示关闭密码）"})
         # 更新配置（frozen dataclass 仅替换 web_pin 字段）
         try:
             new_config = cfg.with_updates(web_pin=new_pin)
@@ -467,6 +483,23 @@ class APIServer:
         self._thread: Optional[threading.Thread] = None
         self._server: Optional[uvicorn.Server] = None
         self._running = False
+        self._config_changed_callback = None
+
+    @property
+    def is_running(self) -> bool:
+        """API 线程是否已启动（状态栏据此显示真实运行态）。"""
+        return bool(self._running)
+
+    def set_config_changed_callback(self, callback) -> None:
+        """注册"运行配置已变更"回调（GUI 用它同步数据库路径/缓存目录）。
+
+        回调在 uvicorn 线程里执行，GUI 侧必须用 Qt 信号跨线程投递，
+        不能直接操作控件。
+        """
+        self._config_changed_callback = callback
+        app = getattr(self, "_app", None)
+        if app is not None:
+            app.state.on_config_changed = callback
 
     def start(self) -> None:
         """在后台线程中启动 API 服务器。"""
@@ -476,6 +509,9 @@ class APIServer:
 
         global _app
         _app = create_app(self._config, self._runtime)
+        self._app = _app
+        if self._config_changed_callback is not None:
+            _app.state.on_config_changed = self._config_changed_callback
 
         import asyncio
 

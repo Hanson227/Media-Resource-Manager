@@ -37,14 +37,17 @@ class RootRemapRequired(RuntimeError):
     旧记录永远清不掉（列表里两套同名单元，标签/星标全在旧 id 上）。
     """
 
-    def __init__(self, path: str, old_path: str, root_id: int, candidates: list):
+    def __init__(self, path: str, old_path: str, root_id: int, candidates: list,
+                 hint: str = ""):
         self.path = path
         self.old_path = old_path
         self.root_id = root_id
         self.candidates = candidates
-        super().__init__(
-            f"媒体库路径可能已变化: {old_path} → {path}，"
-            "请先执行路径修复（改库），或明确按新库扫描")
+        text = hint or (f"媒体库路径可能已变化: {old_path} → {path}，"
+                        "请先执行路径修复（改库），或明确按新库扫描")
+        if hint and "路径可能已变化" not in hint:
+            text = f"媒体库路径可能已变化: {hint}"
+        super().__init__(text)
 
 
 def load_existing_files(session, paths: list, chunk_size: int = PATH_LOOKUP_CHUNK_SIZE) -> dict:
@@ -103,6 +106,51 @@ def _remove_stale_thumbnail(file_id: int, unit_path: Path, cache_dir) -> None:
         CleanupService.remove_thumbnail(file_id, Path(unit_path) / ".thumbnails")
 
 
+def _collect_missing_files(root_path_str: str):
+    """在写事务**之外**找出磁盘上已不存在的文件（避免锁库做 stat）。
+
+    返回 (missing, unit_stats)：
+      missing: [(file_id, unit_path_str), ...] 供事务内删除；
+      unit_stats: {unit_id: (remaining_count, remaining_size, latest_mtime)}
+                 供事务内一次性更新统计（mtime 已在事务外 stat 完）。
+    只读一次库 + 事务外 stat，写事务里不再碰文件系统。
+    """
+    missing: list[tuple[int, str]] = []
+    unit_stats: dict[int, tuple[int, int, Optional[float]]] = {}
+    try:
+        with DatabaseManager.session() as session:
+            root = q.get_root_by_path(session, root_path_str)
+            if not root:
+                return missing, unit_stats
+            for unit in q.get_units_by_root(session, root.id):
+                if unit.status != "active":
+                    continue
+                unit_path = Path(unit.path)
+                if not unit_path.is_dir():
+                    continue
+                files = q.get_files_by_unit(session, unit.id)
+                alive: list = []
+                for mf in files:
+                    if Path(mf.path).is_file():
+                        alive.append(mf)
+                    else:
+                        missing.append((mf.id, str(unit_path)))
+                if len(alive) != len(files):
+                    latest = None
+                    for mf in alive:
+                        try:
+                            mtime = Path(mf.path).stat().st_mtime
+                        except OSError:
+                            continue
+                        latest = mtime if latest is None else max(latest, mtime)
+                    unit_stats[unit.id] = (
+                        len(alive), sum(f.size_bytes or 0 for f in alive), latest)
+    except Exception as e:  # noqa: BLE001 — 清理失败不应阻断扫描落库
+        logger.warning(f"扫描前失效文件检查失败（跳过清理）: {e}")
+        return [], {}
+    return missing, unit_stats
+
+
 def save_scan_result(result: ScanResult, *,
                      thumbnail_cache_dir=None,
                      file_callback: Optional[Callable[[str], None]] = None,
@@ -127,6 +175,18 @@ def save_scan_result(result: ScanResult, *,
         if guard is not None:
             raise RootRemapRequired(root_path_str, guard["old_path"],
                                     guard["root_id"], guard["candidates"])
+        suspect = _check_mass_exclusion_guard(result)
+        if suspect is not None:
+            raise RootRemapRequired(
+                root_path_str, root_path_str, suspect["root_id"],
+                suspect["candidates"],
+                hint=(f"{root_path_str} 上库里的 {suspect['unit_total']} 个单元有 "
+                      f"{suspect['unit_missing']} 个已不在磁盘上（疑似盘符被另一块"
+                      "磁盘占用）。请先执行路径修复（改库）"))
+
+    # 失效文件检查在写事务外完成：旧实现把全库 stat 放进 session，弱机/大库上
+    # 扫描落库要锁库几十秒，Web 与 GUI 的其它写请求全部排队。
+    missing_files, missing_unit_stats = _collect_missing_files(root_path_str)
 
     with DatabaseManager.session() as session:
         root = q.get_root_by_path(session, root_path_str)
@@ -203,43 +263,21 @@ def save_scan_result(result: ScanResult, *,
         for file_id in heal_ids:
             q.clear_stale_hash_placeholders(session, file_id)
 
-        # 清理：删除活跃单元中已不存在的文件记录及其缩略图缓存
-        stale_file_count = 0
-        stale_ids: list = []
-        affected_units: set = set()
-        for unit in q.get_units_by_root(session, root.id):
-            if unit.status != "active":
-                continue
-            unit_path = Path(unit.path)
-            if not unit_path.is_dir():
-                continue
-            for mf in q.get_files_by_unit(session, unit.id):
-                if not Path(mf.path).is_file():
-                    _remove_stale_thumbnail(mf.id, unit_path, thumbnail_cache_dir)
-                    stale_ids.append(mf.id)
-                    stale_file_count += 1
-                    affected_units.add(unit.id)
-        if stale_ids:
+        # 清理：删除活跃单元中已不存在的文件记录及其缩略图缓存。
+        # stat 已在事务外做完（见 _collect_missing_files），事务内只做 DB 删除。
+        if missing_files:
+            stale_ids = [fid for fid, _ in missing_files]
             session.query(MediaFile).filter(
                 MediaFile.id.in_(stale_ids)
             ).delete(synchronize_session=False)
-        if stale_file_count:
-            logger.info(f"清理了 {stale_file_count} 个已不存在的文件记录及缩略图")
-            for uid in affected_units:
-                remaining = q.get_files_by_unit(session, uid)
-                new_count = len(remaining)
-                new_size = sum(f.size_bytes for f in remaining)
-                latest = None
-                for f in remaining:
-                    try:
-                        m = Path(f.path).stat().st_mtime
-                    except OSError:
-                        continue
-                    latest = m if latest is None else max(latest, m)
+            logger.info(f"清理了 {len(stale_ids)} 个已不存在的文件记录及缩略图")
+            for uid, (new_count, new_size, latest) in missing_unit_stats.items():
                 q.update_unit_stats(
                     session, uid, new_count, new_size,
                     content_modified_at=(datetime.fromtimestamp(latest)
                                          if latest is not None else None))
+            for fid, unit_path_str in missing_files:
+                _remove_stale_thumbnail(fid, Path(unit_path_str), thumbnail_cache_dir)
 
         # 排除本根下本轮已无内容的单元（必须在删除失效文件记录之后；
         # 判据不能退回"只看目录是否存在" —— 见 queries.exclude_empty_units）
@@ -260,7 +298,7 @@ def save_scan_result(result: ScanResult, *,
     return ScanSaveResult(
         root_id=root_id, new_files=new_files, updated_files=updated_files,
         moved_files=len(move_updates), healed_files=len(heal_ids),
-        stale_files=stale_file_count, restored_units=tuple(restored),
+        stale_files=len(missing_files), restored_units=tuple(restored),
         excluded_units=tuple(excluded_units), errors=tuple(errors))
 
 
@@ -277,6 +315,36 @@ def _root_record_exists(path_str: str) -> bool:
     """该路径是否已在库里有对应根目录记录。"""
     with DatabaseManager.session() as session:
         return q.get_root_by_path(session, path_str) is not None
+
+
+def _check_mass_exclusion_guard(result: ScanResult) -> Optional[dict]:
+    """扫描几乎没产出内容、但库里这个根有大量单元 → 大概率是盘换错了。
+
+    实测事故（2026-11-04）：媒体库在 `E:\\Guofu`，硬盘插上后变成 `F:`，而 `E:`
+    被另一块盘占用、那块盘上也有个空的 `Guofu` 目录。`Path(root).is_dir()` 为真，
+    所以同尾旧根守卫（`_check_root_guard`）拦不住；扫描得到 0 个单元，
+    `exclude_empty_units` 把整库 192 个单元批量标成 excluded，界面全空。
+
+    不能把这种扫描当成"内容没了"落库：一旦排除，用户能看到的只有空列表。
+    宁可挡下来让用户先改库（返回 `RootRemapRequired`，界面会弹修复对话框）。
+    """
+    from app.services.path_remap_service import detect_letter_change
+
+    root_path = Path(str(result.root_path))
+    try:
+        with DatabaseManager.session() as session:
+            root_row = q.get_root_by_path(session, str(root_path))
+            if root_row is None:
+                return None
+            total_units = len(q.get_all_units_by_root(session, root_row.id))
+    except Exception:  # noqa: BLE001
+        return None
+    if total_units < 5:
+        return None
+    # 正常扫描至少能产出大半个库；产出远少于库里的单元才值得怀疑
+    if len(result.units) * 2 >= total_units:
+        return None
+    return detect_letter_change(root_path)
 
 
 def run_scan(config, root_path, *,

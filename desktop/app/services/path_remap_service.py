@@ -281,6 +281,103 @@ def find_remap_candidates(old_prefix, *, volumes: Optional[Sequence[Path]] = Non
     return candidates
 
 
+SUSPECT_MIN_UNITS = 5
+"""低于这个单元数不做"换盘符"推断（样本太小，误判代价大于收益）。"""
+
+SUSPECT_MAX_EXISTING_RATIO = 0.1
+"""库里单元目录仍在磁盘上的比例上限：超过它就不算"整库内容不可达"。"""
+
+SUSPECT_MIN_MATCH_RATIO = 0.5
+"""候选位置必须对上这个比例的单元相对路径，才认它是"真身"。"""
+
+
+def _rel_under(path, root) -> str:
+    """`path` 相对 `root` 的那一段（大小写不敏感，用于跨盘对位）。
+
+    例：(`E:\\Guofu\\10.5\\x`, `E:\\Guofu`) -> `10.5\\x`。
+    """
+    p = _norm(path)
+    r = _norm(root)
+    if not p.startswith(r):
+        return ""
+    return p[len(r):].strip("\\/")
+
+
+def detect_letter_change(root_path, *, volumes: Optional[Sequence[Path]] = None,
+                         min_units: int = SUSPECT_MIN_UNITS,
+                         max_existing_ratio: float = SUSPECT_MAX_EXISTING_RATIO,
+                         min_match_ratio: float = SUSPECT_MIN_MATCH_RATIO,
+                         ) -> Optional[dict]:
+    """判断"根目录看起来可达、其实整库内容不在"是不是换盘符造成的。
+
+    实测事故（2026-11-04）：媒体库在 `E:\\Guofu`，硬盘插上后变成 `F:`，而 `E:`
+    被另一块盘占用、那块盘上恰好也有一个空的 `Guofu` 目录。于是：
+    `Path(root).is_dir()` 为真 → `find_broken_roots` 不报告、扫描守卫不拦 →
+    扫描 `E:\\Guofu` 得到 0 个单元 → `exclude_empty_units` 把整库 192 个单元
+    标成 excluded，界面全空；而「修复媒体库路径」对话框只列"路径不存在"的根，
+    用户连一键改库的入口都找不到。
+
+    判据（全部成立才报告，避免误伤"用户真的把内容删光了"）：
+      1. 根目录存在（正是 `find_broken_roots` 漏掉的那一类）；
+      2. 库里该根下有 ≥ `min_units` 个单元；
+      3. 这些单元目录还在磁盘上的比例 ≤ `max_existing_ratio`；
+      4. 其它卷上有同名/同相对路径目录，且**库里单元的相对路径在它下面大量
+         存在**（≥ `min_match_ratio`）—— 这才说明那才是真身，而不是一个
+         空壳同名目录。
+
+    返回:
+        {"root_id", "path", "candidates", "unit_total", "unit_missing",
+         "unit_matched", "reason", "reason_text"}；不怀疑时返回 None。
+    """
+    root_str = normalize_prefix(root_path)
+    if not root_str:
+        return None
+    root = Path(root_str)
+    if not root.is_dir():
+        return None  # 真正的"路径不存在"走 find_broken_roots 原有分支
+
+    with DatabaseManager.session() as session:
+        root_row = q.get_root_by_path(session, root_str)
+        if root_row is None:
+            return None
+        unit_paths = [u.path for u in q.get_all_units_by_root(session, root_row.id)]
+        root_id = root_row.id
+
+    if len(unit_paths) < min_units:
+        return None
+    existing = sum(1 for p in unit_paths if Path(p).is_dir())
+    if existing > len(unit_paths) * max_existing_ratio:
+        return None
+
+    best_candidate = None
+    best_matches = 0
+    for candidate in find_remap_candidates(root, volumes=volumes):
+        cand_path = Path(candidate.path)
+        matched = 0
+        for unit_path in unit_paths:
+            rel = _rel_under(unit_path, root_str)
+            if rel and (cand_path / rel).is_dir():
+                matched += 1
+        if matched > best_matches:
+            best_candidate, best_matches = candidate, matched
+
+    if best_candidate is None or best_matches < len(unit_paths) * min_match_ratio:
+        return None
+
+    missing = len(unit_paths) - existing
+    return {
+        "root_id": root_id,
+        "path": root_str,
+        "candidates": [best_candidate.to_dict()],
+        "unit_total": len(unit_paths),
+        "unit_missing": missing,
+        "unit_matched": best_matches,
+        "reason": "path_missing",
+        "reason_text": (f"疑似盘符变化：{len(unit_paths)} 个单元里 {missing} 个已不在"
+                        f"磁盘上，候选 {best_candidate.path}"),
+    }
+
+
 def rewrite_thumbnail_meta(cache_dir, old_prefix, new_prefix) -> int:
     """改写缩略图缓存 `.meta` 里的 source_path 前缀，返回改写条数。
 
@@ -445,9 +542,13 @@ def find_broken_roots(volumes: Optional[Sequence[Path]] = None,
                       *, with_candidates: bool = True) -> list[dict]:
     """列出"路径已不可达"的媒体库根目录及其候选修复位置。
 
-    区分两种不可达（与删除语义同源，见 docs/pitfalls.md 铁律 3）：
+    区分三种不可达（与删除语义同源，见 docs/pitfalls.md 铁律 3）：
       - `volume_offline`：整块盘没连（忘插盘）—— 文件其实还在，改库也没意义；
-      - `path_missing`：盘在、目录没了 —— 十有八九是盘符变了，需要改库。
+      - `path_missing`：盘在、目录没了 —— 十有八九是盘符变了，需要改库；
+      - `path_missing`（实目录还在）：盘符被另一块盘占用、那块盘上恰好有个
+        同名空目录。`Path.is_dir()` 会骗人，要靠 `detect_letter_change` 才能
+        认出"整库内容其实在另一个卷上"。漏掉这一类的后果是：对话框里空无一物，
+        用户只能眼睁睁看着库被排除（实测事故）。
 
     只报告，不改动；由界面展示后交给 `apply_remap` 执行。
     """
@@ -466,6 +567,16 @@ def find_broken_roots(volumes: Optional[Sequence[Path]] = None,
         item["volume_present"] = volume_available(item["path"])
         item["volume"] = volume_label(item["path"])
         if item["path_exists"]:
+            # 盘符被另一块磁盘占用时"根目录看起来可达"，但库里内容其实全不在。
+            # 这一类必须报出来，否则对话框里没有任何条目，用户连改库入口都没有。
+            suspect = detect_letter_change(item["path"], volumes=volumes)
+            if suspect is None:
+                continue
+            item["path_exists"] = False
+            item["reason"] = suspect["reason"]
+            item["reason_text"] = suspect["reason_text"]
+            item["candidates"] = suspect["candidates"]
+            result.append(item)
             continue
         item["reason"] = ("volume_offline" if not item["volume_present"]
                           else "path_missing")
