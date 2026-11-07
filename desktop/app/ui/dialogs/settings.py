@@ -200,6 +200,27 @@ class SettingsDialog(QDialog):
         self._seek_percent_spin.setSuffix(" %")
         preview_form.addRow("方向键跳转比例:", self._seek_percent_spin)
 
+        self._transcode_quality_combo = QComboBox()
+        for value, label in (
+            (0, "原画（源分辨率）"),
+            (480, "480p"),
+            (720, "720p"),
+            (1080, "1080p（默认）"),
+            (1440, "1440p"),
+            (2160, "2160p / 4K"),
+        ):
+            self._transcode_quality_combo.addItem(label, value)
+        self._transcode_quality_combo.setToolTip(
+            "Web/手机端播放非浏览器格式时按需转码的目标高度；只降不升，"
+            "1080p 兼顾清晰度与首播速度")
+        preview_form.addRow("Web 播放画质:", self._transcode_quality_combo)
+
+        preview_hint = QLabel(
+            "只影响 Web/平板浏览器播放时的按需转码；桌面端播放器始终读原文件。")
+        preview_hint.setWordWrap(True)
+        preview_hint.setObjectName("formHint")
+        preview_form.addRow(preview_hint)
+
         tabs.addTab(preview_tab, "播放与预览")
 
         # ==== HEIC 选项卡 ====
@@ -265,6 +286,9 @@ class SettingsDialog(QDialog):
         self._watcher_enabled_check.setChecked(cfg.watcher_enabled)
         self._watcher_debounce_spin.setValue(cfg.watcher_debounce_ms)
         self._seek_percent_spin.setValue(cfg.preview_seek_percent)
+        idx = self._transcode_quality_combo.findData(
+            int(getattr(cfg, "transcode_max_height", 1080)))
+        self._transcode_quality_combo.setCurrentIndex(idx if idx >= 0 else 3)
         self._heic_quality_spin.setValue(int(getattr(cfg, "heic_jpeg_quality", 95)))
         self._data_root_label.setText(
             str(cfg.data_root) if cfg.data_root else "（未设置：使用应用目录）")
@@ -410,6 +434,7 @@ class SettingsDialog(QDialog):
             watcher_enabled=self._watcher_enabled_check.isChecked(),
             watcher_debounce_ms=self._watcher_debounce_spin.value(),
             preview_seek_percent=self._seek_percent_spin.value(),
+            transcode_max_height=self._transcode_quality_combo.currentData(),
             web_pin=self._web_pin_edit.text(),
             heic_jpeg_quality=self._heic_quality_spin.value(),
             heic_source_action=self._heic_source_combo.currentData(),

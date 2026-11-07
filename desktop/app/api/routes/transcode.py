@@ -46,7 +46,9 @@ class StartRequest(BaseModel):
     """`POST /api/transcode/start` 请求体。"""
 
     file_id: int = Field(..., ge=1, description="媒体库内的文件 ID")
-    force: bool = Field(False, description="为 True 时丢弃已有缓存重新转码")
+    force: bool = Field(False, description="为 True 时丢弃当前画质缓存重新转码")
+    max_height: Optional[int] = Field(
+        None, description="目标最大高度（0=原画）；不传时用服务端设置，默认 1080")
 
 
 class CancelRequest(BaseModel):
@@ -69,6 +71,7 @@ class _RunningEntry:
     progress: int = 0
     message: str = "准备转码"
     started_at: float = 0.0
+    max_height: int = ts.DEFAULT_MAX_HEIGHT
 
     def snapshot(self) -> dict:
         """`GET /api/transcode/active` 里的单条记录。"""
@@ -80,6 +83,7 @@ class _RunningEntry:
             "progress": self.progress,
             "message": self.message,
             "started_at": self.started_at,
+            "max_height": self.max_height,
         }
 
 
@@ -110,9 +114,14 @@ def _set_running_progress(file_id: int, progress: Optional[int] = None,
 # 内部工具
 # ============================================================
 
-def _stream_url(file_id: int) -> str:
+def _stream_url(file_id: int, max_height: int) -> str:
     """转码缓存播放地址（与 files 的 stream 同语义，只是读的是 MP4 缓存）。"""
-    return f"{router.prefix}/stream?file_id={file_id}"
+    return f"{router.prefix}/stream?file_id={file_id}&max_height={int(max_height)}"
+
+
+def _target_height(config, requested: Optional[int] = None) -> int:
+    """请求画质 → 合法高度（None = 用服务端设置，默认 1080）。"""
+    return ts.normalize_max_height(requested, config)
 
 
 def _message_first_line(text: str, limit: int = 200) -> str:
@@ -162,7 +171,8 @@ def _finish_task(task_id: str, result: ts.TranscodeResult) -> None:
     registry.update(task_id, **fields)
 
 
-def _run_transcode_task(file_id: int, config, task_id: str) -> None:
+def _run_transcode_task(file_id: int, config, task_id: str,
+                        max_height: int) -> None:
     """后台线程体：跑转码并在**所有路径**上释放互斥门、清掉运行态。
 
     这里不向外抛异常：线程里的异常没人接，只能落成登记表的 failed。
@@ -179,6 +189,7 @@ def _run_transcode_task(file_id: int, config, task_id: str) -> None:
             config,
             on_progress=on_progress,
             cancel_check=lambda: registry.is_cancel_requested(task_id),
+            max_height=max_height,
         )
         _finish_task(task_id, result)
     except Exception as exc:  # noqa: BLE001 — 线程体不能把异常放出去
@@ -197,8 +208,9 @@ def _run_transcode_task(file_id: int, config, task_id: str) -> None:
 # ============================================================
 
 @router.get("/status")
-def transcode_status(file_id: int, request: Request) -> dict:
-    """查询某个文件的转码状态（前端轮询入口）。
+def transcode_status(file_id: int, request: Request,
+                     max_height: Optional[int] = None) -> dict:
+    """查询某个文件某画质的转码状态（前端轮询入口）。
 
     返回字段稳定：``available / status / progress / message / stream_url``。
     磁盘事实（meta）与运行态（``_running``）合并：运行中优先看运行态，
@@ -206,27 +218,30 @@ def transcode_status(file_id: int, request: Request) -> dict:
     """
     source = _validate_source(file_id)
     config = request.app.state.config
+    height = _target_height(config, max_height)
     available = ts.is_available()
 
     with _running_lock:
         running = _running.get(file_id)
-    if running is not None:
+    if running is not None and running.max_height == height:
         return {
             "available": available,
             "status": ts.STATUS_RUNNING,
             "progress": int(running.progress),
             "message": running.message or "转码中",
             "stream_url": None,
+            "max_height": height,
         }
 
-    disk = ts.read_meta_status(source, config)
+    disk = ts.read_meta_status(source, config, height)
     if disk.status == ts.STATUS_DONE:
         return {
             "available": available,
             "status": ts.STATUS_DONE,
             "progress": 100,
             "message": disk.message or "转码完成",
-            "stream_url": _stream_url(file_id),
+            "stream_url": _stream_url(file_id, height),
+            "max_height": height,
         }
     if disk.status == ts.STATUS_RUNNING:
         # meta 说在跑但进程内没有对应任务：上次进程被强杀，别让前端永远转圈。
@@ -236,6 +251,7 @@ def transcode_status(file_id: int, request: Request) -> dict:
             "progress": int(disk.progress),
             "message": "上次转码被中断，可重新发起",
             "stream_url": None,
+            "max_height": height,
         }
     if disk.status == ts.STATUS_FAILED:
         return {
@@ -244,6 +260,7 @@ def transcode_status(file_id: int, request: Request) -> dict:
             "progress": 0,
             "message": _message_first_line(disk.message) or "转码失败",
             "stream_url": None,
+            "max_height": height,
         }
     if disk.status == ts.STATUS_CANCELED:
         return {
@@ -252,6 +269,7 @@ def transcode_status(file_id: int, request: Request) -> dict:
             "progress": int(disk.progress),
             "message": "已取消",
             "stream_url": None,
+            "max_height": height,
         }
     return {
         "available": available,
@@ -259,6 +277,7 @@ def transcode_status(file_id: int, request: Request) -> dict:
         "progress": 0,
         "message": "",
         "stream_url": None,
+        "max_height": height,
     }
 
 
@@ -271,6 +290,7 @@ def start_transcode(payload: StartRequest, request: Request) -> dict:
     """
     config = request.app.state.config
     source = _validate_source(payload.file_id)
+    height = _target_height(config, payload.max_height)
 
     if not ts.is_available():
         raise HTTPException(status_code=503, detail="服务端缺少 ffmpeg，无法转码")
@@ -280,25 +300,35 @@ def start_transcode(payload: StartRequest, request: Request) -> dict:
     with _running_lock:
         existing = _running.get(payload.file_id)
         if existing is not None:
+            if existing.max_height != height:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"该文件正在以 {ts.height_tag(existing.max_height)} 转码，"
+                            "请等待完成或先取消"),
+                )
             return {
                 "success": True,
                 "task_id": existing.task_id,
                 "status": ts.STATUS_RUNNING,
                 "message": "该文件正在转码",
+                "max_height": height,
             }
 
-        if not payload.force and ts.is_cache_hit(source, config):
+        if not payload.force and ts.is_cache_hit(source, config, height):
             return {
                 "success": True,
                 "task_id": None,
                 "status": ts.STATUS_DONE,
                 "message": "已有转码缓存",
+                "max_height": height,
             }
 
         if payload.force:
-            removed = ts.clear_cache(payload.file_id, config)
+            removed = ts.clear_cache(payload.file_id, config, height)
             if removed:
-                logger.info(f"强制重转：清理旧缓存 {removed} 个 (file_id={payload.file_id})")
+                logger.info(
+                    f"强制重转：清理 {ts.height_tag(height)} 旧缓存 {removed} 个 "
+                    f"(file_id={payload.file_id})")
 
         if not acquire_dedup_gate():
             raise HTTPException(
@@ -315,13 +345,14 @@ def start_transcode(payload: StartRequest, request: Request) -> dict:
             progress=0,
             message="准备转码",
             started_at=time.time(),
+            max_height=height,
         )
         _running[payload.file_id] = entry
 
         try:
             thread = threading.Thread(
                 target=_run_transcode_task,
-                args=(payload.file_id, config, task_id),
+                args=(payload.file_id, config, task_id, height),
                 daemon=True,
                 name=f"transcode-{payload.file_id}",
             )
@@ -339,6 +370,7 @@ def start_transcode(payload: StartRequest, request: Request) -> dict:
         "task_id": task_id,
         "status": ts.STATUS_RUNNING,
         "message": "转码已开始",
+        "max_height": height,
     }
 
 
@@ -357,16 +389,18 @@ def cancel_transcode(payload: CancelRequest, request: Request) -> dict:
 
 
 @router.get("/stream")
-def stream_transcoded(file_id: int, request: Request):
-    """播放转码缓存（仅 done 时可读；支持 Range，手机可拖动进度条）。"""
+def stream_transcoded(file_id: int, request: Request,
+                      max_height: Optional[int] = None):
+    """播放指定画质的转码缓存（仅 done 时可读；支持 Range，手机可拖动进度条）。"""
     source = _validate_source(file_id)
     config = request.app.state.config
+    height = _target_height(config, max_height)
 
-    output = ts.get_cached_output(source, config)
+    output = ts.get_cached_output(source, config, height)
     if output is None:
         with _running_lock:
             running = _running.get(file_id)
-        if running is not None:
+        if running is not None and running.max_height == height:
             raise HTTPException(status_code=409, detail="转码进行中，请稍后再试")
         raise HTTPException(status_code=404, detail="转码缓存不存在，请先发起转码")
 

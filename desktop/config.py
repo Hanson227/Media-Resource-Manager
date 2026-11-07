@@ -241,6 +241,13 @@ class AppConfig:
     preview_seek_percent: int = 5
     """预览对话框中左右方向键每次跳转的视频时长百分比。"""
 
+    transcode_max_height: int = 1080
+    """Web 端按需转码的目标最大高度（像素）：1080 默认 / 720 / 480 / 0=原画。
+
+    只降不升：源视频低于目标高度时保持原尺寸。该值参与转码缓存 key，
+    切换画质会生成一份新的缓存，旧画质的缓存仍保留可回看。
+    """
+
     # ========== SMB 共享 ==========
     smb_share_name_prefix: str = "Media_"
     """SMB 共享名的默认前缀。"""

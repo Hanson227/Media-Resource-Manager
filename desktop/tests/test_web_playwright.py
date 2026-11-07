@@ -2455,6 +2455,17 @@ def test_settings_tools_sections(page):
     joined = "".join(text)
     check("已排除文件夹区块可展开", "没有已排除" in joined or "恢复" in joined)
 
+    playback_entry = page.locator(".setting-item", has_text="播放与预览").first
+    playback_entry.click()
+    page.wait_for_timeout(700)
+    quality_buttons = page.locator(".quality-options button")
+    check("播放与预览区块可展开", quality_buttons.count() == 6)
+    check("默认画质为 1080p",
+          page.locator(".quality-options button.btn-primary").inner_text() == "1080p")
+    check("画质选项含原画/720p/480p",
+          all(page.locator(".quality-options button", has_text=t).count() >= 1
+              for t in ("原画", "720p", "480p")))
+
     data_entry = page.locator(".setting-item", has_text="数据位置").first
     mark_btn = page.locator("button", has_text="手动标记资源单元").first
     if mark_btn.count() == 0:

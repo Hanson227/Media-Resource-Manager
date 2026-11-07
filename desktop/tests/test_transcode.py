@@ -125,14 +125,15 @@ def _entry_for(file_id: int) -> ts.TranscodeCache:
     return ts.cache_entry(ts.load_source(file_id), _CONFIG)
 
 
-def _generate_test_video(path: Path, seconds: float = 1.0) -> bool:
+def _generate_test_video(path: Path, seconds: float = 1.0,
+                         size: str = "320x240") -> bool:
     """用自带的 ffmpeg 生成 1 秒彩色测试视频（有音频轨道，验证 AAC 分支）。"""
     exe = ts.ffmpeg_executable()
     if not exe:
         return False
     command = [
         exe, "-y", "-nostdin",
-        "-f", "lavfi", "-i", f"color=c=blue:s=320x240:d={seconds}",
+        "-f", "lavfi", "-i", f"color=c=blue:s={size}:d={seconds}",
         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
         "-shortest",
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
@@ -148,6 +149,30 @@ def _generate_test_video(path: Path, seconds: float = 1.0) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     return proc.returncode == 0 and path.is_file() and path.stat().st_size > 0
+
+
+def _probe_video_size(path: Path):
+    """用 ffmpeg -i 的 stderr 解析视频尺寸（环境没有 ffprobe）。"""
+    exe = ts.ffmpeg_executable()
+    if not exe or not path.is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            [exe, "-hide_banner", "-i", str(path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+            timeout=30, creationflags=ts._CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    import re
+    for line in (proc.stderr or "").splitlines():
+        if "Video:" not in line:
+            continue
+        match = re.search(r"(\d{2,5})x(\d{2,5})", line)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None
 
 
 class _FakePopen:
@@ -205,7 +230,7 @@ class _PatchPopen:
 # ============================================================
 
 def test_cache_key() -> None:
-    """缓存键：{file_id}_{size}_{mtime_ns}，目录与缩略图缓存同级。"""
+    """缓存键：{file_id}_{size}_{mtime_ns}_{画质}，目录与缩略图缓存同级。"""
     section("测试 1: 缓存键与目录")
     source = ts.TranscodeSource(
         file_id=42, path=Path("D:/media/a.mkv"), filename="a.mkv",
@@ -214,8 +239,16 @@ def test_cache_key() -> None:
     check("缓存根目录在缩略图目录的父级下",
           ts.cache_dir(_CONFIG) == Path(_CONFIG.thumbnail_cache_dir).parent / "transcode_cache")
     entry = ts.cache_entry(source, _CONFIG)
-    check("缓存 key = file_id_size_mtime_ns",
-          entry.key == "42_1234567_1700000000123456789")
+    check("缓存 key 默认带 1080p 画质",
+          entry.key == "42_1234567_1700000000123456789_1080p")
+    check("默认画质为 1080", ts.normalize_max_height(None, _CONFIG) == 1080)
+    check("原画画质 tag 为 orig", ts.height_tag(0) == "orig")
+    check("非法画质回退默认 1080", ts.normalize_max_height(999, _CONFIG) == 1080)
+    q720 = ts.cache_entry(source, _CONFIG, max_height=720)
+    check("720p 与 1080p 使用不同缓存 key", q720.key != entry.key)
+    check("720p 缓存 key 以 _720p 结尾", q720.key.endswith("_720p"))
+    check("原画缓存 key 以 _orig 结尾",
+          ts.cache_entry(source, _CONFIG, max_height=0).key.endswith("_orig"))
     check("输出文件名为 {key}.mp4", entry.output_path.name == entry.key + ".mp4")
     check("meta 文件名为 {key}.meta.json",
           entry.meta_path.name == entry.key + ".meta.json")
@@ -414,6 +447,16 @@ def test_clear_cache() -> None:
     check("目标文件的旧缓存被删", not stale.exists())
     check("其他文件的缓存不受影响", other.exists())
     other.unlink()
+
+    # 分画质清理：只删指定画质，不能把另一画质的缓存一起删掉
+    hd = root / f"{file_id}_999_111_1080p.mp4"
+    sd = root / f"{file_id}_999_111_720p.mp4"
+    hd.write_bytes(b"hd")
+    sd.write_bytes(b"sd")
+    check("按画质清理只删 720p", ts.clear_cache(file_id, _CONFIG, 720) == 1)
+    check("720p 缓存已删", not sd.exists())
+    check("1080p 缓存仍保留", hd.exists())
+    hd.unlink()
     check("未知 file_id 清理返回 0", ts.clear_cache(987654, _CONFIG) == 0)
 
 
@@ -459,6 +502,7 @@ def test_real_transcode() -> None:
           all(b[0] >= a[0] for a, b in zip(updates, updates[1:])))
     meta = json.loads(_entry_for(_REAL_VIDEO_ID).meta_path.read_text(encoding="utf-8"))
     check("meta.status = done", meta["status"] == "done")
+    check("meta 记录默认画质 1080", meta.get("max_height") == 1080)
     check("meta 记录耗时 > 0", int(meta["elapsed_ms"]) > 0)
     check(f"生成+转码耗时 < 10 秒（实测 {_REAL_ELAPSED:.2f}s）", _REAL_ELAPSED < 10.0)
 
@@ -467,6 +511,47 @@ def test_real_transcode() -> None:
     check("moov 在 mdat 之前（faststart 生效）",
           data.find(b"moov") != -1 and data.find(b"mdat") != -1
           and data.find(b"moov") < data.find(b"mdat"))
+
+
+# ============================================================
+# 测试 8b: 画质缩放（只降不升）
+# ============================================================
+
+def test_quality_scaling() -> None:
+    """max_height=480 时 720p 源应降到 480；原画模式保持源分辨率。"""
+    section("测试 8b: 画质缩放（只降不升）")
+    if not ts.ffmpeg_executable():
+        check("缺少 ffmpeg，跳过画质缩放测试", True)
+        return
+
+    video = _MEDIA_DIR / "scale_clip.mp4"
+    if not _generate_test_video(video, seconds=0.6, size="1280x720"):
+        check("生成 720p 测试视频失败，跳过", True)
+        return
+    source_size = _probe_video_size(video)
+    check("源视频为 1280x720", source_size == (1280, 720))
+    file_id = _insert_file(video, "video", duration_ms=600)
+
+    result_480 = ts.transcode(file_id, _CONFIG, max_height=480)
+    check("480p 转码成功", result_480.status == ts.STATUS_DONE)
+    size_480 = _probe_video_size(result_480.output_path)
+    check("480p 输出高度为 480", bool(size_480) and size_480[1] == 480)
+    check("480p 输出宽度保持偶数/比例", bool(size_480) and size_480[0] % 2 == 0)
+    meta = json.loads(
+        ts.cache_entry(ts.load_source(file_id), _CONFIG, 480).meta_path
+        .read_text(encoding="utf-8"))
+    check("meta 记录 max_height=480", meta.get("max_height") == 480)
+    check("480p 与 1080p 缓存 key 不同",
+          result_480.output_path != ts.cache_entry(
+              ts.load_source(file_id), _CONFIG, 1080).output_path)
+
+    result_orig = ts.transcode(file_id, _CONFIG, max_height=0)
+    check("原画转码成功", result_orig.status == ts.STATUS_DONE)
+    size_orig = _probe_video_size(result_orig.output_path)
+    check("原画保持 1280x720", size_orig == (1280, 720))
+    check("原画 meta 记录 max_height=0",
+          json.loads(ts.cache_entry(ts.load_source(file_id), _CONFIG, 0).meta_path
+                     .read_text(encoding="utf-8")).get("max_height") == 0)
 
 
 # ============================================================
@@ -490,7 +575,11 @@ def test_api_status_and_stream() -> None:
     check("done 时 stream_url 非空且指向 /api/transcode/stream",
           isinstance(data["stream_url"], str) and data["stream_url"].startswith("/api/transcode/stream"))
     check("响应字段集稳定",
-          set(data) == {"available", "status", "progress", "message", "stream_url"})
+          set(data) == {"available", "status", "progress", "message",
+                        "stream_url", "max_height"})
+    check("status 返回当前画质 1080", data["max_height"] == 1080)
+    check("status 的 stream_url 带画质参数",
+          "max_height=1080" in (data["stream_url"] or ""))
 
     stream = client.get(f"/api/transcode/stream?file_id={_REAL_VIDEO_ID}")
     check("stream 返回 200", stream.status_code == 200)
@@ -542,7 +631,30 @@ def test_api_status_and_stream() -> None:
     check("已转码文件 start 不新建任务（task_id 为 None）",
           reused_data["task_id"] is None)
     check("start 响应字段稳定",
-          set(reused_data) == {"success", "task_id", "status", "message"})
+          set(reused_data) == {"success", "task_id", "status", "message", "max_height"})
+    check("start 回显画质 1080", reused_data["max_height"] == 1080)
+
+    # 画质参数：请求 720p 时使用独立的缓存 key；再次请求原画不会命中 720p
+    p720 = client.get(f"/api/transcode/status?file_id={_REAL_VIDEO_ID}&max_height=720").json()
+    check("请求 720p 时 status 回显 720", p720["max_height"] == 720)
+    check("720p 尚未转码时 status=none", p720["status"] == "none")
+    p_orig = client.get(f"/api/transcode/status?file_id={_REAL_VIDEO_ID}&max_height=0").json()
+    check("请求原画时 status 回显 0", p_orig["max_height"] == 0)
+    check("原画尚未转码时 status=none", p_orig["status"] == "none")
+
+    # 设置端点：画质持久化 + 非法值 400（TestClient 直接改内存 config，不写真实 config.json）
+    settings = client.get("/api/settings").json()
+    check("settings 返回画质字段", settings.get("transcode_max_height") == 1080)
+    check("settings 返回可选画质列表",
+          settings.get("transcode_height_options") == [0, 480, 720, 1080, 1440, 2160])
+    changed = client.post("/api/settings/transcode", json={"max_height": 720})
+    check("设置画质 720 返回 200", changed.status_code == 200)
+    check("设置画质成功消息含 720p", "720p" in changed.json().get("message", ""))
+    check("设置画质后运行态立即生效",
+          client.get(f"/api/transcode/status?file_id={_REAL_VIDEO_ID}"
+                     ).json()["max_height"] == 720)
+    bad = client.post("/api/settings/transcode", json={"max_height": 12345})
+    check("非法画质返回 400", bad.status_code == 400)
 
     # 取消：没有在跑的任务 -> success=False（不报 500）
     canceled = client.post("/api/transcode/cancel", json={"file_id": _REAL_VIDEO_ID})
@@ -630,6 +742,7 @@ def main() -> int:
         test_done_cache_hit_skips_ffmpeg()
         test_clear_cache()
         test_real_transcode()
+        test_quality_scaling()
         test_api_status_and_stream()
         test_api_background_task()
     except Exception as exc:  # noqa: BLE001 — 测试异常要报出来并计失败

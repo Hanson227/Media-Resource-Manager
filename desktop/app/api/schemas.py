@@ -421,6 +421,15 @@ class SettingsResponse(BaseModel):
     """能力快照（哪个包、有哪些可选能力）。"""
     capability_notes: list[str] = []
     """缺失能力的可读说明（"未打包 OpenCV：视频缩略图不可用"）。"""
+    transcode_max_height: int = 1080
+    """Web 端按需转码的目标最大高度（0=原画）；默认 1080p。"""
+    transcode_height_options: list[int] = [0, 480, 720, 1080, 1440, 2160]
+    """可选画质，供前端渲染下拉/按钮组。"""
+
+
+class TranscodeQualityRequest(BaseModel):
+    """`POST /api/settings/transcode` 请求体。"""
+    max_height: int = Field(..., description="目标最大高度（像素），0 表示原画")
 
 
 class DataRootRequest(BaseModel):

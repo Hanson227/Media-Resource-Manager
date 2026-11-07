@@ -1137,7 +1137,9 @@ GET /api/settings
  "restart_required_hint": "修改数据根后需要重启程序才会切换数据库",
  "capabilities": {"image": true, "cv2": true, "heic": true, "raw": true,
                   "face_models": false, "qt": false},
- "capability_notes": ["未打包人脸模型：人脸线索不可用…"]}
+ "capability_notes": ["未打包人脸模型：人脸线索不可用…"],
+ "transcode_max_height": 1080,
+ "transcode_height_options": [0, 480, 720, 1080, 1440, 2160]}
 ```
 
 #### 探测目标目录（决定"接管"还是"迁移"）
@@ -1204,14 +1206,30 @@ POST /api/settings/clear-thumbnail-cache
 
 清空当前缩略图缓存（下次浏览按需重新生成）。
 
+```
+POST /api/settings/transcode      {"max_height": 1080}
+```
+
+设置 Web 播放转码的画质（最大高度）。允许值：`0`（原画）/`480`/`720`/`1080`（默认）/
+`1440`/`2160`；只降不升。只写 `config.json` 并热更新运行态，正在跑的任务不受影响；
+缓存 key 带画质，切换后旧画质缓存保留。返回：
+
+```json
+{"success": true, "message": "播放画质已设为 1080p"}
+```
+
+非法值返回 `400`。
+
 ### 3.10 视频按需转码（Web 播放）
 
 浏览器不能直接播放的容器/编码（mkv / avi / flv / ts / wmv / rmvb / rm 等）会按需转成
-MP4（H.264 + AAC，`faststart`），结果按「文件 + 大小 + mtime」缓存，供 Web 端 `<video>`
-播放。转码依赖 `imageio-ffmpeg` 自带的 ffmpeg，不要求系统安装 ffmpeg。
+MP4（H.264 + AAC，`faststart`），结果按「文件 + 大小 + mtime + 画质」缓存，供 Web 端
+`<video>` 播放。转码依赖 `imageio-ffmpeg` 自带的 ffmpeg，不要求系统安装 ffmpeg。
+画质由 `GET /api/settings` 的 `transcode_max_height` 决定（默认 1080p，`0` = 原画），
+所有转码端点都可用 `max_height` 查询参数覆盖本次请求的画质。
 
 ```
-GET /api/transcode/status?file_id=123
+GET /api/transcode/status?file_id=123[&max_height=1080]
 ```
 
 ```json
@@ -1220,34 +1238,36 @@ GET /api/transcode/status?file_id=123
   "status": "running",
   "progress": 42,
   "message": "正在转码 42%",
-  "stream_url": "/api/transcode/stream?file_id=123"
+  "stream_url": "/api/transcode/stream?file_id=123&max_height=1080",
+  "max_height": 1080
 }
 ```
 
 `status`：`none` / `running` / `done` / `failed` / `canceled`。
-`progress` 为 0–100 的整数。
+`progress` 为 0–100 的整数。不同画质是独立的缓存与任务状态。
 
 ```
-POST /api/transcode/start          {"file_id": 123, "force": false}
+POST /api/transcode/start          {"file_id": 123, "force": false, "max_height": 1080}
 ```
 
-启动转码。`force=true` 会丢弃已有缓存重转。响应：
+启动转码。`force=true` 会丢弃该画质的已有缓存重转。响应：
 
 ```json
-{"success": true, "task_id": "transcode-3", "status": "running", "message": "已开始转码"}
+{"success": true, "task_id": "transcode-3", "status": "running",
+ "message": "已开始转码", "max_height": 1080}
 ```
 
-状态码：`404` 文件不存在、`400` 非视频、`409` 已有扫描/查重/转码任务在跑、
-`503` 服务端没有可用的 ffmpeg。
+状态码：`404` 文件不存在、`400` 非视频、`409` 已有扫描/查重/转码任务在跑（或该文件
+正在以另一画质转码）、`503` 服务端没有可用的 ffmpeg。
 
 ```
 POST /api/transcode/cancel         {"file_id": 123}
-GET  /api/transcode/stream?file_id=123
+GET  /api/transcode/stream?file_id=123&max_height=1080
 GET  /api/transcode/active
 ```
 
-`stream` 返回 `video/mp4`，支持 `Range`（可拖动进度条）；缓存未完成时返回 `409`。
-`active` 返回当前所有转码任务（供管理端/调试使用）。
+`stream` 返回 `video/mp4`，支持 `Range`（可拖动进度条）；该画质缓存未完成时返回 `409`。
+`active` 返回当前所有转码任务（含 `max_height`）。
 
 ---
 

@@ -4121,6 +4121,28 @@ const SettingsPage = {
         </div>
       </div>
 
+      <!-- 播放与预览：Web 端转码画质（与桌面「设置 → 播放与预览」同一配置） -->
+      <div class="setting-item" @click="togglePlayback">
+        <span class="label"><span class="mdi mdi-play-circle-outline" style="font-size:16px;margin-right:6px"></span>播放与预览</span>
+        <span class="mdi" :class="showPlayback ? 'mdi-chevron-up' : 'mdi-chevron-right'"></span>
+      </div>
+      <div v-if="showPlayback" class="settings-block">
+        <div class="settings-row">
+          <span class="settings-key">Web 播放画质</span>
+          <span class="settings-val quality-options">
+            <button v-for="opt in qualityOptions" :key="opt.value"
+                    :class="transcodeQuality === opt.value ? 'btn btn-small btn-primary' : 'btn btn-small'"
+                    :disabled="transcodeSaving"
+                    @click.stop="setTranscodeQuality(opt.value)">{{ opt.label }}</button>
+          </span>
+        </div>
+        <div class="settings-hint">
+          只影响 Web/手机播放 MKV、AVI 等需要转码的格式；默认 1080p，只降不升。
+          桌面端播放器始终读原文件。切换后新播放/重转会按新画质生成缓存。
+        </div>
+        <div v-if="transcodeSaving" class="settings-hint">正在保存…</div>
+      </div>
+
       <!-- 数据位置：便携版核心设置（数据放哪块盘） -->
       <div class="setting-item" @click="toggleDataSection">
         <span class="label"><span class="mdi mdi-harddisk" style="font-size:16px;margin-right:6px"></span>数据位置</span>
@@ -4256,6 +4278,10 @@ const SettingsPage = {
     showExcluded: false,
     excludedLoading: false,
     excludedUnits: [],
+    // 播放画质（Web 端按需转码）
+    showPlayback: false,
+    transcodeQuality: 1080,
+    transcodeSaving: false,
     // 标签管理（与桌面端同一能力）
     showTags: false,
     tagsLoading: false,
@@ -4267,7 +4293,17 @@ const SettingsPage = {
     migrating: false,
   };},
   computed: {
-    hasPin() { return this.pinEnabled; }
+    hasPin() { return this.pinEnabled; },
+    qualityOptions() {
+      return [
+        { value: 0, label: '原画' },
+        { value: 480, label: '480p' },
+        { value: 720, label: '720p' },
+        { value: 1080, label: '1080p' },
+        { value: 1440, label: '1440p' },
+        { value: 2160, label: '4K' },
+      ];
+    },
   },
   methods: {
     fmtSize(n) {
@@ -4282,6 +4318,30 @@ const SettingsPage = {
     toggleDataSection() {
       this.showData = !this.showData;
       if (this.showData) this.loadSettings();
+    },
+
+    togglePlayback() {
+      this.showPlayback = !this.showPlayback;
+      if (this.showPlayback) this.loadSettings();
+    },
+
+    async setTranscodeQuality(value) {
+      if (this.transcodeSaving || this.transcodeQuality === value) return;
+      this.transcodeSaving = true;
+      try {
+        const res = await api(this.serverUrl, '/api/settings/transcode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ max_height: value }),
+        });
+        this.transcodeQuality = value;
+        this.settings.transcode_max_height = value;
+        if (res && res.message) this.migrateMsg = res.message;
+      } catch (e) {
+        alert('保存播放画质失败: ' + e.message);
+      } finally {
+        this.transcodeSaving = false;
+      }
     },
 
     reasonText(reason) {
@@ -4349,6 +4409,8 @@ const SettingsPage = {
     async loadSettings() {
       try {
         this.settings = await api(this.serverUrl, '/api/settings');
+        const height = Number(this.settings.transcode_max_height);
+        if (Number.isFinite(height)) this.transcodeQuality = height;
       } catch (e) { /* 旧版服务端无该端点 */ }
       try {
         // “关于”里要看版本/构建时间：平板上跑的包是不是旧的，一眼就能判断

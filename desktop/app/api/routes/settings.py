@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from app.api import schemas
 from app.services import data_relocation_service as relocation
 from app.services import path_remap_service as remap_svc
+from app.services import transcode_service as transcode_svc
 from app.services.cleanup_service import CleanupService, configure_thumbnail_cache_dir
 from app.services.dedup_gate import acquire_dedup_gate, is_dedup_busy, release_dedup_gate
 from app.utils import net as net_utils
@@ -173,6 +174,9 @@ def get_settings(request: Request):
         loopback_only=net_utils.is_loopback_host(host),
         capabilities=caps.as_dict(),
         capability_notes=caps.notes(),
+        transcode_max_height=transcode_svc.normalize_max_height(
+            getattr(cfg, "transcode_max_height", 1080), cfg),
+        transcode_height_options=list(transcode_svc.TRANSCODE_HEIGHT_OPTIONS),
     )
 
 
@@ -443,6 +447,37 @@ def set_thumbnail_cache(body: schemas.ThumbnailCacheRequest, request: Request):
             restart_required=False, steps=steps, message=message)
     finally:
         release_dedup_gate()
+
+
+@router.post("/transcode", response_model=schemas.StatusResponse)
+def set_transcode_quality(body: schemas.TranscodeQualityRequest,
+                          request: Request):
+    """设置 Web 播放转码的画质（最大高度，0=原画）。
+
+    只写 config.json 并热更新运行态；正在跑的转码不受影响（缓存 key 带画质），
+    下一次播放/重转才会用新画质。
+    """
+    cfg = _cfg(request)
+    if cfg is None:
+        raise HTTPException(status_code=500, detail="配置不可用")
+    height = int(body.max_height)
+    if height not in transcode_svc.TRANSCODE_HEIGHT_OPTIONS:
+        allowed = "/".join(str(h) for h in transcode_svc.TRANSCODE_HEIGHT_OPTIONS)
+        raise HTTPException(status_code=400,
+                            detail=f"不支持的画质：{height}（可选 {allowed}，0=原画）")
+
+    new_cfg = cfg.with_updates(transcode_max_height=height)
+    config_path = _writable_config_path(request)
+    warning = ("配置未写入：运行态缺少 config_path"
+               "（请通过 main.py / main_web.py 启动）") if config_path is None \
+        else _persist_config(new_cfg, config_path)
+    _apply_runtime_config(request, new_cfg)
+
+    label = "原画" if height <= 0 else f"{height}p"
+    message = f"播放画质已设为 {label}"
+    if warning:
+        message += f"；{warning}"
+    return schemas.StatusResponse(success=True, message=message)
 
 
 @router.post("/clear-thumbnail-cache", response_model=schemas.StatusResponse)

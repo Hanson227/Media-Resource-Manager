@@ -53,6 +53,8 @@ __all__ = [
     "load_source", "read_meta_status", "is_cache_hit", "get_cached_output",
     "transcode", "clear_cache", "mark_canceled", "parse_duration_seconds",
     "compute_progress_percent", "parse_out_time_us",
+    "TRANSCODE_HEIGHT_OPTIONS", "DEFAULT_MAX_HEIGHT", "normalize_max_height",
+    "height_tag",
 ]
 
 # ============================================================
@@ -66,6 +68,33 @@ STATUS_CANCELED = "canceled"
 
 CACHE_DIRNAME = "transcode_cache"
 """缓存子目录名（与缩略图缓存目录同级）。"""
+
+TRANSCODE_HEIGHT_OPTIONS = (0, 480, 720, 1080, 1440, 2160)
+"""允许的转码目标高度（像素）：0 = 原画，其余为最大高度（只降不升）。"""
+
+DEFAULT_MAX_HEIGHT = 1080
+"""默认转码高度（用户 2026-11-08 指定：默认 1080p）。"""
+
+
+def normalize_max_height(value=None, config=None) -> int:
+    """把用户/配置里的画质值收敛成合法高度。
+
+    非法值回退默认值而不是报错：旧 config.json 没有这个字段、前端传了
+    历史版本不认识的字符串，都不该让播放直接失败。
+    """
+    if value is None:
+        value = getattr(config, "transcode_max_height", DEFAULT_MAX_HEIGHT)
+    try:
+        height = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_HEIGHT
+    return height if height in TRANSCODE_HEIGHT_OPTIONS else DEFAULT_MAX_HEIGHT
+
+
+def height_tag(height: int) -> str:
+    """缓存 key 里的画质标记：0 → ``orig``，1080 → ``1080p``。"""
+    return "orig" if int(height) <= 0 else f"{int(height)}p"
+
 
 _FFMPEG_TIMEOUT_SEC = 30
 """探测时长的子进程超时（秒）；损坏文件也不该把任务卡死。"""
@@ -122,6 +151,8 @@ class TranscodeCache:
     output_path: Path
     meta_path: Path
     key: str
+    max_height: int = DEFAULT_MAX_HEIGHT
+    """该缓存对应的目标高度（0=原画）；meta 与 key 都带上它，切画质不会串缓存。"""
 
     @property
     def tmp_path(self) -> Path:
@@ -183,18 +214,23 @@ def cache_dir(config) -> Path:
     return Path(config.thumbnail_cache_dir).parent / CACHE_DIRNAME
 
 
-def cache_entry(source: TranscodeSource, config) -> TranscodeCache:
-    """由源文件身份生成缓存路径。
+def cache_entry(source: TranscodeSource, config,
+                max_height: Optional[int] = None) -> TranscodeCache:
+    """由源文件身份 + 目标画质生成缓存路径。
 
-    key = ``{file_id}_{size}_{mtime_ns}``：file_id 会复用（删库/重扫），
-    所以必须带 size + mtime；文件被替换后旧 key 自动失效。
+    key = ``{file_id}_{size}_{mtime_ns}_{orig|1080p}``：file_id 会复用
+    （删库/重扫），所以必须带 size + mtime；文件被替换后旧 key 自动失效。
+    画质也进 key：同一文件切 1080p/720p 各自缓存，互不覆盖。
     """
-    key = f"{source.file_id}_{source.size_bytes}_{source.mtime_ns}"
+    height = normalize_max_height(max_height, config)
+    key = (f"{source.file_id}_{source.size_bytes}_{source.mtime_ns}"
+           f"_{height_tag(height)}")
     root = cache_dir(config)
     return TranscodeCache(
         output_path=root / f"{key}.mp4",
         meta_path=root / f"{key}.meta.json",
         key=key,
+        max_height=height,
     )
 
 
@@ -264,8 +300,15 @@ def _read_meta(meta_path: Path) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-def _meta_matches_source(meta: dict, source: TranscodeSource) -> bool:
-    """meta 记录的源文件身份是否与当前文件一致（防 file_id 复用/文件被替换）。"""
+def _meta_matches_source(meta: dict, source: TranscodeSource,
+                         max_height: Optional[int] = None) -> bool:
+    """meta 记录的源文件身份/画质是否与当前请求一致。"""
+    if max_height is not None:
+        try:
+            if int(meta.get("max_height") or 0) != int(max_height):
+                return False
+        except (TypeError, ValueError):
+            return False
     return (
         int(meta.get("source_size") or -1) == source.size_bytes
         and int(meta.get("source_mtime_ns") or -1) == source.mtime_ns
@@ -282,6 +325,7 @@ def _write_meta(entry: TranscodeCache, source: TranscodeSource, *,
         "source_path": str(source.path),
         "source_size": source.size_bytes,
         "source_mtime_ns": source.mtime_ns,
+        "max_height": int(entry.max_height),
         "status": status,
         "progress": int(progress),
         "error": error or "",
@@ -299,13 +343,14 @@ def _write_meta(entry: TranscodeCache, source: TranscodeSource, *,
         logger.warning(f"写转码 meta 失败 {entry.meta_path}: {exc}")
 
 
-def is_cache_hit(source: TranscodeSource, config) -> bool:
-    """缓存是否有效：meta.status=done **且**输出存在 **且**源文件未变化。"""
-    entry = cache_entry(source, config)
+def is_cache_hit(source: TranscodeSource, config,
+                 max_height: Optional[int] = None) -> bool:
+    """缓存是否有效：meta.status=done **且**输出存在 **且**源文件/画质一致。"""
+    entry = cache_entry(source, config, max_height)
     meta = _read_meta(entry.meta_path)
     if not meta or str(meta.get("status")) != STATUS_DONE:
         return False
-    if not _meta_matches_source(meta, source):
+    if not _meta_matches_source(meta, source, entry.max_height):
         return False
     try:
         return entry.output_path.is_file() and entry.output_path.stat().st_size > 0
@@ -313,12 +358,16 @@ def is_cache_hit(source: TranscodeSource, config) -> bool:
         return False
 
 
-def get_cached_output(source: TranscodeSource, config) -> Optional[Path]:
+def get_cached_output(source: TranscodeSource, config,
+                      max_height: Optional[int] = None) -> Optional[Path]:
     """命中缓存时返回输出文件路径，否则 None（stream 端点唯一判据）。"""
-    return cache_entry(source, config).output_path if is_cache_hit(source, config) else None
+    if not is_cache_hit(source, config, max_height):
+        return None
+    return cache_entry(source, config, max_height).output_path
 
 
-def read_meta_status(source: TranscodeSource, config) -> TranscodeStatus:
+def read_meta_status(source: TranscodeSource, config,
+                     max_height: Optional[int] = None) -> TranscodeStatus:
     """只读缓存目录，得出该文件当前状态（不查任务登记表）。
 
     路由层会再用 task_registry 的活跃任务覆盖 running 进度；
@@ -330,9 +379,9 @@ def read_meta_status(source: TranscodeSource, config) -> TranscodeStatus:
         config: 应用配置（决定缓存目录）。
     """
     available = is_available()
-    entry = cache_entry(source, config)
+    entry = cache_entry(source, config, max_height)
     meta = _read_meta(entry.meta_path)
-    if not meta or not _meta_matches_source(meta, source):
+    if not meta or not _meta_matches_source(meta, source, entry.max_height):
         return TranscodeStatus(available=available, status=STATUS_NONE,
                                progress=0, message="")
 
@@ -367,18 +416,22 @@ def read_meta_status(source: TranscodeSource, config) -> TranscodeStatus:
 
 
 def mark_canceled(source: TranscodeSource, config, *,
-                  message: str = "已取消") -> None:
+                  message: str = "已取消",
+                  max_height: Optional[int] = None) -> None:
     """把残留的 running meta 标成 canceled（任务已不在登记表时用）。"""
-    entry = cache_entry(source, config)
+    entry = cache_entry(source, config, max_height)
     meta = _read_meta(entry.meta_path) or {}
     _write_meta(entry, source, status=STATUS_CANCELED,
                 progress=int(meta.get("progress") or 0), error="",
                 elapsed_ms=int(meta.get("elapsed_ms") or 0))
 
 
-def clear_cache(file_id: int, config) -> int:
-    """删除某个文件的全部转码缓存（force 重转前调用），返回删除条目数。
+def clear_cache(file_id: int, config,
+                max_height: Optional[int] = None) -> int:
+    """删除某个文件的转码缓存，返回删除条目数。
 
+    默认清理该 file_id 的**全部画质**；传了 max_height 就只清这个画质
+    （force 重转当前画质时不该顺带删掉用户已经能看的 720p 缓存）。
     除了当前 key，还清理同一 file_id 的历史 key（mtime/size 变过的旧缓存）：
     否则每次文件被替换都会留下一份永远没人认领的 mb 级孤儿。
     """
@@ -389,9 +442,12 @@ def clear_cache(file_id: int, config) -> int:
     root = cache_dir(config)
     if not root.is_dir():
         return 0
+    tag = None if max_height is None else height_tag(normalize_max_height(max_height, config))
     removed = 0
     for path in root.glob(f"{file_id}_*"):
         if not path.is_file():
+            continue
+        if tag is not None and f"_{tag}." not in path.name:
             continue
         try:
             path.unlink()
@@ -503,12 +559,19 @@ def _emit_progress(on_progress: Optional[Callable], percent: int,
 
 def _cleanup_stale_entries(source: TranscodeSource, keep: TranscodeCache,
                            config) -> None:
-    """新转码开始前清掉同一 file_id 的旧 key（文件被替换后的孤儿缓存）。"""
+    """新转码开始前清掉同一 file_id、同一画质的旧 key。
+
+    只清同一画质：用户切到 720p 重转时，已经转好的 1080p 缓存必须保留，
+    否则每次切画质都把上一份几 GB 的缓存删掉，等于永远只能留一个画质。
+    """
     root = cache_dir(config)
     if not root.is_dir():
         return
+    tag = height_tag(keep.max_height)
     for path in root.glob(f"{source.file_id}_*"):
         if path.name in (keep.output_path.name, keep.meta_path.name) or not path.is_file():
+            continue
+        if f"_{tag}." not in path.name:
             continue
         try:
             path.unlink()
@@ -522,7 +585,8 @@ def _cleanup_stale_entries(source: TranscodeSource, keep: TranscodeCache,
 
 def transcode(file_id: int, config,
               on_progress: Optional[Callable[[int, str], None]] = None,
-              cancel_check: Optional[Callable[[], bool]] = None) -> TranscodeResult:
+              cancel_check: Optional[Callable[[], bool]] = None,
+              max_height: Optional[int] = None) -> TranscodeResult:
     """把指定文件转成 H.264/AAC/faststart 的 MP4 缓存。
 
     参数:
@@ -530,6 +594,7 @@ def transcode(file_id: int, config,
         config: 应用配置（缓存目录由 ``config.thumbnail_cache_dir`` 推导）。
         on_progress: 进度回调 ``(percent 0-99, message)``；完成时单独回调 100。
         cancel_check: 取消探针，返回 True 时 terminate ffmpeg 并返回 canceled。
+        max_height: 目标最大高度（0=原画）；None 时读 config.transcode_max_height。
 
     返回:
         TranscodeResult（status = done / failed / canceled）；不抛 ffmpeg 异常，
@@ -539,12 +604,13 @@ def transcode(file_id: int, config,
         TranscodeError: 文件不存在/非视频等前置条件错误（路由层转 HTTP）。
     """
     started = time.monotonic()
+    height = normalize_max_height(max_height, config)
     source = load_source(file_id)
 
     # 命中缓存直接返回：已转好的文件不因为「这次是强制刷新」等理由重跑，
     # force 由路由层先 clear_cache 再调用本函数。
-    if is_cache_hit(source, config):
-        entry = cache_entry(source, config)
+    if is_cache_hit(source, config, height):
+        entry = cache_entry(source, config, height)
         _emit_progress(on_progress, 100, "命中转码缓存")
         return TranscodeResult(
             file_id=file_id, status=STATUS_DONE, message="命中转码缓存",
@@ -552,7 +618,7 @@ def transcode(file_id: int, config,
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
 
-    entry = cache_entry(source, config)
+    entry = cache_entry(source, config, height)
     executable = ffmpeg_executable()
     if not executable:
         message = "服务端缺少 ffmpeg，无法转码"
@@ -601,6 +667,11 @@ def transcode(file_id: int, config,
         "-progress", "pipe:1", "-nostats",
         str(entry.tmp_path),
     ]
+    if height > 0:
+        # 只降不升：min(ih, height) 保证低分辨率源不被放大。
+        # 逗号是 filtergraph 的分隔符，表达式内的逗号必须转义。
+        scale = f"scale=-2:min(ih\\,{height})"
+        command[command.index("-c:v"):command.index("-c:v")] = ["-vf", scale]
 
     try:
         proc = subprocess.Popen(

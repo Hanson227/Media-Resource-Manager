@@ -1535,6 +1535,16 @@ body {
     margin-left: 8px;
 }
 
+.quality-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-end;
+}
+.quality-options .btn-small {
+    margin-left: 0;
+}
+
 /* ---- 可访问性 / 触控目标（审计 P0） ---- */
 :focus-visible {
     outline: 2px solid var(--accent);
