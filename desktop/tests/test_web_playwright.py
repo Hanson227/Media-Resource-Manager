@@ -2382,6 +2382,18 @@ def test_settings_tools_sections(page):
     joined = "".join(text)
     check("已排除文件夹区块可展开", "没有已排除" in joined or "恢复" in joined)
 
+    data_entry = page.locator(".setting-item", has_text="数据位置").first
+    mark_btn = page.locator("button", has_text="手动标记资源单元").first
+    if mark_btn.count() == 0:
+        data_entry.click()
+        page.wait_for_timeout(500)
+    mark_btn = page.locator("button", has_text="手动标记资源单元").first
+    check("设置页有手动标记资源单元入口", mark_btn.count() >= 1)
+    mark_btn.click()
+    page.wait_for_timeout(600)
+    check("手动标记入口打开文件夹选择器",
+          page.locator(".folder-picker").count() >= 1)
+
 
 def test_data_root_wizard(page):
     """便携版没找到数据盘 → 自动进「选择数据目录」向导（而不是给一个空库）。

@@ -4058,10 +4058,13 @@ const SettingsPage = {
           <button class="btn" @click="clearThumbCache">
             <span class="mdi mdi-delete-sweep-outline"></span> 清理缩略图缓存
           </button>
+          <button class="btn" @click="pickerMode = 'mark'">
+            <span class="mdi mdi-folder-plus-outline"></span> 手动标记资源单元
+          </button>
         </div>
         <div v-if="pickerMode" class="settings-picker">
           <div class="settings-row">
-            <span class="settings-key">{{ pickerMode === 'data' ? '迁移数据到' : '缩略图目录改为' }}</span>
+            <span class="settings-key">{{ pickerTitle }}</span>
           </div>
           <folder-picker :server-url="serverUrl" @picked="onDirPicked" @close="pickerMode = ''"></folder-picker>
         </div>
@@ -4240,10 +4243,30 @@ const SettingsPage = {
         await this.loadSettings();
       } catch (e) { alert('清理失败: ' + e.message); }
     },
+    pickerTitle() {
+      if (this.pickerMode === 'data') return '迁移数据到';
+      if (this.pickerMode === 'mark') return '标记为资源单元';
+      return '缩略图目录改为';
+    },
     async onDirPicked(path) {
       const mode = this.pickerMode;
       this.pickerMode = '';
       if (!path) return;
+      if (mode === 'mark') {
+        if (!confirm('把该目录标记为资源单元？\n' + path
+            + '\n\n只影响媒体库识别，不移动任何文件。')) return;
+        try {
+          const res = await api(this.serverUrl, '/api/units/mark', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folder_path: path }),
+          });
+          this.migrateMsg = res.message || ('已标记：' + path);
+        } catch (e) {
+          this.migrateMsg = '标记失败: ' + e.message;
+        }
+        return;
+      }
       // 选数据位置时先探测：该目录是不是"已经有一份数据"（电脑迁到移动硬盘、
       // 插到平板接着用）。已有数据只能"接管"，绝不能用迁移把这份数据覆盖掉。
       let probe = null;
