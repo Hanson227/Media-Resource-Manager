@@ -669,17 +669,22 @@ class MainWindow(QMainWindow):
         try:
             with DatabaseManager.session() as session:
                 files = q.get_files_by_unit(session, unit_id)
-                all_mapped = q.get_all_mapped_files(session)
+                # 树只展示前 200 个，标签与磁盘 stat 也只处理这 200 个：
+                # 大单元（几千个文件）逐个 stat 会卡住 UI 线程。
+                tree_ids = [f.id for f in files[:200]]
+                all_mapped = q.get_all_mapped_files(session, file_ids=tree_ids)
                 file_dicts = []
-                for f in files:
+                for idx, f in enumerate(files):
                     tags_list = all_mapped.get(f.id, [])
                     tags_str = ", ".join(t["name"] for t in tags_list) if tags_list else ""
-                    try:
-                        # 用修改时间而非创建时间：跨盘移动后 ctime 同样会失真
-                        ts = Path(f.path).stat().st_mtime
-                        file_date = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-                    except OSError:
-                        file_date = ""
+                    file_date = ""
+                    if idx < 200:
+                        try:
+                            # 用修改时间而非创建时间：跨盘移动后 ctime 同样会失真
+                            ts = Path(f.path).stat().st_mtime
+                            file_date = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                        except OSError:
+                            file_date = ""
                     file_dicts.append({
                         "id": f.id, "filename": f.filename,
                         "path": f.path, "size_bytes": f.size_bytes,

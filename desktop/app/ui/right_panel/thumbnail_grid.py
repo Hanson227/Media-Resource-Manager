@@ -162,7 +162,7 @@ class ThumbnailGridModel(QAbstractListModel):
                 from app.db.engine import DatabaseManager
                 from app.db.queries import get_all_mapped_files
                 with DatabaseManager.session() as session:
-                    all_mapped = get_all_mapped_files(session)
+                    all_mapped = get_all_mapped_files(session, file_ids=file_ids)
                     for fid in file_ids:
                         if fid in all_mapped:
                             self._tag_mappings[fid] = [t["id"] for t in all_mapped[fid]]
@@ -236,7 +236,7 @@ class ThumbnailGridModel(QAbstractListModel):
             try:
                 from app.db.queries import get_all_mapped_files
                 with DatabaseManager.session() as session:
-                    all_mapped = get_all_mapped_files(session)
+                    all_mapped = get_all_mapped_files(session, file_ids=file_ids)
                     for fid in file_ids:
                         if fid in all_mapped:
                             self._tag_mappings[fid] = [t["id"] for t in all_mapped[fid]]

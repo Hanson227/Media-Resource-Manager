@@ -116,6 +116,22 @@ def get_units_by_root(session: Session, root_id: int) -> list[ResourceUnit]:
     ).all()
 
 
+def get_active_units_by_roots(
+    session: Session, root_ids: list[int],
+) -> dict[int, list[ResourceUnit]]:
+    """一次查出多个根下的活跃单元并按根分组（避免树刷新时每个根查一次）。"""
+    if not root_ids:
+        return {}
+    rows = session.query(ResourceUnit).filter(
+        ResourceUnit.library_root_id.in_(root_ids),
+        ResourceUnit.status == UnitStatus.ACTIVE.value,
+    ).all()
+    grouped: dict[int, list[ResourceUnit]] = {rid: [] for rid in root_ids}
+    for unit in rows:
+        grouped.setdefault(unit.library_root_id, []).append(unit)
+    return grouped
+
+
 def get_child_units(session: Session, parent_id: int) -> list[ResourceUnit]:
     """获取被合并到指定父单元的所有子单元。"""
     return session.query(ResourceUnit).filter(ResourceUnit.parent_id == parent_id).all()
@@ -1580,11 +1596,17 @@ def get_file_tags(session: Session, file_id: int) -> list[FileTag]:
     ).filter(FileTagMapping.file_id == file_id).all()
 
 
-def get_all_mapped_files(session: Session, tag_ids: Optional[list[int]] = None) -> dict[int, list[dict]]:
+def get_all_mapped_files(
+    session: Session,
+    tag_ids: Optional[list[int]] = None,
+    file_ids: Optional[list[int]] = None,
+) -> dict[int, list[dict]]:
     """批量查询文件标签。返回 {file_id: [{id, name, color}, ...], ...}。
 
     参数:
         tag_ids: 若提供，只返回包含这些标签中任意一个的文件。
+        file_ids: 若提供，只返回这些文件的标签（树只展示前 200 个文件时用，
+                  避免把整库标签都读进内存）。
     """
     query = session.query(
         FileTagMapping.file_id,
@@ -1594,6 +1616,10 @@ def get_all_mapped_files(session: Session, tag_ids: Optional[list[int]] = None) 
     ).join(FileTag, FileTag.id == FileTagMapping.tag_id)
     if tag_ids:
         query = query.filter(FileTagMapping.tag_id.in_(tag_ids))
+    if file_ids is not None:
+        if not file_ids:
+            return {}
+        query = query.filter(FileTagMapping.file_id.in_(file_ids))
     rows = query.all()
     result: dict[int, list[dict]] = {}
     for file_id, tag_id, name, color in rows:

@@ -100,9 +100,12 @@ class FolderTreeModel(QAbstractItemModel):
             with DatabaseManager.session() as session:
                 roots = q.get_all_roots(session)
                 self._roots = []
+                units_by_root = q.get_active_units_by_roots(
+                    session, [root.id for root in roots]
+                )
 
                 for root in roots:
-                    units = q.get_units_by_root(session, root.id)
+                    units = units_by_root.get(root.id, [])
                     root_name = Path(root.path).name or root.path
                     star_count = sum(1 for u in units if u.is_starred)
                     star_suffix = f" ⭐{star_count}" if star_count else ""
