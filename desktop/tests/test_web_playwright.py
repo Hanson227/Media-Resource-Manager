@@ -564,6 +564,79 @@ def test_preview_swipe_gesture(page):
         check("首张右滑不切换", final_pos == 1)
 
 
+def _seed_transcode_video(name: str = "转码测试") -> tuple:
+    """建一个含真实 MKV 的临时单元（浏览器不能直接播放，必须走转码）。"""
+    import subprocess
+    import tempfile
+
+    import imageio_ffmpeg
+
+    from app.db import queries as q
+
+    root_dir = Path(tempfile.mkdtemp(prefix="web_transcode_"))
+    unit_dir = root_dir / name
+    unit_dir.mkdir(parents=True)
+    video_path = unit_dir / "clip.mkv"
+    subprocess.run(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(), "-y",
+            "-f", "lavfi", "-i", "testsrc=size=128x72:rate=5",
+            "-t", "1", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "ultrafast",
+            str(video_path),
+        ],
+        check=True, capture_output=True, timeout=60,
+    )
+    with DatabaseManager.session() as session:
+        root = next(
+            (r for r in q.get_all_roots(session) if r.path == str(root_dir)), None
+        )
+        if root is None:
+            root = q.add_library_root(session, str(root_dir))
+        unit = q.create_unit(
+            session, str(unit_dir), name, root.id,
+            file_count=1, total_size=video_path.stat().st_size,
+        )
+        mf = q.insert_media_file(
+            session, path=str(video_path), filename=video_path.name,
+            extension=".mkv", media_type="video",
+            size_bytes=video_path.stat().st_size,
+            resource_unit_id=unit.id,
+        )
+        fid = mf.id
+    return unit.id, fid, video_path
+
+
+def test_preview_auto_transcode(page):
+    """非浏览器格式打开预览时，应自动转码并在完成后切换到转码流。"""
+    section("Web 测试 6b: 预览自动转码")
+    _uid, fid, _path = _seed_transcode_video()
+    errors: list = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(f"http://127.0.0.1:{_PORT}/#/preview/{fid}")
+    page.locator(".preview-overlay").wait_for(state="visible", timeout=8000)
+
+    status = page.locator(".video-status.transcode")
+    status.wait_for(state="visible", timeout=8000)
+    check("检测到不兼容格式并进入转码", status.count() > 0)
+    check("显示转码进度条", page.locator(".transcode-bar span").count() > 0)
+
+    try:
+        page.wait_for_function(
+            """() => {
+                const v = document.querySelector('.preview-content video');
+                return !!(v && v.src && v.src.indexOf('/api/transcode/stream') >= 0);
+            }""",
+            timeout=90000,
+        )
+        check("转码完成后切换到转码流", True)
+    except Exception:
+        check("转码完成后切换到转码流", False)
+    check("转码期间/完成后无页面 JS 错误", not errors)
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    page.wait_for_load_state("networkidle")
+
+
 def test_preview_scroll_restore(page):
     """验证从预览返回后文件列表滚动位置恢复。"""
     section("Web 测试 6: 预览返回滚动位置")
@@ -2654,6 +2727,11 @@ def main():
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
             page.wait_for_load_state("networkidle")
             test_preview_scroll_restore(page)
+
+            # 预览自动转码（非浏览器格式）
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_load_state("networkidle")
+            test_preview_auto_transcode(page)
 
             # 重新加载使 localStorage 生效（绕过 PIN 页）
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")

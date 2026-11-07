@@ -896,6 +896,8 @@ const UnitFilesPage = {
 };
 
 /* ========== Preview Page ========== */
+/* 浏览器通常无法原生解码的容器：命中后走服务端按需转码（MKV/AVI 等）。 */
+const UNSUPPORTED_VIDEO_EXTS = ['mkv', 'avi', 'flv', 'ts', 'wmv', 'rmvb', 'rm'];
 const PreviewPage = {
   template: `
     <div class="preview-overlay" @contextmenu.prevent @gesturestart.prevent @gesturechange.prevent>
@@ -927,17 +929,27 @@ const PreviewPage = {
   class="gesture-follow" :class="{ dragging: navSwiping }"></video>
 
           <!-- 加载/缓冲/失败反馈：旧版黑屏且无任何提示，用户以为卡死 -->
-          <div v-if="formatWarning" class="format-warning">
+          <div v-if="formatWarning && !transcoding" class="format-warning">
             <span class="mdi mdi-information-outline"></span> {{ formatWarning }}
           </div>
-          <div class="video-status" v-if="mediaType === 'video' && (loading || buffering) && !videoError">
+          <!-- 转码进度：MKV/AVI 等浏览器不支持的容器由服务端按需转成 MP4 -->
+          <div class="video-status transcode" v-if="mediaType === 'video' && transcoding">
+            <span class="mdi mdi-filmstrip-box-multiple"></span>
+            <p>{{ transcodeMessage || '正在转码为可播放格式…' }}</p>
+            <div class="transcode-bar"><span :style="{ width: transcodeProgress + '%' }"></span></div>
+            <small>{{ transcodeProgress }}% · 首次播放需要一点时间，之后会直接使用缓存</small>
+          </div>
+          <div class="video-status" v-if="mediaType === 'video' && !transcoding && (loading || buffering) && !videoError">
             <span class="mdi mdi-loading mdi-spin"></span>
             <span>{{ loading ? '正在加载视频…' : '缓冲中…' }}</span>
           </div>
-          <div class="video-status error" v-if="mediaType === 'video' && videoError">
+          <div class="video-status error" v-if="mediaType === 'video' && !transcoding && videoError">
             <span class="mdi mdi-alert-circle-outline"></span>
             <p>{{ videoError }}</p>
-            <button class="video-retry" @click.stop="retryVideo">重试</button>
+            <div class="transcode-actions">
+              <button class="video-retry" @click.stop="retryVideo">重试</button>
+              <button class="video-retry" v-if="!videoTranscoded" @click.stop="startTranscode(true)">转码后播放</button>
+            </div>
           </div>
 
           <!-- Gesture Zone：触摸事件由 js-gesture 引擎在 mounted 统一接管（报告 §6） -->
@@ -1017,6 +1029,9 @@ const PreviewPage = {
       navigateFeedbackTimer: null,
       posterUrl: '',
       loading: false, buffering: false, videoError: '',
+      transcoding: false, transcodeProgress: 0, transcodeMessage: '',
+      transcodeTimer: null, videoTranscoded: false,
+      _transcodeStarting: false,
       _navigating: false,
       navSwiping: false,
       zoomed: false,
@@ -1024,14 +1039,16 @@ const PreviewPage = {
   },
   computed: {
     videoEl() { return this.$refs.videoEl; },
-    /** 浏览器原生不支持的容器：提前说明，别让用户对着黑屏等 */
+    /** 浏览器原生不支持的容器：自动转码；这里只解释当前状态 */
     formatWarning() {
-      const m = /\.([a-z0-9]+)$/i.exec(this.filename || '');
-      const ext = m ? m[1].toLowerCase() : '';
-      if (['mkv', 'avi', 'flv', 'ts', 'wmv', 'rmvb', 'rm'].includes(ext)) {
-        return '该格式（.' + ext + '）浏览器通常无法直接播放，建议在桌面端打开；或先转成 MP4。';
-      }
-      return '';
+      const ext = this.videoExt;
+      if (this.videoTranscoded) return '';
+      if (!ext || !UNSUPPORTED_VIDEO_EXTS.includes(ext)) return '';
+      return '该格式（.' + ext + '）浏览器无法直接播放，正在转码为 MP4。';
+    },
+    videoExt() {
+      const m = /\.([a-z0-9]+)(?:\?.*)?$/i.exec(this.filename || '');
+      return m ? m[1].toLowerCase() : '';
     },
   },
   methods: {
@@ -1184,12 +1201,16 @@ const PreviewPage = {
       if (this.hideTimer) { clearTimeout(this.hideTimer); this.hideTimer = null; }
     },
     onVideoError() {
+      // 转码期间 video 仍挂着旧源，错误是预期内的；进度层会盖住它。
+      if (this.transcoding) return;
       this.buffering = false;
       this.loading = false;
       const err = this.videoEl && this.videoEl.error;
       const code = err ? err.code : 0;
       if (code === 4) {
-        this.videoError = '浏览器不支持该视频格式或编码（可尝试 MP4/H.264）';
+        this.videoError = this.videoTranscoded
+          ? '转码后的视频仍无法播放，可能是视频损坏'
+          : '浏览器不支持该视频格式或编码，可尝试「转码后播放」';
       } else if (code === 2) {
         this.videoError = '视频加载失败，请检查数据盘是否已连接';
       } else {
@@ -1203,6 +1224,105 @@ const PreviewPage = {
       const base = this.streamUrl.split('&_r=')[0];
       this.streamUrl = base + (base.includes('?') ? '&' : '?') + '_r=' + Date.now();
       try { this.videoEl.load(); } catch (e) { /* 忽略 */ }
+    },
+    /* ---- 按需转码（MKV/AVI 等浏览器不支持的容器）----
+     * 后端 /api/transcode/start 幂等；转码缓存按 file_id+size+mtime 命中，
+     * 首次播放等一次，之后直接读 MP4 缓存。进度靠 1s 轮询 status。 */
+    _prepareVideoSource() {
+      this._stopTranscodePoll();
+      this.videoTranscoded = false;
+      this.transcoding = false;
+      this.transcodeProgress = 0;
+      this.transcodeMessage = '';
+      if (this.mediaType !== 'video') return;
+      if (UNSUPPORTED_VIDEO_EXTS.includes(this.videoExt)) {
+        // 先让 video 标签挂着（可能立刻报错），转码层盖住错误并显示进度。
+        this.transcoding = true;
+        this.loading = true;
+        this.startTranscode(false);
+      } else {
+        this.loading = true;
+      }
+    },
+    async startTranscode(force = false) {
+      if (this._transcodeStarting) return;
+      const fileId = Number(this.$route.params.id);
+      if (!fileId) return;
+      this._transcodeStarting = true;
+      this.transcoding = true;
+      this.videoError = '';
+      this.transcodeProgress = 0;
+      this.transcodeMessage = '正在准备转码…';
+      try {
+        const res = await api(this.serverUrl, '/api/transcode/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_id: fileId, force: !!force }),
+        });
+        if (res.status === 'done') {
+          this._useTranscodedStream();
+          return;
+        }
+        this.transcodeMessage = res.message || '正在转码…';
+        this._pollTranscode();
+      } catch (e) {
+        this.transcoding = false;
+        this.loading = false;
+        const msg = String((e && e.message) || e || '');
+        if (msg.includes('ffmpeg') || msg.includes('503')) {
+          this.videoError = '服务端缺少 ffmpeg，无法转码；可在桌面端打开该文件。';
+        } else if (msg.includes('扫描') || msg.includes('查重') || msg.includes('409')) {
+          this.videoError = '当前有扫描/查重任务在进行，稍后再试转码。';
+        } else {
+          this.videoError = '转码启动失败：' + msg;
+        }
+      } finally {
+        this._transcodeStarting = false;
+      }
+    },
+    _pollTranscode() {
+      this._stopTranscodePoll();
+      const fileId = Number(this.$route.params.id);
+      const tick = async () => {
+        try {
+          const st = await api(this.serverUrl, '/api/transcode/status?file_id=' + fileId);
+          if (!this.transcoding) return;
+          this.transcodeProgress = Math.max(0, Math.min(100, Number(st.progress) || 0));
+          if (st.message) this.transcodeMessage = st.message;
+          if (st.status === 'done') {
+            this._stopTranscodePoll();
+            this._useTranscodedStream();
+          } else if (st.status === 'failed' || st.status === 'canceled') {
+            this._stopTranscodePoll();
+            this.transcoding = false;
+            this.loading = false;
+            this.videoError = st.message || (st.status === 'canceled' ? '转码已取消' : '转码失败');
+          }
+        } catch (e) {
+          // 网络瞬断不终止轮询；连续失败由用户重试。
+        }
+      };
+      tick();
+      this.transcodeTimer = setInterval(tick, 1000);
+    },
+    _stopTranscodePoll() {
+      if (this.transcodeTimer) {
+        clearInterval(this.transcodeTimer);
+        this.transcodeTimer = null;
+      }
+    },
+    _useTranscodedStream() {
+      const fileId = Number(this.$route.params.id);
+      this.transcoding = false;
+      this.videoTranscoded = true;
+      this.videoError = '';
+      this.streamUrl = mediaUrl(this.serverUrl, '/api/transcode/stream?file_id=' + fileId);
+      this.loading = true;
+      this.buffering = true;
+      this.$nextTick(() => {
+        if (!this.videoEl) return;
+        try { this.videoEl.load(); } catch (e) { /* 忽略 */ }
+      });
     },
     /* ---- Gestures（统一手势管线，报告 §6 状态机）----
      * 引擎（js-gesture.createZone）负责：identifier 跟踪、多指中止、
@@ -1656,7 +1776,13 @@ const PreviewPage = {
       this.progressPct = 0;
       this.buffering = false;
       this.videoError = '';
+      this._stopTranscodePoll();
+      this.transcoding = false;
+      this.videoTranscoded = false;
+      this.transcodeProgress = 0;
+      this.transcodeMessage = '';
       this.loading = this.mediaType === 'video';
+      this._prepareVideoSource();
       // Update URL without reload — deep-clone to avoid Vue reactive proxy $el
       history.replaceState({ files: JSON.parse(JSON.stringify(this.fileList)), fileIndex: newIndex }, '', '#/preview/' + file.id);
       return true;
@@ -1754,6 +1880,7 @@ const PreviewPage = {
       this.streamUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/stream');
       this.posterUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/thumbnail');
       this.loading = this.mediaType === 'video';
+      this._prepareVideoSource();
       // 如果 fileIndex 没设置，从 fileList 中查找匹配
       if (this.fileIndex < 0 && this.fileList.length) {
         this.fileIndex = this.fileList.findIndex(f => f.id == id);
@@ -1773,6 +1900,7 @@ const PreviewPage = {
       this._pinchHandlers = null;
     }
     if (this.hideTimer) clearTimeout(this.hideTimer);
+    this._stopTranscodePoll();
     if (this._scrubRAF) cancelAnimationFrame(this._scrubRAF);
     if (this._seek && this._seek.commitTimer) clearTimeout(this._seek.commitTimer);
     if (this.navigateFeedbackTimer) clearTimeout(this.navigateFeedbackTimer);

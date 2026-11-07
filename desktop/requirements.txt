@@ -34,6 +34,8 @@ win10toast>=0.9.0
 
 # FFmpeg Python 包装（可选——调用系统 ffmpeg）
 ffmpeg-python>=0.2.0
+# 按需转码：自带静态 ffmpeg 可执行文件（无系统 ffmpeg/ffprobe 的机器也能转）
+imageio-ffmpeg>=0.6.0
 
 # 回收站操作
 send2trash>=1.8.0

@@ -17,18 +17,21 @@ from typing import Optional, Sequence
 from PySide6.QtCore import Qt, QSize, QTimer, QThread, Signal, Slot
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
-    QMainWindow, QMenu, QToolBar, QSplitter, QWidget, QVBoxLayout,
+    QMainWindow, QMenu, QSplitter, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QStackedWidget, QListWidget, QListWidgetItem,
     QLabel, QMessageBox, QSystemTrayIcon, QApplication,
-    QFileDialog, QPushButton, QCommandLinkButton, QLineEdit, QComboBox,
-    QInputDialog, QAbstractItemView, QStyle,
+    QFileDialog, QPushButton, QLineEdit, QComboBox,
+    QInputDialog, QAbstractItemView, QScrollArea, QFrame,
 )
 
 from config import AppConfig
 from app.db.engine import DatabaseManager
 from app.db import queries as q
+from app.ui import theme
+from app.ui.icons import icon
 from app.ui.widgets.accordion_manager import AccordionManager
-from app.ui.widgets.navigation_rail import NavigationRail, gear_icon
+from app.ui.widgets.navigation_rail import NavigationRail
+from app.ui.widgets.nav_card import NavCard
 from app.ui.widgets.status_bar import MainStatusBar
 from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView
 from app.ui.right_panel.thumbnail_grid import (
@@ -161,7 +164,6 @@ class MainWindow(QMainWindow):
 
         # 构建 UI 组件
         self._setup_menu_bar()
-        self._setup_tool_bar()
         self._setup_central_area()
         self._setup_status_bar()
         self._setup_system_tray()
@@ -175,6 +177,7 @@ class MainWindow(QMainWindow):
 
         # 初始加载文件夹树 + 自动清理已删除的路径
         self._tree_view.refresh_model()
+        QTimer.singleShot(120, self._select_initial_unit)
         QTimer.singleShot(100, self._cleanup_missing_paths)
         self.filesystem_changed.connect(self._on_filesystem_changed)
         self._setup_file_watcher()
@@ -278,58 +281,19 @@ class MainWindow(QMainWindow):
     # 工具栏
     # ============================================================
 
-    def _setup_tool_bar(self) -> None:
-        toolbar = QToolBar("主工具栏")
-        toolbar.setMovable(False)
-        toolbar.setIconSize(QSize(24, 24))
-        self.addToolBar(toolbar)
+    @Slot()
+    def _select_initial_unit(self) -> None:
+        """启动时自动选中第一个可见单元。
 
-        # 一级入口已移到左侧导航 rail；工具栏只保留全局筛选/排序/消息，
-        # 避免同一动作在菜单、工具栏、页面卡片里出现三次。
-        _std = self.style().standardIcon
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("搜索文件名...")
-        self._search_input.setMaximumWidth(180)
-        self._search_input.textChanged.connect(self._on_search)
-        self._search_action = toolbar.addWidget(self._search_input)
-
-        self._filter_combo = QComboBox()
-        self._filter_combo.addItem("全部", None)
-        self._filter_combo.addItem("仅图片", MediaType.IMAGE.value)
-        self._filter_combo.addItem("仅视频", MediaType.VIDEO.value)
-        self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
-        self._filter_combo.setMaximumWidth(80)
-        self._filter_action = toolbar.addWidget(self._filter_combo)
-
-        self._toolbar_sep_action = toolbar.addSeparator()
-
-        self._msg_btn = QPushButton("消息")
-        self._msg_btn.setIcon(_std(QStyle.SP_MessageBoxInformation))
-        self._msg_btn.setToolTip("打开消息中心 (Ctrl+M)")
-        self._msg_btn.clicked.connect(self._on_open_messages)
-        toolbar.addWidget(self._msg_btn)
-
-        # 排序按钮
-        self._sort_name_btn = QPushButton("名称↑")
-        self._sort_name_btn.setCheckable(True)
-        self._sort_name_btn.setToolTip("按文件名排序")
-        self._sort_name_btn.clicked.connect(lambda: self._on_sort("name"))
-        self._sort_name_action = toolbar.addWidget(self._sort_name_btn)
-
-        self._sort_size_btn = QPushButton("大小↑")
-        self._sort_size_btn.setCheckable(True)
-        self._sort_size_btn.setToolTip("按文件大小排序")
-        self._sort_size_btn.clicked.connect(lambda: self._on_sort("size"))
-        self._sort_size_action = toolbar.addWidget(self._sort_size_btn)
-
-        # 搜索/类型筛选/排序只对「单元」页的文件网格有意义，其他页面隐藏。
-        # 注意必须隐藏 QAction 而非 widget：QToolBar 会在布局激活时把
-        # addWidget 的控件重新显示，直接 widget.setVisible(False) 会被覆盖。
-        self._unit_toolbar_actions = [
-            self._search_action, self._filter_action,
-            self._toolbar_sep_action,
-            self._sort_name_action, self._sort_size_action,
-        ]
+        旧行为是一进来右侧网格全空、左树占满整个窗口，看起来像「坏了」。
+        自动选中后直接铺满缩略图，也顺便给左侧树一个明确的当前项。
+        """
+        if self._current_unit_id is not None:
+            return
+        unit_id = self._tree_view.find_first_visible_unit()
+        if unit_id is None:
+            return
+        self._tree_view.select_unit(unit_id)
 
     # ============================================================
     # 中央区域：左树 + 右网格
@@ -341,25 +305,31 @@ class MainWindow(QMainWindow):
         五个一级入口固定在最左侧；原来散落在菜单/工具栏/对话框里的功能
         分别归入对应页面的操作卡片，页面本身只做入口，不复制业务逻辑。
         """
-        std = self.style().standardIcon
         self._nav_rail = NavigationRail()
         self._nav_rail.add_item(
-            "媒体库", std(QStyle.StandardPixmap.SP_DirHomeIcon),
+            "媒体库", icon("library", theme.SUBTEXT_1),
             "媒体库根目录、扫描与数据位置")
         self._nav_rail.add_item(
-            "单元", std(QStyle.StandardPixmap.SP_DirIcon),
+            "单元", icon("units", theme.SUBTEXT_1),
             "资源单元与文件浏览")
         self._nav_rail.add_item(
-            "查重", std(QStyle.StandardPixmap.SP_FileDialogContentsView),
+            "查重", icon("dedup", theme.SUBTEXT_1),
             "查重、合并与清理")
         self._nav_rail.add_item(
-            "工具", std(QStyle.StandardPixmap.SP_FileDialogListView),
+            "工具", icon("tools", theme.SUBTEXT_1),
             "HEIC、标签、路径与维护工具")
         self._nav_rail.add_item(
-            "设置", gear_icon(),
+            "设置", icon("settings", theme.SUBTEXT_1),
             "应用设置与关于")
         self._nav_rail.page_changed.connect(self._switch_page)
 
+        # 消息是全局入口，不占一级页面；放在 rail 底部常驻。
+        self._msg_btn = self._nav_rail.add_footer_action(
+            "消息", icon("message", theme.SUBTEXT_1),
+            "打开消息中心 (Ctrl+M)")
+        self._msg_btn.clicked.connect(self._on_open_messages)
+
+        self._page_contents: list[QWidget] = []
         self._pages = QStackedWidget()
         self._pages.addWidget(self._build_library_page())
         self._pages.addWidget(self._build_unit_page())
@@ -375,6 +345,7 @@ class MainWindow(QMainWindow):
         shell.addWidget(self._nav_rail)
         shell.addWidget(self._pages, 1)
         self.setCentralWidget(central)
+        self._sync_page_widths()
 
         # 默认落在「单元」页，保留启动即看到库内容的习惯
         self._pages.setCurrentIndex(1)
@@ -383,11 +354,34 @@ class MainWindow(QMainWindow):
     # ---- 页面骨架 -------------------------------------------------
 
     def _page_shell(self, title: str, subtitle: str):
+        """非单元页的统一骨架：可滚动、内容最大宽度 1120 居中。"""
         page = QWidget()
         page.setObjectName("sectionPage")
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(14)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("pageScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        host = QWidget()
+        host.setObjectName("pageHost")
+        host_layout = QHBoxLayout(host)
+        host_layout.setContentsMargins(0, 0, 0, 0)
+        host_layout.setSpacing(0)
+        host_layout.addStretch(1)
+
+        content = QWidget()
+        content.setObjectName("pageContent")
+        content.setMaximumWidth(1120)
+        self._page_contents.append(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 42, 8, 36)
+        layout.setSpacing(18)
+
         title_label = QLabel(title)
         title_label.setObjectName("pageTitle")
         subtitle_label = QLabel(subtitle)
@@ -395,28 +389,53 @@ class MainWindow(QMainWindow):
         subtitle_label.setWordWrap(True)
         layout.addWidget(title_label)
         layout.addWidget(subtitle_label)
+        layout.addSpacing(6)
+
+        host_layout.addWidget(content, 0, Qt.AlignmentFlag.AlignTop)
+        host_layout.addStretch(1)
+        scroll.setWidget(host)
+        outer.addWidget(scroll)
         return page, layout
 
-    def _add_nav_card(self, layout, title: str, desc: str, handler) -> QCommandLinkButton:
-        button = QCommandLinkButton(title, desc)
-        button.setObjectName("navCard")
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setMinimumHeight(78)
-        button.clicked.connect(handler)
-        layout.addWidget(button)
-        return button
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        self._sync_page_widths()
 
-    def _add_nav_card_grid(self, layout, cards: list[tuple[str, str, object]]) -> None:
+    def _sync_page_widths(self) -> None:
+        """让非单元页的内容列在大屏上居中、在窄屏上不溢出。
+
+        QHBoxLayout 两侧 stretch 只能把「sizeHint 宽度」的控件居中；这里把
+        内容列固定为 min(1120, 可用宽度)，才能在 1440 宽屏幕上得到设计稿的
+        版心，而不是缩成左上角一小块。
+        """
+        contents = getattr(self, "_page_contents", None)
+        rail = getattr(self, "_nav_rail", None)
+        if not contents or rail is None:
+            return
+        available = max(560, self.width() - rail.width() - 72)
+        target = min(1120, available)
+        for content in contents:
+            if content.width() != target:
+                content.setFixedWidth(target)
+
+    def _add_nav_card(self, layout, title: str, desc: str, handler,
+                      icon_name: str = "folder") -> NavCard:
+        card = NavCard(title, desc, icon_name)
+        card.clicked.connect(handler)
+        layout.addWidget(card)
+        return card
+
+    def _add_nav_card_grid(self, layout,
+                           cards: list[tuple[str, str, object, str]]) -> None:
         grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
-        for index, (title, desc, handler) in enumerate(cards):
-            button = QCommandLinkButton(title, desc)
-            button.setObjectName("navCard")
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setMinimumHeight(86)
-            button.clicked.connect(handler)
-            grid.addWidget(button, index // 2, index % 2)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
+        for index, (title, desc, handler, icon_name) in enumerate(cards):
+            card = NavCard(title, desc, icon_name)
+            card.clicked.connect(handler)
+            grid.addWidget(card, index // 2, index % 2)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
 
     # ---- 媒体库页 -------------------------------------------------
@@ -424,25 +443,29 @@ class MainWindow(QMainWindow):
     def _build_library_page(self):
         page, layout = self._page_shell(
             "媒体库",
-            "这里管理媒体库根目录与扫描。数据位置、迁移和缩略图缓存在「设置 → 存储」中。")
-        row = QHBoxLayout()
+            "管理媒体库根目录与扫描。数据位置、迁移和缩略图缓存在「设置 → 存储」中。")
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
         add_btn = QPushButton("＋ 添加媒体库")
         add_btn.setObjectName("primaryBtn")
         add_btn.clicked.connect(self._on_add_root)
-        row.addWidget(add_btn)
+        action_row.addWidget(add_btn)
         scan_btn = QPushButton("扫描选中")
         scan_btn.clicked.connect(self._on_library_scan_selected)
-        row.addWidget(scan_btn)
+        action_row.addWidget(scan_btn)
         refresh_btn = QPushButton("刷新列表")
         refresh_btn.clicked.connect(self._reload_library_roots)
-        row.addWidget(refresh_btn)
-        row.addStretch(1)
-        layout.addLayout(row)
+        action_row.addWidget(refresh_btn)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
 
         self._library_roots = QListWidget()
         self._library_roots.setObjectName("libraryRoots")
-        self._library_roots.setMinimumHeight(160)
-        self._library_roots.setMaximumHeight(300)
+        self._library_roots.setMinimumHeight(120)
+        self._library_roots.setMaximumHeight(340)
+        self._library_roots.setIconSize(QSize(26, 26))
+        self._library_roots.setSpacing(2)
         self._library_roots.itemDoubleClicked.connect(self._on_library_root_activated)
         layout.addWidget(self._library_roots)
 
@@ -463,15 +486,24 @@ class MainWindow(QMainWindow):
             logger.warning(f"刷新媒体库列表失败: {exc}")
             return
         for root in roots:
-            prefix = "" if root.enabled else "[已停用] "
+            prefix = "" if root.enabled else "已停用 · "
             name = Path(root.path).name or root.path
-            item = QListWidgetItem(f"{prefix}{name}    {root.path}")
+            item = QListWidgetItem(
+                icon("folder", theme.ACCENT if root.enabled else theme.OVERLAY_1, 20),
+                f"{prefix}{name}\n{root.path}")
+            item.setToolTip(root.path)
             item.setData(Qt.ItemDataRole.UserRole, root.id)
             item.setData(Qt.ItemDataRole.UserRole + 1, root.path)
+            item.setSizeHint(QSize(0, 54))
             self._library_roots.addItem(item)
+        if not roots:
+            placeholder = QListWidgetItem("还没有媒体库根目录。点击「＋ 添加媒体库」开始。")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            placeholder.setSizeHint(QSize(0, 54))
+            self._library_roots.addItem(placeholder)
         # 列表高度随条目数收缩，避免只有一两个根目录时留下大片空白。
         rows = max(1, len(roots))
-        self._library_roots.setFixedHeight(min(300, 44 * rows + 10))
+        self._library_roots.setFixedHeight(min(340, 58 * rows + 8))
 
     def _on_library_root_activated(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.ItemDataRole.UserRole + 1)
@@ -490,16 +522,17 @@ class MainWindow(QMainWindow):
 
     def _build_unit_page(self):
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        left_pct = self._config.splitter_ratio_left
-        total_w = self._config.window_width
-        splitter.setSizes([int(total_w * left_pct / 100), int(total_w * (100 - left_pct) / 100)])
+        splitter.setObjectName("unitSplitter")
+        splitter.setChildrenCollapsible(False)
 
         # ---- 左侧：文件夹树 ----
         left_panel = QWidget()
         left_panel.setObjectName("leftPanel")
+        left_panel.setMinimumWidth(340)
+        left_panel.setMaximumWidth(480)
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(4, 4, 2, 4)
-        left_layout.setSpacing(4)
+        left_layout.setContentsMargins(12, 10, 6, 10)
+        left_layout.setSpacing(6)
 
         self._tree_model = FolderTreeModel(self._config)
         self._tree_view = FolderTreeView(self._tree_model)
@@ -507,16 +540,56 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(left_panel)
 
-        # ---- 右侧：缩略图网格 ----
+        # ---- 右侧：标题 + 工具栏 + 缩略图网格 ----
         right_panel = QWidget()
         right_panel.setObjectName("rightPanel")
+        right_panel.setMinimumWidth(560)
         right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(2, 4, 4, 4)
-        right_layout.setSpacing(4)
+        right_layout.setContentsMargins(16, 10, 18, 10)
+        right_layout.setSpacing(10)
 
-        self._right_header = QLabel("资源单元视图")
-        self._right_header.setObjectName("rightHeader")
-        right_layout.addWidget(self._right_header)
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        self._right_header = QLabel("资源单元")
+        self._right_header.setObjectName("unitTitle")
+        self._right_subheader = QLabel("从左侧选择一个资源单元")
+        self._right_subheader.setObjectName("unitSubtitle")
+        title_col.addWidget(self._right_header)
+        title_col.addWidget(self._right_subheader)
+        header.addLayout(title_col, 1)
+
+        self._search_input = QLineEdit()
+        self._search_input.setObjectName("unitSearch")
+        self._search_input.setPlaceholderText("搜索文件名…")
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.setMaximumWidth(210)
+        self._search_input.textChanged.connect(self._on_search)
+        header.addWidget(self._search_input)
+
+        self._filter_combo = QComboBox()
+        self._filter_combo.addItem("全部", None)
+        self._filter_combo.addItem("仅图片", MediaType.IMAGE.value)
+        self._filter_combo.addItem("仅视频", MediaType.VIDEO.value)
+        self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
+        self._filter_combo.setMaximumWidth(92)
+        header.addWidget(self._filter_combo)
+
+        self._sort_name_btn = QPushButton("名称↑")
+        self._sort_name_btn.setObjectName("chipBtn")
+        self._sort_name_btn.setCheckable(True)
+        self._sort_name_btn.setToolTip("按文件名排序")
+        self._sort_name_btn.clicked.connect(lambda: self._on_sort("name"))
+        header.addWidget(self._sort_name_btn)
+
+        self._sort_size_btn = QPushButton("大小↑")
+        self._sort_size_btn.setObjectName("chipBtn")
+        self._sort_size_btn.setCheckable(True)
+        self._sort_size_btn.setToolTip("按文件大小排序")
+        self._sort_size_btn.clicked.connect(lambda: self._on_sort("size"))
+        header.addWidget(self._sort_size_btn)
+        right_layout.addLayout(header)
 
         # 面包屑导航栏（返回按钮）
         self._breadcrumb = QPushButton("← 返回文件夹列表")
@@ -533,16 +606,60 @@ class MainWindow(QMainWindow):
 
         self._grid_model = ThumbnailGridModel(self._config)
         self._grid_view = ThumbnailGridView(self._grid_model, self._config)
-        right_layout.addWidget(self._grid_view)
+
+        # 未选中单元时的空状态：比一整块纯黑更像"这里应该有内容"。
+        self._grid_empty = QWidget()
+        self._grid_empty.setObjectName("gridEmpty")
+        empty_layout = QVBoxLayout(self._grid_empty)
+        empty_layout.setContentsMargins(24, 24, 24, 24)
+        empty_layout.setSpacing(10)
+        empty_layout.addStretch(1)
+        empty_icon = QLabel()
+        empty_icon.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        empty_icon.setPixmap(icon("image", theme.OVERLAY_0, 52).pixmap(52, 52))
+        empty_layout.addWidget(empty_icon)
+        empty_title = QLabel("从一个资源单元开始")
+        empty_title.setObjectName("emptyTitle")
+        empty_title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        empty_layout.addWidget(empty_title)
+        empty_hint = QLabel("从左侧选择单元；还没有内容时，先到「媒体库」添加根目录并扫描。")
+        empty_hint.setObjectName("emptyHint")
+        empty_hint.setWordWrap(True)
+        empty_hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        empty_layout.addWidget(empty_hint)
+        empty_layout.addStretch(1)
+
+        self._grid_stack = QStackedWidget()
+        self._grid_stack.addWidget(self._grid_empty)
+        self._grid_stack.addWidget(self._grid_view)
+        right_layout.addWidget(self._grid_stack, 1)
 
         self._right_footer = QLabel("0 个项目 | 共 0 B")
         self._right_footer.setObjectName("rightFooter")
         right_layout.addWidget(self._right_footer)
 
         splitter.addWidget(right_panel)
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        # setSizes 必须在 addWidget 之后调用；否则 Qt 会以「只有一个子控件」
+        # 的方式分配，右侧详情面板被压成 0 宽（树占满整页）。
+        left_pct = self._config.splitter_ratio_left
+        left_width = max(360, min(480, int(self.width() * left_pct / 100) or 380))
+        splitter.setSizes([left_width, max(560, self.width() - left_width)])
 
         self._splitter = splitter
         return splitter
+
+    def _show_grid(self, visible: bool) -> None:
+        """切换右侧「空状态 / 缩略图网格」。"""
+        if hasattr(self, "_grid_stack"):
+            self._grid_stack.setCurrentIndex(1 if visible else 0)
+
+    def _set_unit_subtitle(self, text: str) -> None:
+        if hasattr(self, "_right_subheader"):
+            self._right_subheader.setText(text)
 
     # ---- 查重页 ---------------------------------------------------
 
@@ -552,11 +669,55 @@ class MainWindow(QMainWindow):
             "先建立哈希索引，再按 MD5 / 视频帧 / 感知哈希比对。"
             "查重结果会在完成后以列表打开，可逐对查看并处置。")
         self._add_nav_card_grid(layout, [
-            ("开始查重", "对当前选中的单元或全库执行查重（Ctrl+D）", self._on_start_dedup),
-            ("重扫视频人脸", "按定间隔多帧重新检测人脸，提升同演员线索准确度", self._on_rescan_faces),
+            ("开始查重", "对当前选中的单元或全库执行查重（Ctrl+D）", self._on_start_dedup, "scan"),
+            ("重扫视频人脸", "按定间隔多帧重新检测人脸，提升同演员线索准确度", self._on_rescan_faces, "face"),
         ])
+        self._dedup_stat_labels = self._add_stat_strip(layout, [
+            ("duplicate", "疑似重复"),
+            ("related", "疑似相关"),
+            ("face_only", "同演员线索"),
+            ("stale", "旧规则待重算"),
+        ])
+        self._refresh_dedup_stats()
         layout.addStretch(1)
         return page
+
+    def _add_stat_strip(self, layout, items) -> dict:
+        """一行指标卡（查重页用：结果为空时也不至于整页空荡）。"""
+        strip = QFrame()
+        strip.setObjectName("statStrip")
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+        labels = {}
+        for key, text in items:
+            card = QFrame()
+            card.setObjectName("statCard")
+            col = QVBoxLayout(card)
+            col.setContentsMargins(16, 12, 16, 12)
+            col.setSpacing(2)
+            value = QLabel("—")
+            value.setObjectName("statValue")
+            caption = QLabel(text)
+            caption.setObjectName("statLabel")
+            col.addWidget(value)
+            col.addWidget(caption)
+            row.addWidget(card, 1)
+            labels[key] = value
+        layout.addWidget(strip)
+        return labels
+
+    def _refresh_dedup_stats(self) -> None:
+        labels = getattr(self, "_dedup_stat_labels", None)
+        if not labels:
+            return
+        try:
+            with DatabaseManager.session() as session:
+                counts = q.count_dedup_results_by_level(session)
+            for key, label in labels.items():
+                label.setText(str(counts.get(key, 0)))
+        except Exception as e:  # noqa: BLE001 — 指标卡失败不应影响页面
+            logger.warning(f"加载查重统计失败: {e}")
 
     # ---- 工具页 ---------------------------------------------------
 
@@ -565,14 +726,14 @@ class MainWindow(QMainWindow):
             "工具",
             "媒体处理与维护类工具。设置项统一收在「设置」页，避免同一功能多个入口。")
         self._add_nav_card_grid(layout, [
-            ("HEIC 检查与转换", "扫描媒体库中的 HEIC 并批量转换为 JPG", self._on_heic_convert),
-            ("管理标签", "创建、编辑、删除标签并分配给文件", self._on_manage_tags),
-            ("已排除文件夹", "查看并恢复被用户或扫描排除的单元", self._on_manage_excluded),
-            ("修复媒体库路径", "换盘符后把失效绝对路径改到新位置（先备份数据库）", self._on_repair_paths),
-            ("SMB 共享", "设置局域网 SMB 共享，供手机/平板访问", self._on_open_smb),
-            ("重扫视频人脸", "按定间隔多帧重新检测视频人脸", self._on_rescan_faces),
-            ("重置数据库", "删除所有扫描数据并重新初始化（危险操作）", self._on_reset_db),
-            ("消息中心", "查看扫描、查重、HEIC 等任务产生的消息", self._on_open_messages),
+            ("HEIC 检查与转换", "扫描媒体库中的 HEIC 并批量转换为 JPG", self._on_heic_convert, "image"),
+            ("管理标签", "创建、编辑、删除标签并分配给文件", self._on_manage_tags, "tag"),
+            ("已排除文件夹", "查看并恢复被用户或扫描排除的单元", self._on_manage_excluded, "folder"),
+            ("修复媒体库路径", "换盘符后把失效绝对路径改到新位置（先备份数据库）", self._on_repair_paths, "path"),
+            ("SMB 共享", "设置局域网 SMB 共享，供手机/平板访问", self._on_open_smb, "network"),
+            ("重扫视频人脸", "按定间隔多帧重新检测视频人脸", self._on_rescan_faces, "face"),
+            ("重置数据库", "删除所有扫描数据并重新初始化（危险操作）", self._on_reset_db, "database"),
+            ("消息中心", "查看扫描、查重、HEIC 等任务产生的消息", self._on_open_messages, "message"),
         ])
         layout.addStretch(1)
         return page
@@ -584,14 +745,14 @@ class MainWindow(QMainWindow):
             "设置",
             "媒体库、存储、网络、播放与维护分区；同一功能只保留一个入口。")
         self._add_nav_card_grid(layout, [
-            ("打开完整设置", "媒体库、存储、缩略图、网络、文件监控、播放、转换", self._on_open_settings),
-            ("存储与数据位置", "数据根目录、数据库与缩略图缓存位置、迁移", lambda: self._open_settings_tab(1)),
-            ("缩略图与缓存", "缩略图尺寸、质量、缓存清理", lambda: self._open_settings_tab(2)),
-            ("网络与安全", "监听地址、端口与 PIN 访问", lambda: self._open_settings_tab(3)),
-            ("文件监控", "媒体库变化时自动刷新", lambda: self._open_settings_tab(4)),
-            ("播放与预览", "预览窗口与手势相关设置", lambda: self._open_settings_tab(5)),
-            ("转换与维护", "HEIC 转换质量、源文件处理与冲突策略", lambda: self._open_settings_tab(6)),
-            ("关于", "版本与项目说明", self._show_about),
+            ("打开完整设置", "媒体库、存储、缩略图、网络、文件监控、播放、转换", self._on_open_settings, "settings"),
+            ("存储与数据位置", "数据根目录、数据库与缩略图缓存位置、迁移", lambda: self._open_settings_tab(1), "database"),
+            ("缩略图与缓存", "缩略图尺寸、质量、缓存清理", lambda: self._open_settings_tab(2), "image"),
+            ("网络与安全", "监听地址、端口与 PIN 访问", lambda: self._open_settings_tab(3), "network"),
+            ("文件监控", "媒体库变化时自动刷新", lambda: self._open_settings_tab(4), "refresh"),
+            ("播放与预览", "预览窗口与手势相关设置", lambda: self._open_settings_tab(5), "play"),
+            ("转换与维护", "HEIC 转换质量、源文件处理与冲突策略", lambda: self._open_settings_tab(6), "tools"),
+            ("关于", "版本与项目说明", self._show_about, "message"),
         ])
         layout.addStretch(1)
         return page
@@ -604,10 +765,10 @@ class MainWindow(QMainWindow):
             return
         self._pages.setCurrentIndex(index)
         self._nav_rail.set_current(index, emit=False)
-        for action in getattr(self, "_unit_toolbar_actions", []):
-            action.setVisible(index == 1)
         if index == 0:
             self._reload_library_roots()
+        elif index == 2:
+            self._refresh_dedup_stats()
 
     def _open_settings_tab(self, index: int) -> None:
         from app.ui.dialogs.settings import SettingsDialog
@@ -826,7 +987,9 @@ class MainWindow(QMainWindow):
         self._current_unit_id = None
         self._accordion.reset()
         self._grid_view.load_unit(0)
-        self._right_header.setText("资源单元视图")
+        self._show_grid(False)
+        self._right_header.setText("资源单元")
+        self._set_unit_subtitle("从左侧选择一个资源单元")
         self._right_footer.setText("0 个项目 | 共 0 B")
         self._status_bar.set_status("媒体库路径已修复，建议重新扫描一次")
 
@@ -849,6 +1012,7 @@ class MainWindow(QMainWindow):
         # 加载文件和 UI 更新
         self._current_unit_id = unit_id
         self._grid_view.load_unit(unit_id)
+        self._show_grid(True)
         self._breadcrumb.show()
         self._tag_bar.reload_tags()
 
@@ -870,7 +1034,9 @@ class MainWindow(QMainWindow):
             with DatabaseManager.session() as session:
                 unit = q.get_unit_by_id(session, unit_id)
                 if unit:
-                    self._right_header.setText(f"资源单元: {unit.name}")
+                    self._right_header.setText(unit.name)
+                    self._set_unit_subtitle(
+                        f"{unit.file_count} 个项目 · {format_size(unit.total_size)}")
                     self._right_footer.setText(
                         f"{unit.file_count} 个项目 | 共 {format_size(unit.total_size)}"
                     )
@@ -948,6 +1114,7 @@ class MainWindow(QMainWindow):
         if uid is None:
             return
         self._grid_view.load_unit(uid, restore_scroll=True)
+        self._show_grid(True)
         self._load_tree_files(uid)
 
     # ============================================================
@@ -1151,6 +1318,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "排除失败", result.message)
             return
         self._grid_view.clear()
+        self._show_grid(False)
         self._breadcrumb.hide()
         self._current_unit_id = None
         self._accordion.reset()
@@ -1224,10 +1392,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "删除失败", exc.detail)
                 return
             self._grid_view.clear()
+            self._show_grid(False)
             self._current_unit_id = None
             self._accordion.reset()
             self._tree_view.refresh_model()
-            self._right_header.setText("资源单元视图")
+            self._right_header.setText("资源单元")
+            self._set_unit_subtitle("从左侧选择一个资源单元")
             self._right_footer.setText("0 个项目 | 共 0 B")
             self._status_bar.set_status("媒体库已删除")
         except Exception as e:
@@ -1332,6 +1502,7 @@ class MainWindow(QMainWindow):
             status += f", {face_only_count} 对同演员线索"
         self._status_bar.set_status(status)
         self._status_bar.hide_progress()
+        self._refresh_dedup_stats()
 
         if dup_count > 0:
             # 打开本轮全部重复结果的列表（与 Web 端「查重结果 → 详情处置」一致）
@@ -1538,6 +1709,7 @@ class MainWindow(QMainWindow):
 
         self._tree_view.refresh_model()
         self._grid_view.clear()
+        self._show_grid(False)
         self._current_unit_id = None
         self._tag_bar.clear_selection()
         self._tag_bar.hide()
@@ -1672,7 +1844,9 @@ class MainWindow(QMainWindow):
             self._accordion.reset()
             self._tree_view.refresh_model()
             self._grid_view.load_unit(0)  # 清空网格
-            self._right_header.setText("资源单元视图")
+            self._show_grid(False)
+            self._right_header.setText("资源单元")
+            self._set_unit_subtitle("从左侧选择一个资源单元")
             self._right_footer.setText("0 个项目 | 共 0 B")
             self._status_bar.set_status("数据库已重置，请重新添加媒体库并扫描")
             QMessageBox.information(self, "完成", "数据库已重置。\n请重新添加媒体库根目录并执行扫描。")
@@ -1740,7 +1914,7 @@ class MainWindow(QMainWindow):
     def _update_message_badge(self) -> None:
         from app.services.message_center import MessageCenter
         count = MessageCenter.get_unread_count()
-        self._msg_btn.setText(f"消息 ({count})" if count > 0 else "消息")
+        self._msg_btn.setText(f"消息 {count}" if count > 0 else "消息")
 
     # ============================================================
     # 搜索与筛选
@@ -1791,7 +1965,9 @@ class MainWindow(QMainWindow):
                     total_size += u.total_size or 0
             if unit_data:
                 self._grid_view.load_folder_cards(unit_data, self._config, reset_scroll=reset_scroll)
+                self._show_grid(True)
                 self._right_header.setText(f"文件夹 ({len(unit_data)} 个片段)")
+                self._set_unit_subtitle(f"{total_files} 个项目 · {format_size(total_size)}")
                 self._right_footer.setText(
                     f"{total_files} 个项目 | 共 {format_size(total_size)}"
                 )
@@ -2058,7 +2234,12 @@ class MainWindow(QMainWindow):
                 self.restoreGeometry(geo)
             sizes = store.value("window/splitter")
             if sizes:
-                self._splitter.setSizes([int(x) for x in sizes])
+                sizes = [int(x) for x in sizes]
+                # 左侧树有 300–480 的宽度约束；旧版本存下的 635 之类尺寸会让
+                # QSplitter 给左侧分配 635、实际只画 480，中间留出 155px 黑缝。
+                total = sum(sizes) or max(900, self.width() - 96)
+                left = min(480, max(360, sizes[0]))
+                self._splitter.setSizes([left, max(560, total - left)])
         except Exception as e:  # noqa: BLE001 — 布局恢复失败不应影响启动
             logger.warning(f"恢复窗口布局失败: {e}")
 

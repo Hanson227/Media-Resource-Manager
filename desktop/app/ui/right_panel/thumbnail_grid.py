@@ -418,9 +418,10 @@ class ThumbnailGridView(QListView):
         self.verticalScrollBar().setSingleStep(20)
 
         ts = config.thumbnail_max_size
-        spacing = config.grid_spacing
+        spacing = max(6, config.grid_spacing)
         self.setIconSize(QSize(ts, ts))
-        self.setGridSize(QSize(ts + spacing * 2 + 8, ts + 48 + spacing))
+        # 卡片 = 缩略图 + 7px 内边距 + 两行文字；gridSize 留出卡片间距。
+        self.setGridSize(QSize(ts + 28, ts + 62))
         self.setSpacing(spacing)
 
         self.doubleClicked.connect(self._on_double_clicked)

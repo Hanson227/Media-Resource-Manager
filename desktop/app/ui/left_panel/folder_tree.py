@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
-    Qt, QPointF, QAbstractItemModel, QModelIndex, Signal, Slot,
+    Qt, QSize, QPointF, QAbstractItemModel, QModelIndex, Signal, Slot,
 )
 from PySide6.QtGui import QPainter, QColor, QPolygonF
 from PySide6.QtWidgets import (
@@ -109,7 +109,7 @@ class FolderTreeModel(QAbstractItemModel):
                     units = units_by_root.get(root.id, [])
                     root_name = Path(root.path).name or root.path
                     star_count = sum(1 for u in units if u.is_starred)
-                    star_suffix = f" ⭐{star_count}" if star_count else ""
+                    star_suffix = f" ★{star_count}" if star_count else ""
                     root_node = TreeNode(
                         node_type="root",
                         node_id=root.id,
@@ -338,7 +338,7 @@ class FolderTreeModel(QAbstractItemModel):
                 suffix = ""
                 if node.node_type == "unit" and node.node_subtype != "file":
                     if node.is_starred:
-                        prefix = "⭐ "  # 星标作为前缀
+                        prefix = "★ "  # 星标作为前缀
                     if node.status == "merged":
                         suffix = " ▷"  # merged 标记保持后缀
                 return f"{prefix}{node.name}{suffix}"
@@ -496,22 +496,26 @@ class FolderTreeView(QTreeView):
         self.setModel(model)
         header = self.header()
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(model.COL_NAME, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(model.COL_SIZE, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(model.COL_DATE, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(model.COL_TAGS, QHeaderView.ResizeMode.Interactive)
-        header.setStretchLastSection(True)
+        header.setMinimumSectionSize(44)
+        # 名称吃掉剩余宽度，大小/日期/标签用固定窄列：否则 300px 宽的树里
+        # 200+150+100 三列直接溢出，日期和标签被裁掉（旧默认列宽问题）。
+        header.setSectionResizeMode(model.COL_NAME, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(model.COL_SIZE, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(model.COL_DATE, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(model.COL_TAGS, QHeaderView.ResizeMode.Fixed)
         # 默认列宽
-        header.resizeSection(model.COL_NAME, 200)
-        header.resizeSection(model.COL_SIZE, 150)
-        header.resizeSection(model.COL_DATE, 100)
-        header.resizeSection(model.COL_TAGS, 80)
+        header.resizeSection(model.COL_NAME, 160)
+        header.resizeSection(model.COL_SIZE, 80)
+        header.resizeSection(model.COL_DATE, 74)
+        header.resizeSection(model.COL_TAGS, 48)
         header.setSectionsMovable(True)
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
         self.setAnimated(True)
         self.setExpandsOnDoubleClick(False)
         self.setIndentation(20)
+        self.setUniformRowHeights(True)
+        self.setIconSize(QSize(18, 18))
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         # 自定义三角形展开/收起指示器
         self._branch_style = _BranchIndicatorStyle()
@@ -521,13 +525,30 @@ class FolderTreeView(QTreeView):
         self.selectionModel().selectionChanged.connect(self._on_selection_changed)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self.doubleClicked.connect(self._on_double_clicked)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt 命名
+        """窄树只保留「名称/大小」两列。
+
+        树宽 340–480 是常态；四列硬挤会把文件名截成「IMG_61…」，日期/标签
+        也只剩省略号。窄时隐藏日期/标签，名称列拿回宽度；拉宽后自动回来。
+        """
+        super().resizeEvent(event)
+        narrow = self.viewport().width() < 430
+        self.setColumnHidden(FolderTreeModel.COL_DATE, narrow)
+        self.setColumnHidden(FolderTreeModel.COL_TAGS, narrow)
         self.header().sectionClicked.connect(self._on_header_sort)
         logger.info("文件夹树视图初始化完成")
 
     def refresh_model(self) -> None:
-        """刷新模型并从数据库重新加载。"""
+        """刷新模型并从数据库重新加载。
+
+        只展开顶层媒体库根：expandAll() 会把每个单元的文件夹子节点也展开，
+        启动后整页变成文件列表，右侧详情反而没了位置。
+        """
         self._model.refresh()
-        self.expandAll()
+        model = self._model
+        for row in range(model.rowCount()):
+            self.expand(model.index(row, 0))
 
     def filter_by_name(self, keyword: str) -> None:
         """按名称过滤树节点（隐藏不匹配的单元）。"""

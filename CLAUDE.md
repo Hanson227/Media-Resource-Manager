@@ -141,6 +141,7 @@ desktop/app/
     scan_service.py      #   扫描落库编排（ScanWorker 与 /api/library/scan 共用唯一实现）
     path_remap_service.py      # 盘符变化后的路径改库（dry-run / 冲突检测 / meta 同步）
     data_relocation_service.py # 数据库备份、数据根迁移（copy/move）
+    transcode_service.py # Web 播放按需转码（imageio-ffmpeg，缓存 MP4 + 进度元数据）
   utils/
     constants.py         #   All enums (MediaType, UnitStatus, MatchType, etc.)
     media_types.py       #   Extension-to-type mapping, is_media_file() helper

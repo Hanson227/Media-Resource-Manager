@@ -25,7 +25,7 @@ from config import AppConfig
 from app.utils import buildinfo
 from app.utils import capabilities
 from app.utils import paths as app_paths
-from app.api.routes import files, units, messages, events, tags, heic
+from app.api.routes import files, units, messages, events, tags, heic, transcode
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +265,8 @@ def create_app(config: AppConfig, runtime: Optional[dict] = None) -> FastAPI:
     app.include_router(events.router)
     app.include_router(tags.router)
     app.include_router(heic.router)
+    # 按需转码：与档位无关总是注册（没有 ffmpeg 时端点仍在，available=false）
+    app.include_router(transcode.router)
     from app.api.routes import library, settings as settings_routes
     app.include_router(library.router)
     app.include_router(settings_routes.router)

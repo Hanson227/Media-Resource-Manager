@@ -1204,6 +1204,51 @@ POST /api/settings/clear-thumbnail-cache
 
 清空当前缩略图缓存（下次浏览按需重新生成）。
 
+### 3.10 视频按需转码（Web 播放）
+
+浏览器不能直接播放的容器/编码（mkv / avi / flv / ts / wmv / rmvb / rm 等）会按需转成
+MP4（H.264 + AAC，`faststart`），结果按「文件 + 大小 + mtime」缓存，供 Web 端 `<video>`
+播放。转码依赖 `imageio-ffmpeg` 自带的 ffmpeg，不要求系统安装 ffmpeg。
+
+```
+GET /api/transcode/status?file_id=123
+```
+
+```json
+{
+  "available": true,
+  "status": "running",
+  "progress": 42,
+  "message": "正在转码 42%",
+  "stream_url": "/api/transcode/stream?file_id=123"
+}
+```
+
+`status`：`none` / `running` / `done` / `failed` / `canceled`。
+`progress` 为 0–100 的整数。
+
+```
+POST /api/transcode/start          {"file_id": 123, "force": false}
+```
+
+启动转码。`force=true` 会丢弃已有缓存重转。响应：
+
+```json
+{"success": true, "task_id": "transcode-3", "status": "running", "message": "已开始转码"}
+```
+
+状态码：`404` 文件不存在、`400` 非视频、`409` 已有扫描/查重/转码任务在跑、
+`503` 服务端没有可用的 ffmpeg。
+
+```
+POST /api/transcode/cancel         {"file_id": 123}
+GET  /api/transcode/stream?file_id=123
+GET  /api/transcode/active
+```
+
+`stream` 返回 `video/mp4`，支持 `Range`（可拖动进度条）；缓存未完成时返回 `409`。
+`active` 返回当前所有转码任务（供管理端/调试使用）。
+
 ---
 
 ## 4. 缩略图与媒体文件
