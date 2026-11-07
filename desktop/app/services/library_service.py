@@ -26,7 +26,7 @@ class LibraryError(Exception):
         self.detail = detail
 
 
-def remove_root_records(root_id: int, *, config=None) -> str:
+def remove_root_records(root_id: int) -> str:
     """删除媒体库根的库内记录（级联删单元/文件）并清理其缩略图缓存。
 
     **不动磁盘文件。** 调用方负责并发互斥（API 用 dedup gate，GUI 用

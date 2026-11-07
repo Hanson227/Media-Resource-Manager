@@ -407,7 +407,7 @@ QCheckBox, QRadioButton {
 }
 QCheckBox::indicator, QRadioButton::indicator {
     width: 16px; height: 16px;
-    border: 1px solid #45475a;
+    border: 1px solid #363648;
     border-radius: 3px;
     background: #16161d;
 }
@@ -420,7 +420,7 @@ QRadioButton::indicator { border-radius: 8px; }
 QSpinBox, QDoubleSpinBox, QLineEdit, QPlainTextEdit, QTextEdit {
     background: #16161d;
     color: #f0f0f4;
-    border: 1px solid #45475a;
+    border: 1px solid #363648;
     border-radius: 6px;
     padding: 4px 8px;
     selection-background-color: #6366f1;
@@ -482,7 +482,7 @@ QDialogButtonBox QPushButton, QDialog QPushButton {
 QToolTip {
     background: #252530;
     color: #f0f0f4;
-    border: 1px solid #45475a;
+    border: 1px solid #363648;
     padding: 4px 8px;
 }
 
@@ -557,7 +557,7 @@ QCommandLinkButton#navCard:hover {
     border-color: #6366f1;
     background: #252530;
 }
-QCommandLinkButton#navCard:pressed { background: #313244; }
+QCommandLinkButton#navCard:pressed { background: #363648; }
 QListWidget#libraryRoots {
     background: #16161d;
     border: 1px solid #252530;

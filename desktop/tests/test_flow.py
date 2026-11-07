@@ -8030,6 +8030,29 @@ def test_p0_regressions():
     finally:
         shutil.rmtree(tmp_thumb, ignore_errors=True)
 
+    # ---------- Review: GUI 扫描必须与查重/删除根共用互斥门 ----------
+    from app.services.dedup_gate import (
+        acquire_dedup_gate, is_dedup_busy, release_dedup_gate,
+    )
+    tmp_gate = Path(tempfile.mkdtemp(prefix="p0_gate_"))
+    try:
+        gate_worker = ScanWorker(AppConfig(), tmp_gate)
+        gate_errors: list[str] = []
+        gate_finished: list[object] = []
+        gate_worker.error_occurred.connect(gate_errors.append)
+        gate_worker.finished.connect(gate_finished.append)
+        check("Review 前置：互斥门可用", acquire_dedup_gate() is True)
+        try:
+            gate_worker.run()
+        finally:
+            release_dedup_gate()
+        check("Review 扫描被互斥门拦下",
+              len(gate_errors) == 1 and "正在运行" in gate_errors[0])
+        check("Review 扫描被拦下时不发 finished", not gate_finished)
+        check("Review 扫描结束释放互斥门", is_dedup_busy() is False)
+    finally:
+        shutil.rmtree(tmp_gate, ignore_errors=True)
+
     # ---------- Review: 删除文件后 content_modified_at 必须回退 ----------
     tmp_stat = Path(tempfile.mkdtemp(prefix="p0_stats_"))
     try:

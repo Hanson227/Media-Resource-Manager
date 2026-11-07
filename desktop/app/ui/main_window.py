@@ -174,7 +174,6 @@ class MainWindow(QMainWindow):
         self._connect_signals()
 
         # 初始加载文件夹树 + 自动清理已删除的路径
-        # 初始加载文件夹树 + 自动清理已删除的路径
         self._tree_view.refresh_model()
         QTimer.singleShot(100, self._cleanup_missing_paths)
         self.filesystem_changed.connect(self._on_filesystem_changed)
@@ -1690,11 +1689,7 @@ class MainWindow(QMainWindow):
         """
         old_pin = self._config.web_pin
         self._config = new_config
-        try:
-            from app.services.cleanup_service import configure_thumbnail_cache_dir
-            configure_thumbnail_cache_dir(new_config.thumbnail_cache_dir)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"缩略图缓存目录注入失败: {e}")
+        self._apply_thumbnail_cache_dir(new_config)
         if new_config.web_pin != old_pin:
             from app.api.server import _revoke_all_auth_tokens
             _revoke_all_auth_tokens()
@@ -1703,6 +1698,14 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001 — 界面刷新失败不应影响 API
             logger.warning(f"外部配置同步后刷新树失败: {e}")
         self._status_bar.set_status("设置已从 Web 端同步")
+
+    def _apply_thumbnail_cache_dir(self, cfg: AppConfig) -> None:
+        """把缩略图缓存目录注入清理服务（模块级全局变量，必须显式同步）。"""
+        try:
+            from app.services.cleanup_service import configure_thumbnail_cache_dir
+            configure_thumbnail_cache_dir(cfg.thumbnail_cache_dir)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"缩略图缓存目录注入失败: {e}")
 
     @Slot(object)
     def _on_settings_saved(self, new_config: AppConfig) -> None:
@@ -1722,11 +1725,7 @@ class MainWindow(QMainWindow):
             _app.state.config = new_config
         # 缩略图缓存目录可能被改到别的盘：清理服务用的是模块级全局变量，
         # 不重新注入的话"删文件/失效缓存"仍会打向旧目录（留下孤儿缓存）。
-        try:
-            from app.services.cleanup_service import configure_thumbnail_cache_dir
-            configure_thumbnail_cache_dir(new_config.thumbnail_cache_dir)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"缩略图缓存目录注入失败: {e}")
+        self._apply_thumbnail_cache_dir(new_config)
         # 改密后旧令牌必须立即失效（API.md 承诺；否则旧会话在 PIN 变更后仍可访问）
         if pin_changed:
             _revoke_all_auth_tokens()

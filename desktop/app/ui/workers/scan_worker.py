@@ -22,6 +22,7 @@ from PySide6.QtCore import QThread, Signal, Slot
 
 from config import AppConfig
 from app.core.scanner import MediaScanner, ScanResult
+from app.services.dedup_gate import acquire_dedup_gate, release_dedup_gate
 from app.services.scan_service import (
     PATH_LOOKUP_CHUNK_SIZE, RootRemapRequired, load_existing_files,
     save_scan_result,
@@ -59,7 +60,22 @@ class ScanWorker(QThread):
         self._cancelled = False
 
     def run(self) -> None:
-        """执行扫描任务（在后台线程中运行）。"""
+        """执行扫描任务（在后台线程中运行）。
+
+        扫描会写数据库、更新单元统计并生成缩略图，必须与查重、路径改库、
+        HEIC 转换等重任务互斥；占用与 HTTP `/api/library/scan` 相同的
+        进程内闸门，避免 GUI 扫描与 Web 侧删除根/改库并发写库。
+        """
+        if not acquire_dedup_gate():
+            self.error_occurred.emit("已有扫描/查重/转换任务正在运行，请稍后再试。")
+            return
+        try:
+            self._run_scan()
+        finally:
+            release_dedup_gate()
+
+    def _run_scan(self) -> None:
+        """扫描主体（调用方负责持有互斥闸门）。"""
         try:
             scanner = MediaScanner(
                 extensions=self._config.media_extensions,
