@@ -5,11 +5,36 @@
 这里只保留五个一级入口，具体功能放到各页面卡片 / 设置分区中。
 """
 
-from PySide6.QtCore import Qt, QSize, Signal
-from PySide6.QtGui import QIcon
+from math import cos, pi, sin
+
+from PySide6.QtCore import Qt, QSize, QPointF, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup, QFrame, QLabel, QToolButton, QVBoxLayout,
 )
+
+
+def gear_icon(color: str = "#c0c0cc", size: int = 22) -> QIcon:
+    """画一个简洁的齿轮图标（Qt 标准图标里没有设置/齿轮，用信息圈不贴切）。"""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(QPen(QColor(color), 2, Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap))
+    painter.translate(size / 2, size / 2)
+    radius = size * 0.24
+    painter.drawEllipse(QPointF(0, 0), radius, radius)
+    for i in range(8):
+        angle = i * pi / 4
+        inner = radius + size * 0.06
+        outer = size * 0.42
+        painter.drawLine(
+            QPointF(cos(angle) * inner, sin(angle) * inner),
+            QPointF(cos(angle) * outer, sin(angle) * outer),
+        )
+    painter.end()
+    return QIcon(pixmap)
 
 
 class NavigationRail(QFrame):

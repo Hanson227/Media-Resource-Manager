@@ -135,6 +135,8 @@ desktop/app/
     dedup_service.py     #   查重编排（GUI 线程与 HTTP API 共用唯一实现）
     index_service.py     #   索引编排（哈希/视频帧/人脸；HashWorker 与 API 共用）
     file_ops.py          #   删除语义（移至回收站 / 仅移出媒体库 / 永久删除），API 侧唯一实现
+    unit_service.py      #   单元写操作（合并/拆分/标记/封面/排除/删除/改名），GUI 与 API 共用
+    library_service.py   #   媒体库根写操作（移除根：先清缓存再删记录），GUI 与 API 共用
     merge_service.py     #   查重合并执行（移动/回收/收尾三阶段，先磁盘后库，幂等可重试）
     scan_service.py      #   扫描落库编排（ScanWorker 与 /api/library/scan 共用唯一实现）
     path_remap_service.py      # 盘符变化后的路径改库（dry-run / 冲突检测 / meta 同步）

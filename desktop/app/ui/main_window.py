@@ -28,7 +28,7 @@ from config import AppConfig
 from app.db.engine import DatabaseManager
 from app.db import queries as q
 from app.ui.widgets.accordion_manager import AccordionManager
-from app.ui.widgets.navigation_rail import NavigationRail
+from app.ui.widgets.navigation_rail import NavigationRail, gear_icon
 from app.ui.widgets.status_bar import MainStatusBar
 from app.ui.left_panel.folder_tree import FolderTreeModel, FolderTreeView
 from app.ui.right_panel.thumbnail_grid import (
@@ -292,7 +292,7 @@ class MainWindow(QMainWindow):
         self._search_input.setPlaceholderText("搜索文件名...")
         self._search_input.setMaximumWidth(180)
         self._search_input.textChanged.connect(self._on_search)
-        toolbar.addWidget(self._search_input)
+        self._search_action = toolbar.addWidget(self._search_input)
 
         self._filter_combo = QComboBox()
         self._filter_combo.addItem("全部", None)
@@ -300,9 +300,9 @@ class MainWindow(QMainWindow):
         self._filter_combo.addItem("仅视频", MediaType.VIDEO.value)
         self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
         self._filter_combo.setMaximumWidth(80)
-        toolbar.addWidget(self._filter_combo)
+        self._filter_action = toolbar.addWidget(self._filter_combo)
 
-        toolbar.addSeparator()
+        self._toolbar_sep_action = toolbar.addSeparator()
 
         self._msg_btn = QPushButton("消息")
         self._msg_btn.setIcon(_std(QStyle.SP_MessageBoxInformation))
@@ -315,19 +315,21 @@ class MainWindow(QMainWindow):
         self._sort_name_btn.setCheckable(True)
         self._sort_name_btn.setToolTip("按文件名排序")
         self._sort_name_btn.clicked.connect(lambda: self._on_sort("name"))
-        toolbar.addWidget(self._sort_name_btn)
+        self._sort_name_action = toolbar.addWidget(self._sort_name_btn)
 
         self._sort_size_btn = QPushButton("大小↑")
         self._sort_size_btn.setCheckable(True)
         self._sort_size_btn.setToolTip("按文件大小排序")
         self._sort_size_btn.clicked.connect(lambda: self._on_sort("size"))
-        toolbar.addWidget(self._sort_size_btn)
+        self._sort_size_action = toolbar.addWidget(self._sort_size_btn)
 
-        # 搜索/类型筛选/排序只对「单元」页的文件网格有意义，其他页面隐藏，
-        # 避免用户看到一排点了没反应的控件。
-        self._unit_toolbar_widgets = [
-            self._search_input, self._filter_combo,
-            self._sort_name_btn, self._sort_size_btn,
+        # 搜索/类型筛选/排序只对「单元」页的文件网格有意义，其他页面隐藏。
+        # 注意必须隐藏 QAction 而非 widget：QToolBar 会在布局激活时把
+        # addWidget 的控件重新显示，直接 widget.setVisible(False) 会被覆盖。
+        self._unit_toolbar_actions = [
+            self._search_action, self._filter_action,
+            self._toolbar_sep_action,
+            self._sort_name_action, self._sort_size_action,
         ]
 
     # ============================================================
@@ -355,7 +357,7 @@ class MainWindow(QMainWindow):
             "工具", std(QStyle.StandardPixmap.SP_FileDialogListView),
             "HEIC、标签、路径与维护工具")
         self._nav_rail.add_item(
-            "设置", std(QStyle.StandardPixmap.SP_FileDialogInfoView),
+            "设置", gear_icon(),
             "应用设置与关于")
         self._nav_rail.page_changed.connect(self._switch_page)
 
@@ -440,12 +442,15 @@ class MainWindow(QMainWindow):
 
         self._library_roots = QListWidget()
         self._library_roots.setObjectName("libraryRoots")
+        self._library_roots.setMinimumHeight(160)
+        self._library_roots.setMaximumHeight(300)
         self._library_roots.itemDoubleClicked.connect(self._on_library_root_activated)
-        layout.addWidget(self._library_roots, 1)
+        layout.addWidget(self._library_roots)
 
         hint = QLabel("双击根目录开始扫描；盘符变化后请到「工具 → 修复媒体库路径」。")
         hint.setObjectName("pageHint")
         layout.addWidget(hint)
+        layout.addStretch(1)
         return page
 
     def _reload_library_roots(self) -> None:
@@ -465,6 +470,9 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, root.id)
             item.setData(Qt.ItemDataRole.UserRole + 1, root.path)
             self._library_roots.addItem(item)
+        # 列表高度随条目数收缩，避免只有一两个根目录时留下大片空白。
+        rows = max(1, len(roots))
+        self._library_roots.setFixedHeight(min(300, 44 * rows + 10))
 
     def _on_library_root_activated(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.ItemDataRole.UserRole + 1)
@@ -575,14 +583,15 @@ class MainWindow(QMainWindow):
     def _build_settings_page(self):
         page, layout = self._page_shell(
             "设置",
-            "外观、播放、存储、网络与维护分区。后续会把现有 7 个设置 Tab 按用途重排。")
+            "媒体库、存储、网络、播放与维护分区；同一功能只保留一个入口。")
         self._add_nav_card_grid(layout, [
-            ("打开完整设置", "数据库、数据位置、缩略图、API、文件监控、预览、HEIC", self._on_open_settings),
-            ("数据位置", "数据根目录、数据库与缩略图缓存位置、迁移", lambda: self._open_settings_tab(1)),
+            ("打开完整设置", "媒体库、存储、缩略图、网络、文件监控、播放、转换", self._on_open_settings),
+            ("存储与数据位置", "数据根目录、数据库与缩略图缓存位置、迁移", lambda: self._open_settings_tab(1)),
             ("缩略图与缓存", "缩略图尺寸、质量、缓存清理", lambda: self._open_settings_tab(2)),
-            ("API 服务", "监听地址、端口与 PIN 访问", lambda: self._open_settings_tab(3)),
+            ("网络与安全", "监听地址、端口与 PIN 访问", lambda: self._open_settings_tab(3)),
             ("文件监控", "媒体库变化时自动刷新", lambda: self._open_settings_tab(4)),
-            ("预览与播放", "预览窗口与手势相关设置", lambda: self._open_settings_tab(5)),
+            ("播放与预览", "预览窗口与手势相关设置", lambda: self._open_settings_tab(5)),
+            ("转换与维护", "HEIC 转换质量、源文件处理与冲突策略", lambda: self._open_settings_tab(6)),
             ("关于", "版本与项目说明", self._show_about),
         ])
         layout.addStretch(1)
@@ -596,8 +605,8 @@ class MainWindow(QMainWindow):
             return
         self._pages.setCurrentIndex(index)
         self._nav_rail.set_current(index, emit=False)
-        for widget in getattr(self, "_unit_toolbar_widgets", []):
-            widget.setVisible(index == 1)
+        for action in getattr(self, "_unit_toolbar_actions", []):
+            action.setVisible(index == 1)
         if index == 0:
             self._reload_library_roots()
 
@@ -1205,14 +1214,19 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            from app.services.dedup_gate import is_dedup_busy
+            if is_dedup_busy():
+                QMessageBox.warning(self, "暂时无法删除", "扫描/查重/改库正在进行，请稍后再试。")
+                return
+            from app.services.library_service import LibraryError, remove_root_records
+            try:
+                remove_root_records(root_id)
+            except LibraryError as exc:
+                QMessageBox.warning(self, "删除失败", exc.detail)
+                return
             self._grid_view.clear()
             self._current_unit_id = None
             self._accordion.reset()
-            # 先清理缓存，再删数据库
-            from app.services.cleanup_service import CleanupService
-            CleanupService.remove_root_thumbnails(root_id)
-            with DatabaseManager.session() as session:
-                q.remove_library_root(session, root_id)
             self._tree_view.refresh_model()
             self._right_header.setText("资源单元视图")
             self._right_footer.setText("0 个项目 | 共 0 B")
@@ -1697,13 +1711,9 @@ class MainWindow(QMainWindow):
         # 持久化配置到磁盘（否则退出后密码等设置丢失）
         try:
             from app.utils import paths as app_paths
-            config_file = app_paths.default_config_path()
-            # profile 只在用户显式写过时才落盘：否则桌面端存一次设置就会把
-            # "profile: full" 固化进共享配置，便携版入口再也不会默认走轻量档。
-            new_config.to_file(
-                config_file,
-                omit=() if app_paths.read_explicit_profile(config_file)
-                else ("profile",))
+            error = app_paths.save_config_preserving_profile(new_config)
+            if error:
+                logger.warning(f"配置保存到文件失败: {error}")
         except Exception as e:
             logger.warning(f"配置保存到文件失败: {e}")
         # 同步更新 API 服务器的配置（否则 PIN 等设置不生效）

@@ -92,7 +92,13 @@ class SettingsDialog(QDialog):
         db_path_layout.addWidget(db_browse)
         db_form.addRow("数据库路径:", db_path_layout)
 
-        tabs.addTab(db_tab, "数据库")
+        db_note = QLabel(
+            "媒体库根目录的添加、扫描与移除在左侧「媒体库」页完成；\n"
+            "这里只控制数据库文件本身的位置。")
+        db_note.setWordWrap(True)
+        db_form.addRow(db_note)
+
+        tabs.addTab(db_tab, "媒体库")
 
         # ==== 数据位置选项卡（便携版核心：数据可以放在移动盘上）====
         data_tab = QWidget()
@@ -130,7 +136,7 @@ class SettingsDialog(QDialog):
         data_note.setWordWrap(True)
         data_form.addRow(data_note)
 
-        tabs.addTab(data_tab, "数据位置")
+        tabs.addTab(data_tab, "存储与数据位置")
 
         # ==== 缩略图选项卡 ====
         thumb_tab = QWidget()
@@ -168,7 +174,7 @@ class SettingsDialog(QDialog):
         self._web_pin_edit.setPlaceholderText("留空表示不启用密码")
         api_form.addRow("Web 访问密码 (4位):", self._web_pin_edit)
 
-        tabs.addTab(api_tab, "API 服务")
+        tabs.addTab(api_tab, "网络与安全")
 
         # ==== 文件监控选项卡 ====
         watcher_tab = QWidget()
@@ -194,7 +200,7 @@ class SettingsDialog(QDialog):
         self._seek_percent_spin.setSuffix(" %")
         preview_form.addRow("方向键跳转比例:", self._seek_percent_spin)
 
-        tabs.addTab(preview_tab, "预览")
+        tabs.addTab(preview_tab, "播放与预览")
 
         # ==== HEIC 选项卡 ====
         heic_tab = QWidget()
@@ -228,7 +234,7 @@ class SettingsDialog(QDialog):
         self._heic_reindex_check = QCheckBox("转换后立即重算哈希与人脸")
         heic_form.addRow(self._heic_reindex_check)
 
-        tabs.addTab(heic_tab, "HEIC")
+        tabs.addTab(heic_tab, "转换与维护")
 
         layout.addWidget(tabs)
 
@@ -276,19 +282,9 @@ class SettingsDialog(QDialog):
     def _refresh_cache_stat(self, cache_dir: str) -> None:
         """显示缩略图缓存目录的占用（让用户知道搬过去要多少空间）。"""
         try:
-            from app.utils.file_helpers import format_size
+            from app.utils.file_helpers import format_size, thumbnail_cache_stats
 
-            directory = Path(cache_dir)
-            files = 0
-            total = 0
-            if directory.is_dir():
-                for pattern in ("*_thumb.jpg", "*_thumb.jpg.meta"):
-                    for entry in directory.glob(pattern):
-                        try:
-                            total += entry.stat().st_size
-                            files += 1
-                        except OSError:
-                            continue
+            files, total = thumbnail_cache_stats(cache_dir)
             self._cache_stat_label.setText(f"{files} 个文件 · {format_size(total)}")
         except Exception:  # noqa: BLE001 — 只是展示信息
             self._cache_stat_label.setText("—")

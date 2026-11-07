@@ -21,12 +21,11 @@ from app.services.dedup_gate import acquire_dedup_gate, is_dedup_busy, release_d
 from app.utils import net as net_utils
 from app.utils import capabilities
 from app.utils import paths as app_paths
+from app.utils.file_helpers import thumbnail_cache_stats
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["设置"])
-
-THUMB_PATTERNS = ("*_thumb.jpg", "*_thumb.jpg.meta")
 
 
 def _cfg(request: Request):
@@ -64,19 +63,8 @@ def _writable_config_path(request: Request) -> Optional[Path]:
 
 
 def _cache_stats(cache_dir) -> tuple:
-    """缩略图缓存目录的文件数与字节数。"""
-    cache_dir = Path(cache_dir) if cache_dir else None
-    files = 0
-    total = 0
-    if cache_dir and cache_dir.is_dir():
-        for pattern in THUMB_PATTERNS:
-            for entry in cache_dir.glob(pattern):
-                try:
-                    total += entry.stat().st_size
-                    files += 1
-                except OSError:
-                    continue
-    return files, total
+    """缩略图缓存目录的文件数与字节数（唯一实现在 file_helpers）。"""
+    return thumbnail_cache_stats(cache_dir)
 
 
 def _persist_config(config, config_path: Path) -> str:
@@ -86,13 +74,7 @@ def _persist_config(config, config_path: Path) -> str:
     决定的运行属性，不该被一次"改缩略图目录"的操作顺手固化下来 ——
     否则用便携版入口跑一次，共享的 config.json 就永久变成轻量档了。
     """
-    omit = () if app_paths.read_explicit_profile(config_path) else ("profile",)
-    try:
-        config.to_file(config_path, omit=omit)
-        return ""
-    except OSError as e:
-        logger.warning(f"配置写入失败: {e}")
-        return f"配置写入失败（只读介质？）: {e}"
+    return app_paths.save_config_preserving_profile(config, config_path)
 
 
 def _apply_runtime_config(request: Request, config) -> None:

@@ -106,3 +106,34 @@ def is_hidden_dir(dirname: str) -> bool:
         True 如果目录以 '.' 开头。
     """
     return dirname.startswith('.')
+
+
+# 缩略图缓存条目 = 图片本体 + .meta 旁车文件；jpg/png 两种格式都要统计。
+# 这是缓存占用统计的唯一来源（API 与桌面设置对话框共用）。
+THUMBNAIL_CACHE_PATTERNS = (
+    "*_thumb.jpg", "*_thumb.jpg.meta",
+    "*_thumb.png", "*_thumb.png.meta",
+)
+
+
+def thumbnail_cache_stats(cache_dir) -> tuple:
+    """统计缩略图缓存目录的文件数与总字节数。
+
+    参数:
+        cache_dir: 缓存目录（None/不存在时返回 0）。
+
+    返回:
+        (files, bytes) 二元组。
+    """
+    directory = Path(cache_dir) if cache_dir else None
+    files = 0
+    total = 0
+    if directory and directory.is_dir():
+        for pattern in THUMBNAIL_CACHE_PATTERNS:
+            for entry in directory.glob(pattern):
+                try:
+                    total += entry.stat().st_size
+                    files += 1
+                except OSError:
+                    continue
+    return files, total

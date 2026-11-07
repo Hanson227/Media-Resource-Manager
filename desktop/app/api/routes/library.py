@@ -211,25 +211,14 @@ def remove_root(root_id: int, purge_records: bool = Query(
                     "或先处理该根下的资源单元。"),
         )
 
-    with DatabaseManager.session() as session:
-        root = q.get_root_by_id(session, root_id)
-        if root is None:
-            raise HTTPException(status_code=404, detail=f"媒体库不存在: {root_id}")
-        path = root.path
-
     # 与扫描/改库/查重互斥：移除根会级联删单元，跑到一半被并发写会留下孤儿缓存。
     if not acquire_dedup_gate():
         raise HTTPException(status_code=409, detail="扫描/查重/改库正在进行，请稍后再试")
     try:
-        with DatabaseManager.session() as session:
-            q.remove_library_root(session, root_id)
-        try:
-            from app.services.cleanup_service import CleanupService
-            CleanupService.remove_root_thumbnails(root_id)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"移除根后清理缩略图失败 root_id={root_id}: {e}")
-    except HTTPException:
-        raise
+        from app.services.library_service import LibraryError, remove_root_records
+        path = remove_root_records(root_id)
+    except LibraryError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     except Exception as e:  # noqa: BLE001
         logger.error(f"移除媒体库失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="内部服务器错误")

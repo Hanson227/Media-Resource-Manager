@@ -8112,6 +8112,47 @@ def test_api_unit_management_endpoints():
         client.post(f"/api/units/{uid}/rename", json={"name": old_name})
 
 
+def test_library_service_remove_root(temp_root: Path):
+    """Phase 4: 移除媒体库根必须「先清缓存、再删库」，GUI/API 共用实现。"""
+    section("测试 43: 移除媒体库根统一实现")
+    from app.db.engine import DatabaseManager
+    from app.db import queries as q
+    from app.services import cleanup_service
+    from app.services.cleanup_service import CleanupService, configure_thumbnail_cache_dir
+    from app.services.library_service import remove_root_records
+
+    root_dir = temp_root / "lib_service_root"
+    root_dir.mkdir(parents=True, exist_ok=True)
+    unit_id, file_ids, paths = _make_temp_unit(root_dir, "u1", ["a.jpg"])
+    image_path = paths[0]
+    fid = file_ids[0]
+
+    cache_dir = temp_root / "lib_service_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    thumb = cache_dir / f"{fid}_thumb.jpg"
+    meta = cache_dir / f"{fid}_thumb.jpg.meta"
+    thumb.write_bytes(b"jpg")
+    meta.write_text("{}", encoding="utf-8")
+
+    old_cache = cleanup_service._configured_cache_dir
+    try:
+        configure_thumbnail_cache_dir(str(cache_dir))
+        with DatabaseManager.session() as session:
+            root = next(r for r in q.get_all_roots(session) if r.path == str(root_dir))
+            root_id = root.id
+        removed_path = remove_root_records(root_id)
+        check("返回被删根的路径", removed_path == str(root_dir))
+        with DatabaseManager.session() as session:
+            check("根记录已删除", q.get_root_by_id(session, root_id) is None)
+            check("单元记录已级联删除", q.get_unit_by_id(session, unit_id) is None)
+            check("文件记录已级联删除", q.get_file_by_id(session, fid) is None)
+        check("缩略图缓存已清（jpg）", not thumb.exists())
+        check("缩略图缓存已清（meta）", not meta.exists())
+        check("磁盘媒体文件保留", image_path.exists())
+    finally:
+        configure_thumbnail_cache_dir(old_cache)
+
+
 def test_desktop_navigation_rail():
     """Phase 1: 桌面一级导航（媒体库/单元/查重/工具/设置）。"""
     section("测试 42: 桌面一级导航 rail")
@@ -8307,6 +8348,7 @@ def main():
         test_api_features_and_library_endpoints()
         test_api_unit_management_endpoints()
         test_desktop_navigation_rail()
+        test_library_service_remove_root(temp_root)
         test_p0_regressions()
 
     finally:

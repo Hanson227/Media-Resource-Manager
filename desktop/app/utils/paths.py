@@ -129,6 +129,25 @@ def read_explicit_profile(config_path: Path) -> Optional[str]:
     return value if value in ("lite", "full") else None
 
 
+def save_config_preserving_profile(config, config_path: Optional[Path] = None) -> str:
+    """把配置写回 config.json，保留「profile 是否显式写过」的语义。
+
+    **不凭空写 `profile`**：档位是入口/命令行决定的运行属性，不该被一次
+    "改缩略图目录"的操作顺手固化 —— 否则便携版入口跑一次，共享的 config.json
+    就永久变成轻量档了。GUI 设置保存与 HTTP API 设置保存共用本函数。
+
+    返回错误说明（空串表示成功）。
+    """
+    path = Path(config_path) if config_path else default_config_path()
+    omit = () if read_explicit_profile(path) else ("profile",)
+    try:
+        config.to_file(path, omit=omit)
+        return ""
+    except OSError as e:
+        logger.warning(f"配置写入失败: {e}")
+        return f"配置写入失败（只读介质？）: {e}"
+
+
 def log_dir(fallback: Optional[Path] = None) -> Path:
     """日志目录：冻结态优先应用目录下的 logs/，不可写时退回 fallback/临时目录。"""
     candidates = [app_dir() / "logs", fallback, Path(os.environ.get("TEMP", ".")) / "media-manager"]
