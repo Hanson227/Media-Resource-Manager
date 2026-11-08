@@ -1884,6 +1884,9 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_settings_saved(self, new_config: AppConfig) -> None:
         pin_changed = new_config.web_pin != self._config.web_pin
+        # 数据位置/库换了：引擎已由切换方切好，这里要把界面从新库重新读一遍，
+        # 否则树和网格还挂着旧库的单元 id（点开就是 404）。
+        old_db = self._config.db_path
         self._config = new_config
         # 持久化配置到磁盘（否则退出后密码等设置丢失）
         try:
@@ -1909,7 +1912,20 @@ class MainWindow(QMainWindow):
         ip = _get_local_ip()
         self._status_bar._ip_label.setText(f"📋 {ip}:{new_config.api_port}")
         self._status_bar.set_api_status(self._config.api_enabled)
-        self._status_bar.set_status("设置已保存")
+        if str(old_db) != str(new_config.db_path):
+            self._tree_view.refresh_model()
+            self._current_unit_id = None
+            self._accordion.reset()
+            self._grid_view.load_unit(0)
+            self._show_grid(False)
+            self._right_header.setText("资源单元")
+            self._set_unit_subtitle("从左侧选择一个资源单元")
+            self._right_footer.setText("0 个项目 | 共 0 B")
+            self._refresh_dedup_stats()
+            logger.info(f"数据位置已切换，界面已重新加载: {new_config.db_path}")
+            self._status_bar.set_status("数据位置已切换")
+        else:
+            self._status_bar.set_status("设置已保存")
 
     def _update_message_badge(self) -> None:
         from app.services.message_center import MessageCenter

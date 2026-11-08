@@ -247,7 +247,10 @@ The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "reso
   桌面档同理不能"没插盘就退出"：启动提示框是「重试 / 选择数据位置… / 退出」，
   点选择即在软件内接管盘上已有数据根或新建空根（`_startup_data_prompt` →
   `dialogs/data_location.py`）；`_ensure_database_ready` 的 prompt 返回
-  `True/False/AppConfig` 三态，老的三参 prompt 仍兼容。
+  `True/False/AppConfig` 三态，老的三参 prompt 仍兼容；命令行 override 必须
+  让位给用户选择（否则改完又指回旧路径，死循环）。**运行期换数据根必须同时换引擎**
+  （`DatabaseManager.switch_to` + `init_db`/`migrate_db`，失败回滚引擎与磁盘配置）：
+  只改 `config` 不换引擎，扫描/删除会继续写旧库、缩略图却落新目录 → 孤儿缓存。
   → `docs/portable-lite.md`
 - **同一件事只写一份实现** — 单元写操作在 `app/services/unit_service.py`，
   扫描在 `scan_service`、查重在 `dedup_service`、删除语义在 `file_ops`：

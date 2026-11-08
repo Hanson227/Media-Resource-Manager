@@ -241,12 +241,14 @@ class DataLocationDialog(QDialog):
             db_path=str(result["db_path"]),
             thumbnail_cache_dir=str(result["thumbnail_cache_dir"]),
         )
-        if not self._persist(new_config):
+        if not self._apply_location(new_config):
             return None
         self.result_message = result.get("message") or f"已接管 {path}"
         return new_config
 
     def _create(self, path: str) -> Optional[AppConfig]:
+        from app.db.engine import DatabaseManager
+
         if QMessageBox.question(
             self, "新建数据根",
             f"这个目录是空的（或没有数据）：\n{path}\n\n"
@@ -255,22 +257,83 @@ class DataLocationDialog(QDialog):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         ) != QMessageBox.Yes:
             return None
-        result = relocate_svc.create_data_root(self._config, path)
+        # 引擎已经初始化 = 程序正在运行（设置页里切换）：此时只登记位置，
+        # 空库留给下次启动建 —— 否则 dispose 会把正在用的库关掉，界面瞬间变空。
+        result = relocate_svc.create_data_root(
+            self._config, path,
+            init_database=not DatabaseManager.is_initialized())
         if not result.get("ok"):
             QMessageBox.critical(self, "新建失败", result.get("message") or "未知错误")
             return None
         marker = result.get("marker") or {}
-        root = Path(result["target_root"])
         new_config = self._config.with_updates(
-            data_root=str(root),
+            data_root=str(result["target_root"]),
             data_root_id=str(marker.get("data_root_id") or ""),
-            db_path=str(root / "data" / "media_manager.db"),
-            thumbnail_cache_dir=str(root / "data" / ".thumbnails"),
+            db_path=str(result["db_path"]),
+            thumbnail_cache_dir=str(result["thumbnail_cache_dir"]),
         )
-        if not self._persist(new_config):
+        if not self._apply_location(new_config):
             return None
         self.result_message = f"已在 {path} 新建数据根（空库）"
         return new_config
+
+    def _apply_location(self, new_config: AppConfig) -> bool:
+        """切引擎 → 落盘；任何一步失败都回到原状态（不留半套配置）。"""
+        from app.db.engine import DatabaseManager
+        previous_db = DatabaseManager.current_db_path()
+        if not self._switch_runtime_database(new_config):
+            return False
+        if not self._persist(new_config):
+            # 配置没写成功就别把引擎留在新库，否则这次会话写进新库、重启又回旧库
+            self._restore_engine(previous_db)
+            return False
+        return True
+
+    @staticmethod
+    def _restore_engine(previous_db) -> None:
+        from app.db.engine import DatabaseManager
+        from app.db.migrations import migrate_db
+        if previous_db is None or not DatabaseManager.is_initialized():
+            return
+        try:
+            DatabaseManager.switch_to(Path(previous_db))
+            migrate_db()
+        except Exception as e:  # noqa: BLE001 — 回滚失败只能记日志，界面已不可用
+            logger.error(f"回滚原数据库失败: {e}", exc_info=True)
+
+    def _switch_runtime_database(self, new_config: AppConfig) -> bool:
+        """运行期把数据库引擎切到新库；不切就会「配置指向新库、写入落旧库」。
+
+        为什么不只改配置等重启：缩略图缓存目录会立刻跟到新根，
+        `_apply_thumbnail_cache_dir` 也换掉清理服务的目标；此时若引擎还是旧库，
+        扫描/删除写进旧库、缓存写进新目录，等于造出一批孤儿缓存。
+        做法与 `/api/settings/data-root` 完全一致（先切库再初始化，失败自动回滚）。
+        """
+        from app.db.engine import DatabaseManager
+
+        if not DatabaseManager.is_initialized():
+            return True          # 启动期（库还没开）：下次启动自然用新位置
+        from app.db.migrations import init_db, migrate_db
+
+        previous_db = DatabaseManager.current_db_path()
+        target_db = Path(new_config.db_path)
+        try:
+            DatabaseManager.switch_to(target_db)
+            init_db(target_db)   # 新建的空根在这里建表；接管的库只做迁移
+            migrate_db()
+            logger.info(f"数据库引擎已切到: {target_db}")
+            return True
+        except Exception as e:  # noqa: BLE001 — 切库失败不能把界面留在坏状态
+            logger.error(f"切换到新数据根的数据库失败: {e}", exc_info=True)
+            # switch_to 只在"引擎建不起来"时自动回滚；这里是建表/迁移阶段失败，
+            # 引擎可能已经指向一个打不开的库，必须手动切回来，否则界面全挂。
+            self._restore_engine(previous_db)
+            # 这里还没落盘配置（_apply_location 先切库后写配置），只需回滚引擎
+            QMessageBox.critical(
+                self, "切换数据库失败",
+                f"新数据位置的数据库打不开：{e}\n\n"
+                "已保留原来的数据位置。")
+            return False
 
     def _persist(self, new_config: AppConfig) -> bool:
         error = app_paths.save_config_preserving_profile(new_config)

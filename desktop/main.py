@@ -87,6 +87,20 @@ def _ask_startup(prompt, title, text, informative, config, resolved):
     return prompt(title, text, informative)
 
 
+def _adopt_choice(decision, config, data_root_override, resolve, apply_resolved):
+    """用户选了新数据位置时，按新配置重解析。
+
+    返回 (config, resolved, override)；override 必须清空 —— 命令行/环境变量
+    指定的数据根优先级最高，不清掉会一直把我们带回那个"不存在"的旧路径，
+    变成选了也白选（死循环）。
+    """
+    logger.info(f"用户选择了新的数据位置: {decision.data_root}")
+    config = decision
+    resolved = resolve(config, explicit_data_root=None)
+    config = apply_resolved(config, resolved)
+    return config, resolved, None
+
+
 def _ensure_database_ready(config, resolved, data_root_override, prompt,
                            resolve, apply_resolved,
                            init=init_db, migrate=migrate_db):
@@ -114,10 +128,8 @@ def _ensure_database_ready(config, resolved, data_root_override, prompt,
                 config, resolved,
             )
             if isinstance(decision, AppConfig):
-                logger.info(f"用户选择了新的数据位置: {decision.data_root}")
-                config = decision
-                resolved = resolve(config, explicit_data_root=data_root_override)
-                config = apply_resolved(config, resolved)
+                config, resolved, data_root_override = _adopt_choice(
+                    decision, config, data_root_override, resolve, apply_resolved)
                 continue
             if not decision:
                 logger.info("用户选择退出（数据盘未连接）")
@@ -142,40 +154,14 @@ def _ensure_database_ready(config, resolved, data_root_override, prompt,
                 config, resolved,
             )
             if isinstance(decision, AppConfig):
-                logger.info(f"用户选择了新的数据位置: {decision.data_root}")
-                config = decision
-                resolved = resolve(config, explicit_data_root=data_root_override)
-                config = apply_resolved(config, resolved)
+                config, resolved, data_root_override = _adopt_choice(
+                    decision, config, data_root_override, resolve, apply_resolved)
                 continue
             if not decision:
                 logger.info("用户选择退出（数据库初始化失败）")
                 return False, config, resolved
             resolved = resolve(config, explicit_data_root=data_root_override)
             config = apply_resolved(config, resolved)
-
-
-def _startup_retry_dialog(title: str, text: str, informative: str) -> bool:
-    """启动期阻塞错误的可重试对话框。
-
-    返回 True=用户选择重试，False=退出。桌面端以前在数据盘没插时直接
-    `sys.exit(1)`（窗口都不出现，用户以为程序坏了）；这里至少给出原因与
-    “插入数据盘后重试”的动作，而不是静默闪退。
-    """
-    from PySide6.QtWidgets import QMessageBox
-
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    box = QMessageBox()
-    box.setIcon(QMessageBox.Critical)
-    box.setWindowTitle(title)
-    box.setText(text)
-    box.setInformativeText(informative)
-    retry = box.addButton("重试", QMessageBox.AcceptRole)
-    box.addButton("退出", QMessageBox.RejectRole)
-    box.setDefaultButton(retry)
-    box.exec()
-    return box.clickedButton() is retry
 
 
 def _startup_data_prompt(title: str, text: str, informative: str,
@@ -190,9 +176,8 @@ def _startup_data_prompt(title: str, text: str, informative: str,
     """
     from PySide6.QtWidgets import QMessageBox
 
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
+    if QApplication.instance() is None:
+        QApplication(sys.argv)
     while True:
         box = QMessageBox()
         box.setIcon(QMessageBox.Critical)

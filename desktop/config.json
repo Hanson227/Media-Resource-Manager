@@ -86,5 +86,6 @@
   "api_host": "0.0.0.0",
   "api_port": 19527,
   "preview_seek_percent": 5,
+  "transcode_max_height": 1080,
   "smb_share_name_prefix": "Media_"
 }

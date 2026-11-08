@@ -1046,6 +1046,23 @@ def test_volume_scan_and_gate():
         check("新建后有空库", Path(created["db_path"]).is_file())
         again = relocation.create_data_root(cfg2, fresh)
         check("已有数据的目录拒绝新建（不覆盖）", again["ok"] is False)
+
+        # 运行期（桌面设置页「切换…」）新建：只登记 marker，绝不 dispose 活引擎。
+        # 否则界面正在用的库被关掉，下一次查询直接 RuntimeError / 变空库。
+        live_root = tmp / "live" / "MediaData"
+        live_root.mkdir(parents=True)
+        relocation.create_data_root(cfg2, fresh)          # 保证引擎此时是活的
+        engine_before = DatabaseManager.current_db_path()
+        created_live = relocation.create_data_root(
+            cfg2, live_root, init_database=False)
+        check("运行期新建数据根成功", created_live["ok"] is True)
+        check("运行期新建：marker 已写", (live_root / app_paths.MARKER_FILENAME).is_file())
+        check("运行期新建：空库延后到下次启动",
+              not Path(created_live["db_path"]).is_file()
+              and created_live["steps"]["database"].get("deferred") is True)
+        check("运行期新建：没有动正在使用的数据库引擎",
+              DatabaseManager.current_db_path() == engine_before
+              and DatabaseManager.is_initialized() is True)
     finally:
         DatabaseManager.dispose()
         configure_pin_dir(None)

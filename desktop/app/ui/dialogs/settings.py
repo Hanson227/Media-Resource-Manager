@@ -383,13 +383,16 @@ class SettingsDialog(QDialog):
         self._config = chosen
         self._data_root_label.setText(
             str(chosen.data_root) if chosen.data_root else "（未设置：使用应用目录）")
+        # 数据库路径跟着数据根走：不同步的话下次保存会把旧 db_path 写回去，
+        # 变成「data_root 新、db_path 旧」的错配配置。
+        self._db_path_edit.setText(str(chosen.db_path))
         self._thumb_dir_edit.setText(str(chosen.thumbnail_cache_dir))
         self._refresh_cache_stat(str(chosen.thumbnail_cache_dir))
         self.data_root_migrated.emit(chosen)
         QMessageBox.information(
             self, "数据位置已切换",
             f"新的数据位置:\n  {chosen.data_root}\n\n"
-            "配置已保存。当前窗口仍在用旧数据库，**重启程序**后生效。")
+            "配置已保存，数据库已切换到新位置并重新加载。")
 
     _PHASE_LABELS = {
         "database": "正在复制数据库…",

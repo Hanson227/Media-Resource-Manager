@@ -1110,6 +1110,7 @@ const PreviewPage = {
       if (this.mediaType === 'video') {
         this.controlsHidden = !this.controlsHidden;
         this.speedMenuOpen = false;
+        this.qualityMenuOpen = false;
         // 显示且正在播放才启动自动隐藏；隐藏即取消计时（报告 §1 优化2）
         if (!this.controlsHidden && this.playing) this.startHideTimer();
         else if (this.controlsHidden && this.hideTimer) { clearTimeout(this.hideTimer); this.hideTimer = null; }
@@ -1268,7 +1269,10 @@ const PreviewPage = {
       this.transcodeMessage = '';
       if (this.mediaType !== 'video') return;
       const unsupported = UNSUPPORTED_VIDEO_EXTS.includes(this.videoExt);
-      if (unsupported || forceTranscode) {
+      const target = Number(this.transcodeQuality) || 0;
+      // 原生容器 + 原画：直接播原文件（不要为了切画质把 mp4 白转一遍）；
+      // 只有容器不支持，或用户明确要更低画质时才走转码。
+      if (unsupported || (forceTranscode && target > 0)) {
         // 先让 video 标签挂着（可能立刻报错），转码层盖住错误并显示进度。
         this.transcoding = true;
         this.loading = true;
@@ -1308,9 +1312,9 @@ const PreviewPage = {
     async setQuality(value) {
       this.qualityMenuOpen = false;
       const next = Number(value) || 0;
-      const active = this.activeQuality;
-      const current = active === null || active === undefined ? null : active;
-      if (current === next) return;
+      // 必须和「当前实际在播的画质」比（原文件 = 0），不能只比 activeQuality：
+      // 直接播原文件时 activeQuality 为 null，点「原画」会被误判成换了画质。
+      if (this.qualityCurrent === next) return;
       this.transcodeQuality = next;
       // 切画质必须重新取流：换 key 后缓存命中会立刻切换，未命中则起转码
       this.playing = false;
@@ -1896,7 +1900,9 @@ const PreviewPage = {
       if (this.hideTimer) clearTimeout(this.hideTimer);
       this.controlsHidden = false;
       if (this.playing) {
-        this.hideTimer = setTimeout(() => { this.controlsHidden = true; this.speedMenuOpen = false; }, delay || 4500);
+        this.hideTimer = setTimeout(() => {
+        this.controlsHidden = true; this.speedMenuOpen = false; this.qualityMenuOpen = false;
+      }, delay || 4500);
       }
     },
     keepControlsVisible() {

@@ -656,12 +656,16 @@ def adopt_data_root(config, target_root, *, marker_name: str = "") -> dict:
     }
 
 
-def create_data_root(config, target_root) -> dict:
+def create_data_root(config, target_root, *, init_database: bool = True) -> dict:
     """在一个空目录里**新建**数据根（marker + 空数据库 + 缩略图目录）。
 
     用途：便携版没插盘、且用户确实想在本机从头开始。旧行为是“静默回退到应用
     目录建空库”，不可见也不可逆；这里把它变成用户显式点一下、写在指定位置
     的动作（向导里已二次确认）。已有数据的目录**拒绝**执行（防止误覆盖）。
+
+    `init_database=False`：只写 marker + 建目录，**不动数据库引擎**。
+    桌面端运行中（GUI 设置页「切换…」）必须这样调 —— `DatabaseManager.dispose()`
+    会把正在用的引擎关掉，界面随即查不到任何数据；空库留给下次启动建。
     """
     from app.db.migrations import init_db, migrate_db
     from app.db.engine import DatabaseManager
@@ -674,6 +678,7 @@ def create_data_root(config, target_root) -> dict:
         return {"ok": False, "target_root": str(root), "mode": "create",
                 "steps": {}, "marker": None,
                 "message": f"目标目录不可写: {root}"}
+    root.mkdir(parents=True, exist_ok=True)
     info = inspect_data_root(root, marker_name=marker_name)
     if info["is_data_root"] or info["db_exists"]:
         return {"ok": False, "target_root": str(root), "mode": "create",
@@ -688,11 +693,18 @@ def create_data_root(config, target_root) -> dict:
         steps["marker"] = {"path": str(_paths.marker_path(root, marker_name))}
         db_path = root / "data" / "media_manager.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        DatabaseManager.dispose()
-        init_db(db_path)
-        migrate_db()
-        steps["database"] = {"ok": True, "dst": str(db_path),
-                             "message": "已创建空库"}
+        if not init_database:
+            # 运行期切换：绝不 dispose 正在用的引擎（否则界面瞬间变空库）。
+            # 空库交给下次启动的 init_db 建。
+            steps["database"] = {"ok": True, "dst": str(db_path),
+                                 "deferred": True,
+                                 "message": "空库将在下次启动时创建"}
+        else:
+            DatabaseManager.dispose()
+            init_db(db_path)
+            migrate_db()
+            steps["database"] = {"ok": True, "dst": str(db_path),
+                                 "message": "已创建空库"}
     except Exception as e:  # noqa: BLE001 — 与 migrate 一致：异常转 ok=False
         logger.error(f"新建数据根失败: {e}", exc_info=True)
         return {"ok": False, "target_root": str(root), "mode": "create",

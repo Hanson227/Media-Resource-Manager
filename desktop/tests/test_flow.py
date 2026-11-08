@@ -7969,6 +7969,26 @@ def test_p0_regressions():
           desktop_main._needs_data_location_context(_prompt) is False
           and desktop_main._needs_data_location_context(_prompt_pick) is True)
 
+    # 命令行/环境变量指定过数据根时必须让位给"用户刚选的位置"：
+    # 否则 override 优先级最高，会把用户一直带回那个不存在的旧路径（死循环）。
+    override_kwargs = []
+
+    def _resolve_after_pick_override(cfg, explicit_data_root=None):
+        override_kwargs.append(explicit_data_root)
+        return types.SimpleNamespace(
+            data_root=Path("X:/picked_root"), expected_data_root=None)
+
+    ok4, cfg4, _ = desktop_main._ensure_database_ready(
+        types.SimpleNamespace(db_path=Path("X:/nope.db")),
+        resolved_missing, Path("X:/old_cli_root"), _prompt_pick,
+        _resolve_after_pick_override,
+        lambda cfg, resolved: cfg,
+        init=lambda db: None, migrate=lambda: None,
+    )
+    check("F2b 选了新位置后不再用命令行 override 覆盖用户选择",
+          ok4 is True and cfg4 is picked_cfg
+          and override_kwargs and override_kwargs[0] is None)
+
     # 数据位置对话框：候选行摘要 + 没有候选时 Ok 不可点
     from app.utils import paths as app_paths_mod
     from app.ui.dialogs import data_location as data_location_dlg
@@ -8009,6 +8029,40 @@ def test_p0_regressions():
               empty_dlg._buttons.button(empty_dlg._buttons.StandardButton.Ok)
               .isEnabled() is False)
         empty_dlg.deleteLater()
+
+        # 运行期切换：配置指向新库时引擎必须真的切过去。
+        # 不切 = 缩略图缓存跟到新目录、数据库写入还落旧库 → 孤儿缓存。
+        from app.db.engine import DatabaseManager as _DM
+        from app.db.migrations import init_db as _init_db, migrate_db as _migrate_db
+        original_db = _DM.current_db_path()
+        other_root = tmp_dl / "runtime_switch"
+        (other_root / "data").mkdir(parents=True)
+        other_db = other_root / "data" / "media_manager.db"
+        _init_db(other_db)
+        _migrate_db()
+        switch_cfg = AppConfig().with_updates(
+            data_root=str(other_root), db_path=str(other_db),
+            thumbnail_cache_dir=str(other_root / "data" / ".thumbnails"))
+        switch_dlg = data_location_dlg.DataLocationDialog(
+            AppConfig().with_updates(data_root=str(marked)), None)
+        switched = switch_dlg._switch_runtime_database(switch_cfg)
+        check("F2b 运行期切换数据库成功", switched is True)
+        check("F2b 引擎确实指到了新库",
+              str(_DM.current_db_path()) == str(other_db))
+        # 真不可用：父路径是个文件，mkdir/打开库必然失败
+        blocker = other_root / "blocked"
+        blocker.write_text("x", encoding="utf-8")
+        bad_cfg = AppConfig().with_updates(
+            data_root=str(other_root), db_path=str(blocker / "x.db"),
+            thumbnail_cache_dir=str(other_root / "nope"))
+        check("F2b 目标库不可用时切换失败",
+              switch_dlg._switch_runtime_database(bad_cfg) is False)
+        check("F2b 切换失败后引擎仍在原来那个库",
+              str(_DM.current_db_path()) == str(other_db))
+        switch_dlg.deleteLater()
+        # 收尾：切回测试主库，后续用例继续用原库
+        if original_db is not None:
+            _DM.switch_to(Path(original_db))
     finally:
         shutil.rmtree(tmp_dl, ignore_errors=True)
 
