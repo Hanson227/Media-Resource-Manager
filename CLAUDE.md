@@ -256,6 +256,11 @@ The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "reso
   扫描在 `scan_service`、查重在 `dedup_service`、删除语义在 `file_ops`：
   GUI 槽函数与 API 路由都调服务层，**不准**在 `main_window` 里再写一遍
   （两份实现必然漂移，Web 想用只能照抄）。→ `docs/web-frontend.md`
+- **底层函数不准弹模态框** — `QMessageBox` 只能在"用户点了按钮"的那一层弹；
+  服务层/对话框的底层方法（切库、写配置、校验路径）改为返回失败原因，
+  由调用方决定怎么提示。测试与后台线程调底层方法时没有事件循环处理模态框，
+  一个 `QMessageBox.critical` 会让整轮 `test_flow` 永久挂住（表现为超时、无输出）。
+  → `docs/pitfalls.md`
 
 ## Database
 
