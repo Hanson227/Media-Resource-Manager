@@ -8338,6 +8338,15 @@ def test_desktop_navigation_rail():
 
     window = MainWindow(AppConfig())
     try:
+        window.show()
+        window.layout().activate()
+        # QToolButton 默认水平策略 Fixed，宽度只按 sizeHint → 各入口宽度不一、
+        # 图标/文字各自靠左（用户实测"完全不对齐"）。这里直接量宽度兜住回归。
+        widths = [b.width() for b in window._nav_rail._buttons]
+        check("主窗口导航入口同宽对齐",
+              len(set(widths)) == 1 and widths[0] >= 70)
+        check("导航底部消息按钮与入口同宽",
+              window._msg_btn.width() == widths[0])
         check("主窗口导航栏 5 个入口", window._nav_rail.count() == 5)
         check("主窗口页面栈 5 页", window._pages.count() == 5)
         check("默认落在单元页", window._pages.currentIndex() == 1)
