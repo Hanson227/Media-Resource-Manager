@@ -8059,6 +8059,10 @@ def test_p0_regressions():
               switch_dlg._switch_runtime_database(bad_cfg) is False)
         check("F2b 切换失败后引擎仍在原来那个库",
               str(_DM.current_db_path()) == str(other_db))
+        # 失败原因要能被调用方展示：以前底层直接弹 QMessageBox，测试里没有
+        # 事件循环处理模态框，整个用例会永久挂住（2026-11-09 实测 200s 超时）。
+        check("F2b 切库失败给出可展示的原因",
+              "打不开" in switch_dlg._last_switch_error)
         switch_dlg.deleteLater()
         # 收尾：切回测试主库，后续用例继续用原库
         if original_db is not None:

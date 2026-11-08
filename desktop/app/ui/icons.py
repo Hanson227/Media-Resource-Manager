@@ -187,14 +187,26 @@ def _draw(name: str, painter: QPainter, color: str, scale: float, size: int) -> 
         painter.drawEllipse(QRectF(10 * p, 10 * p, 4 * p, 4 * p))
 
 
-def icon(name: str, color: str = theme.SUBTEXT_1, size: int = 22) -> QIcon:
-    """返回一枚自绘线性图标。"""
+def _render(name: str, color: str, size: int) -> QPixmap:
     pm, painter, scale = _new_pixmap(size)
     try:
         _draw(name, painter, color, scale, size)
     finally:
         painter.end()
-    return QIcon(pm)
+    return pm
+
+
+def icon(name: str, color: str = theme.SUBTEXT_1, size: int = 22) -> QIcon:
+    """返回一枚自绘线性图标。
+
+    除了常规灰色版本，还会挂一张「选中态」pixmap（QIcon.State.On）。
+    QToolButton 勾选后自动取这张——否则选中的入口图标仍是灰的，
+    压在琥珀底上看不清。
+    """
+    result = QIcon(_render(name, color, size))
+    if color != theme.ACCENT:
+        result.addPixmap(_render(name, theme.ACCENT, size), QIcon.Mode.Normal, QIcon.State.On)
+    return result
 
 
 def gear_icon(color: str = theme.SUBTEXT_1, size: int = 22) -> QIcon:

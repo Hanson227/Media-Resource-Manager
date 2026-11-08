@@ -70,6 +70,9 @@ class DataLocationDialog(QDialog):
         self._chosen: str = ""
         self.result_config: Optional[AppConfig] = None
         self.result_message: str = ""
+        # 切库失败的原因由这里传给调用方，不要在这一层弹模态框：
+        # 测试/后台线程调用时没有事件循环，一个 QMessageBox 会把整个进程挂住。
+        self._last_switch_error: str = ""
 
         self.setWindowTitle(title)
         self.resize(760, 460)
@@ -282,6 +285,9 @@ class DataLocationDialog(QDialog):
         from app.db.engine import DatabaseManager
         previous_db = DatabaseManager.current_db_path()
         if not self._switch_runtime_database(new_config):
+            QMessageBox.critical(
+                self, "切换数据库失败",
+                self._last_switch_error or "未知错误")
             return False
         if not self._persist(new_config):
             # 配置没写成功就别把引擎留在新库，否则这次会话写进新库、重启又回旧库
@@ -328,9 +334,9 @@ class DataLocationDialog(QDialog):
             # switch_to 只在"引擎建不起来"时自动回滚；这里是建表/迁移阶段失败，
             # 引擎可能已经指向一个打不开的库，必须手动切回来，否则界面全挂。
             self._restore_engine(previous_db)
-            # 这里还没落盘配置（_apply_location 先切库后写配置），只需回滚引擎
-            QMessageBox.critical(
-                self, "切换数据库失败",
+            # 这里还没落盘配置（_apply_location 先切库后写配置），只需回滚引擎。
+            # 提示由 _apply_location 统一弹，避免底层被测试/后台线程调用时挂住。
+            self._last_switch_error = (
                 f"新数据位置的数据库打不开：{e}\n\n"
                 "已保留原来的数据位置。")
             return False

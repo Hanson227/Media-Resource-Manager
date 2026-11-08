@@ -382,8 +382,8 @@ QLabel#navBrand {
 }
 QLabel#navTagline {
     color: #5A6470;
-    font-size: 8px;
-    letter-spacing: 1.5px;
+    font-size: 7px;
+    letter-spacing: 0.8px;
     padding-top: 1px;
 }
 QToolButton#navButton {
@@ -400,9 +400,10 @@ QToolButton#navButton:hover {
     color: #ECE8E1;
 }
 QToolButton#navButton:checked {
-    background-color: rgba(217, 164, 65, 0.12);
+    /* 琥珀 12% 叠在 #0B0D10 上；透明度写成 0-255 整数（Qt QSS 不认 0-1 小数） */
+    background-color: rgba(217, 164, 65, 30);
     border-left: 2px solid #D9A441;
-    color: #D9A441;
+    color: #E8B65E;
     font-weight: 600;
 }
 QToolButton#railFooterButton {

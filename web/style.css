@@ -1563,9 +1563,13 @@ body {
 .units-search { z-index: 30; background: var(--bg-primary); }
 .units-search ~ .root-group .root-header { top: 56px; z-index: 20; }
 
-/* 窄屏单列：两列在 <420px 会挤到看不见标题 */
+/* 窄屏（手机竖屏）：保持两列（用户实测两列正好），只收紧间距；
+   以前这里改成单列，等于把手机上唯一的浏览密度砍掉一半。 */
 @media (max-width: 419px) {
-    .unit-grid, .file-grid { grid-template-columns: 1fr; }
+    .unit-grid { gap: var(--space-2); }
+    .unit-card .card-title { font-size: 13px; }
+    /* 两列时副标题（文件数·大小·日期）放不下会折行，缩小一号更整齐 */
+    .unit-card .card-sub { font-size: 11px; }
 }
 
 /* 浏览器不支持的容器提前提示（不是错误，不挡播放） */
