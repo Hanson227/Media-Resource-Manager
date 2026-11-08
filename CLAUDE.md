@@ -244,6 +244,10 @@ The scanner (`desktop/app/core/scanner.py`) walks bottom-up: a folder is a "reso
   `blocked_no_root` 启动：**不 init_db**，数据端点一律 409（白名单只有 settings/auth/
   features/health/browse/volumes），前端强制进 `#/setup` 向导；用户接管后热切库
   并立即解除闸门。盘符变化只做"建议 + 一键改库"，**绝不自动改库**。
+  桌面档同理不能"没插盘就退出"：启动提示框是「重试 / 选择数据位置… / 退出」，
+  点选择即在软件内接管盘上已有数据根或新建空根（`_startup_data_prompt` →
+  `dialogs/data_location.py`）；`_ensure_database_ready` 的 prompt 返回
+  `True/False/AppConfig` 三态，老的三参 prompt 仍兼容。
   → `docs/portable-lite.md`
 - **同一件事只写一份实现** — 单元写操作在 `app/services/unit_service.py`，
   扫描在 `scan_service`、查重在 `dedup_service`、删除语义在 `file_ops`：

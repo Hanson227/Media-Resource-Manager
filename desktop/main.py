@@ -12,6 +12,7 @@
 
 import os
 import sys
+import inspect
 import logging
 from pathlib import Path
 
@@ -62,25 +63,63 @@ from app.db.migrations import init_db, migrate_db
 from app.api.server import APIServer
 
 
+def _needs_data_location_context(prompt) -> bool:
+    """prompt 是否接受 (config, resolved) 上下文（新签名）。
+
+    启动期提示需要把当前配置交给「选择数据位置」对话框；但老测试与其它调用
+    方传的是 3 参可调用对象，按签名探测而不是靠 TypeError 猜。
+    """
+    try:
+        sig = inspect.signature(prompt)
+    except (TypeError, ValueError):
+        return False
+    params = [
+        p for p in sig.parameters.values()
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(params) >= 5
+
+
+def _ask_startup(prompt, title, text, informative, config, resolved):
+    """调用启动期提示，兼容 3 参与 5 参两种签名。"""
+    if _needs_data_location_context(prompt):
+        return prompt(title, text, informative, config, resolved)
+    return prompt(title, text, informative)
+
+
 def _ensure_database_ready(config, resolved, data_root_override, prompt,
                            resolve, apply_resolved,
                            init=init_db, migrate=migrate_db):
-    """确保数据库可用；数据盘没插时允许重试而不是闪退。
+    """确保数据库可用；数据盘没插时允许重试/换数据位置，而不是闪退。
 
     抽成纯函数（prompt/resolve/init 都可注入）便于测试：
     返回 (ok, config, resolved)。
+
+    `prompt` 的返回值三态：
+      True / 其它真值 → 重试（重新解析数据根）；
+      False / None    → 退出；
+      AppConfig 实例  → 用户选了新的数据位置，用它继续（不再退出）。
     """
     while True:
         if resolved.data_root is None:
             logger.error(
                 f"未找到数据盘上的数据根（期望: {resolved.expected_data_root}）；"
                 "不会在本机新建空库，避免误以为数据丢失")
-            if not prompt(
+            decision = _ask_startup(
+                prompt,
                 "数据盘未连接",
                 "没有找到媒体数据所在的数据目录。",
                 "请插入/连接数据盘，或确认盘符后点「重试」。\n"
-                "程序不会在本地新建空库，以免你误以为数据丢失。",
-            ):
+                "也可以点「选择数据位置…」在本机另选/新建一个数据根，直接进入软件。",
+                config, resolved,
+            )
+            if isinstance(decision, AppConfig):
+                logger.info(f"用户选择了新的数据位置: {decision.data_root}")
+                config = decision
+                resolved = resolve(config, explicit_data_root=data_root_override)
+                config = apply_resolved(config, resolved)
+                continue
+            if not decision:
                 logger.info("用户选择退出（数据盘未连接）")
                 return False, config, resolved
             resolved = resolve(config, explicit_data_root=data_root_override)
@@ -94,11 +133,21 @@ def _ensure_database_ready(config, resolved, data_root_override, prompt,
             return True, config, resolved
         except Exception as e:
             logger.error(f"数据库初始化失败: {e}", exc_info=True)
-            if not prompt(
+            decision = _ask_startup(
+                prompt,
                 "数据库无法打开",
                 f"无法打开数据库：{e}",
-                "请检查数据盘是否已连接、文件是否被其它程序占用，然后点「重试」。",
-            ):
+                "请检查数据盘是否已连接、文件是否被其它程序占用，然后点「重试」。\n"
+                "也可以点「选择数据位置…」换一个数据根。",
+                config, resolved,
+            )
+            if isinstance(decision, AppConfig):
+                logger.info(f"用户选择了新的数据位置: {decision.data_root}")
+                config = decision
+                resolved = resolve(config, explicit_data_root=data_root_override)
+                config = apply_resolved(config, resolved)
+                continue
+            if not decision:
                 logger.info("用户选择退出（数据库初始化失败）")
                 return False, config, resolved
             resolved = resolve(config, explicit_data_root=data_root_override)
@@ -127,6 +176,48 @@ def _startup_retry_dialog(title: str, text: str, informative: str) -> bool:
     box.setDefaultButton(retry)
     box.exec()
     return box.clickedButton() is retry
+
+
+def _startup_data_prompt(title: str, text: str, informative: str,
+                         config=None, resolved=None):
+    """启动期阻塞错误的三选一：重试 / 选择数据位置 / 退出。
+
+    返回 True=重试，False=退出，AppConfig=用这个新配置继续。
+
+    为什么要有「选择数据位置」：数据放在移动硬盘上，拔盘后旧版只有
+    「重试 / 退出」——用户进不了软件，也就进不了设置去改数据位置（死锁）。
+    现在可以直接在这里接管盘上已有的数据根，或在别的目录新建一个。
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    while True:
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Critical)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setInformativeText(informative)
+        retry = box.addButton("重试", QMessageBox.AcceptRole)
+        pick = box.addButton("选择数据位置…", QMessageBox.ActionRole)
+        box.addButton("退出", QMessageBox.RejectRole)
+        box.setDefaultButton(pick)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is retry:
+            return True
+        if clicked is pick:
+            from app.ui.dialogs.data_location import choose_data_location
+
+            chosen = choose_data_location(
+                config, resolved, None,
+                title="选择数据位置",
+                message=text + "\n\n" + informative)
+            if chosen is not None:
+                return chosen
+            continue        # 取消选择 → 回到同一个提示框，不退出
+        return False
 
 
 # 日志配置 —— 指定 UTF-8 编码的 StreamHandler
@@ -244,7 +335,7 @@ def main() -> None:
     # ============================================================
     ok, config, resolved = _ensure_database_ready(
         config, resolved, data_root_override,
-        prompt=_startup_retry_dialog,
+        prompt=_startup_data_prompt,
         resolve=app_paths.resolve_paths,
         apply_resolved=app_paths.apply_resolved_paths,
     )

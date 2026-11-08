@@ -7933,6 +7933,85 @@ def test_p0_regressions():
     check("F2 建库失败重试仍失败时返回 False", ok2 is False)
     check("F2 建库失败会重试而不是首次失败就退出", len(init_calls) == 2)
 
+    # ---------- F2b: 启动期可直接「选择数据位置」（拔盘也能进软件）----------
+    # 旧实现只有「重试 / 退出」：数据盘不在就进不了软件，也就进不了设置去改
+    # 数据位置（死锁）。现在 prompt 可以返回一个 AppConfig 表示"用这个位置"。
+    picked_cfg = AppConfig().with_updates(
+        data_root=Path("X:/picked_root"),
+        db_path=Path("X:/picked_root/data/media_manager.db"))
+    resolve_inputs = []
+
+    def _resolve_after_pick(cfg, explicit_data_root=None):
+        resolve_inputs.append(cfg)
+        return types.SimpleNamespace(
+            data_root=Path("X:/picked_root"), expected_data_root=None)
+
+    picked_prompts = []
+
+    def _prompt_pick(title, text, informative, config, resolved):
+        picked_prompts.append((title, config, resolved))
+        return picked_cfg
+
+    ok3, cfg3, _ = desktop_main._ensure_database_ready(
+        types.SimpleNamespace(db_path=Path("X:/nope.db")),
+        resolved_missing, None, _prompt_pick, _resolve_after_pick,
+        lambda cfg, resolved: cfg,
+        init=lambda db: None, migrate=lambda: None,
+    )
+    check("F2b 启动期选择数据位置后可继续启动", ok3 is True)
+    check("F2b 继续启动时使用用户选择的配置", cfg3 is picked_cfg)
+    check("F2b 选择位置后按新配置重新解析数据根",
+          len(resolve_inputs) == 1 and resolve_inputs[0] is picked_cfg)
+    check("F2b 提示里带上了当前配置与解析结果",
+          len(picked_prompts) == 1 and picked_prompts[0][1] is not None
+          and picked_prompts[0][2] is resolved_missing)
+    check("F2b 三参 prompt 仍被兼容（老调用方不破）",
+          desktop_main._needs_data_location_context(_prompt) is False
+          and desktop_main._needs_data_location_context(_prompt_pick) is True)
+
+    # 数据位置对话框：候选行摘要 + 没有候选时 Ok 不可点
+    from app.utils import paths as app_paths_mod
+    from app.ui.dialogs import data_location as data_location_dlg
+
+    tmp_dl = Path(tempfile.mkdtemp(prefix="p0_dataloc_"))
+    try:
+        marked = tmp_dl / "marked_root"
+        marked.mkdir()
+        app_paths_mod.write_marker(marked)
+        text_marked = data_location_dlg._format_root(str(marked))
+        check("F2b 候选行识别为已有数据根", "已有数据根" in text_marked)
+        empty = tmp_dl / "empty_root"
+        empty.mkdir()
+        check("F2b 候选行识别为空目录可新建",
+              "可新建数据根" in data_location_dlg._format_root(str(empty)))
+        check("F2b 候选行识别目录不存在",
+              "目录不存在" in data_location_dlg._format_root(str(tmp_dl / "nope")))
+
+        from PySide6.QtWidgets import QApplication as _QApp
+        if _QApp.instance() is None:
+            _QApp([])
+        dlg = data_location_dlg.DataLocationDialog(
+            AppConfig().with_updates(data_root=str(marked)),
+            types.SimpleNamespace(data_root=marked, expected_data_root=None,
+                                  candidates=(marked,)),
+        )
+        check("F2b 对话框列出候选数据根", dlg._list.count() == 1)
+        check("F2b 有候选时可确认",
+              dlg._buttons.button(dlg._buttons.StandardButton.Ok).isEnabled())
+        dlg.deleteLater()
+
+        empty_dlg = data_location_dlg.DataLocationDialog(
+            AppConfig(),
+            types.SimpleNamespace(data_root=None, expected_data_root=None,
+                                  candidates=()),
+        )
+        check("F2b 没有任何候选时禁止确认",
+              empty_dlg._buttons.button(empty_dlg._buttons.StandardButton.Ok)
+              .isEnabled() is False)
+        empty_dlg.deleteLater()
+    finally:
+        shutil.rmtree(tmp_dl, ignore_errors=True)
+
     # ---------- F8: 监听 0.0.0.0 且无 PIN 时自动生成 4 位 PIN ----------
     import config as config_module
     from app.services.web_security_service import ensure_web_pin

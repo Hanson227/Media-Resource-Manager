@@ -637,6 +637,67 @@ def test_preview_auto_transcode(page):
     page.wait_for_load_state("networkidle")
 
 
+def test_preview_quality_menu(page):
+    """播放器内可切换画质；进入时的默认画质来自「设置 → 播放与预览」。"""
+    section("Web 测试 6c: 播放器画质选择")
+    import requests
+
+    base = f"http://127.0.0.1:{_PORT}"
+    try:
+        resp = requests.post(f"{base}/api/settings/transcode",
+                             json={"max_height": 720}, timeout=10)
+        check("设置默认画质为 720p", resp.status_code == 200)
+        _uid, fid, _path = _seed_transcode_video("画质测试")
+        errors: list = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(f"{base}/#/preview/{fid}")
+        page.locator(".preview-overlay").wait_for(state="visible", timeout=8000)
+        page.locator(".video-status.transcode").wait_for(state="visible", timeout=8000)
+
+        quality_btn = page.locator(".controls-bar button[title='播放画质']")
+        check("播放器里有画质按钮", quality_btn.count() == 1)
+        check("进入播放时画质取设置值的 720p",
+              "720p" in ((quality_btn.text_content() or "")))
+
+        # 等本次转码完成（切到转码流），再切换画质
+        page.wait_for_function(
+            """() => {
+                const v = document.querySelector('.preview-content video');
+                return !!(v && v.src && v.src.indexOf('max_height=720') >= 0);
+            }""",
+            timeout=90000,
+        )
+        check("默认画质转码流地址带 max_height=720", True)
+
+        quality_btn.click()
+        menu = page.locator(".quality-menu")
+        menu.wait_for(state="visible", timeout=5000)
+        labels = [menu.locator("button").nth(i).text_content().strip()
+                  for i in range(menu.locator("button").count())]
+        check("画质菜单含 6 档（原画/480/720/1080/1440/4K）",
+              labels == ["原画", "480p", "720p", "1080p", "1440p", "4K"])
+        check("当前画质在菜单里高亮",
+              menu.locator("button.active").text_content().strip() == "720p")
+
+        menu.locator("button", has_text="480p").click()
+        page.wait_for_function(
+            """() => {
+                const v = document.querySelector('.preview-content video');
+                return !!(v && v.src && v.src.indexOf('max_height=480') >= 0);
+            }""",
+            timeout=90000,
+        )
+        check("播放器内切换画质后按新画质取流", True)
+        check("切换画质后按钮显示新画质",
+              "480p" in (quality_btn.text_content() or ""))
+        check("画质切换过程无页面 JS 错误", not errors)
+    finally:
+        requests.post(f"{base}/api/settings/transcode",
+                      json={"max_height": 1080}, timeout=10)
+        page.goto(f"{base}/#/units")
+        page.wait_for_load_state("networkidle")
+
+
 def test_preview_scroll_restore(page):
     """验证从预览返回后文件列表滚动位置恢复。"""
     section("Web 测试 6: 预览返回滚动位置")
@@ -2743,6 +2804,7 @@ def main():
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
             page.wait_for_load_state("networkidle")
             test_preview_auto_transcode(page)
+            test_preview_quality_menu(page)
 
             # 重新加载使 localStorage 生效（绕过 PIN 页）
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")

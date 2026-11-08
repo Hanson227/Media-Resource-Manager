@@ -610,6 +610,9 @@ body {
 }
 .speed-menu button.active { background: var(--accent); color: #fff; }
 .speed-menu button:hover { color: rgba(255,255,255,.9); }
+/* 画质菜单：6 档，收窄内边距并限制最大宽度，避免小屏溢出 */
+.quality-menu { padding: 3px; gap: 1px; max-width: calc(100vw - 32px); flex-wrap: wrap; justify-content: flex-end; }
+.quality-menu button { padding: 6px 10px; }
 
 /* ========== Image Navigation ========== */
 .image-nav-hint {

@@ -971,6 +971,13 @@ const PreviewPage = {
             <button v-for="r in speedOptions" :key="r" :class="{ active: playbackRate === r }" @click.stop="setSpeed(r)">{{ r }}x</button>
           </div>
 
+          <!-- Quality Menu：播放器内直接选画质；进入时的默认值来自「设置 → 播放与预览」 -->
+          <div v-if="qualityMenuOpen" class="speed-menu quality-menu">
+            <button v-for="opt in qualityChoices" :key="opt.value"
+                    :class="{ active: opt.current }"
+                    @click.stop="setQuality(opt.value)">{{ opt.label }}</button>
+          </div>
+
           <!-- Controls Bar -->
           <div class="controls-bar" :class="{ hidden: controlsHidden && playing }" @click.stop @touchstart="keepControlsVisible">
             <button class="ctrl-btn" @click="togglePlay">
@@ -990,6 +997,9 @@ const PreviewPage = {
               <div class="progress-seek-hint" v-if="seeking" :style="{ left: seekHintPct + '%' }">{{ fmtTime(seekHintTime) }}</div>
             </div>
             <span class="time dur">{{ fmtTime(duration) }}</span>
+            <button class="ctrl-btn" @click.stop="toggleQualityMenu" title="播放画质">
+              <span class="speed-text">{{ qualityLabel }}</span>
+            </button>
             <button class="ctrl-btn" @click.stop="toggleSpeedMenu">
               <span class="speed-text">{{ playbackRate }}x</span>
             </button>
@@ -1032,6 +1042,11 @@ const PreviewPage = {
       transcoding: false, transcodeProgress: 0, transcodeMessage: '',
       transcodeTimer: null, videoTranscoded: false,
       _transcodeStarting: false,
+      // 播放画质：默认值来自「设置 → 播放与预览」，播放器内可临时切换。
+      // 切换只影响本次播放，不写回设置（设置页才是持久化入口）。
+      // activeQuality=null 表示当前播的是原文件（未转码）。
+      transcodeQuality: 1080, activeQuality: null, qualityMenuOpen: false,
+      transcodeHeightOptions: [0, 480, 720, 1080, 1440, 2160],
       _navigating: false,
       navSwiping: false,
       zoomed: false,
@@ -1049,6 +1064,22 @@ const PreviewPage = {
     videoExt() {
       const m = /\.([a-z0-9]+)(?:\?.*)?$/i.exec(this.filename || '');
       return m ? m[1].toLowerCase() : '';
+    },
+    /** 当前生效的画质（0=原画）。转码进行中时就是本次请求的目标画质，
+     *  转码完成后才由 activeQuality 反映"实际在播的流"。 */
+    qualityCurrent() {
+      if (this.transcoding) return Number(this.transcodeQuality) || 0;
+      return this.activeQuality === null || this.activeQuality === undefined
+        ? 0 : Number(this.activeQuality) || 0;
+    },
+    qualityChoices() {
+      const current = this.qualityCurrent;
+      return (this.transcodeHeightOptions || []).map((v) => ({
+        value: v, label: this._qualityLabel(v), current: Number(v) === current,
+      }));
+    },
+    qualityLabel() {
+      return this._qualityLabel(this.qualityCurrent);
     },
   },
   methods: {
@@ -1226,23 +1257,68 @@ const PreviewPage = {
       try { this.videoEl.load(); } catch (e) { /* 忽略 */ }
     },
     /* ---- 按需转码（MKV/AVI 等浏览器不支持的容器）----
-     * 后端 /api/transcode/start 幂等；转码缓存按 file_id+size+mtime 命中，
-     * 首次播放等一次，之后直接读 MP4 缓存。进度靠 1s 轮询 status。 */
-    _prepareVideoSource() {
+     * 后端 /api/transcode/start 幂等；转码缓存按 file_id+size+mtime+画质 命中，
+     * 首次播放等一次，之后直接读 MP4 缓存。进度靠 1s 轮询 status。
+     * forceTranscode=true 时即使容器原生支持也转（用户主动选了画质）。 */
+    _prepareVideoSource(forceTranscode = false) {
       this._stopTranscodePoll();
       this.videoTranscoded = false;
       this.transcoding = false;
       this.transcodeProgress = 0;
       this.transcodeMessage = '';
       if (this.mediaType !== 'video') return;
-      if (UNSUPPORTED_VIDEO_EXTS.includes(this.videoExt)) {
+      const unsupported = UNSUPPORTED_VIDEO_EXTS.includes(this.videoExt);
+      if (unsupported || forceTranscode) {
         // 先让 video 标签挂着（可能立刻报错），转码层盖住错误并显示进度。
         this.transcoding = true;
         this.loading = true;
         this.startTranscode(false);
       } else {
+        // 原生支持的容器：直接读原文件，画质标记为「原画」
+        this.activeQuality = null;
         this.loading = true;
       }
+    },
+    async loadTranscodeQuality() {
+      try {
+        const s = await api(this.serverUrl, '/api/settings');
+        const h = Number(s && s.transcode_max_height);
+        if (Number.isFinite(h) && h >= 0) this.transcodeQuality = h;
+        const opts = s && s.transcode_height_options;
+        if (Array.isArray(opts) && opts.length) {
+          this.transcodeHeightOptions = opts.map((v) => Number(v)).filter((v) => Number.isFinite(v));
+        }
+      } catch (e) {
+        // 旧版服务端没有这些字段：沿用默认 1080p
+      }
+    },
+    _qualityLabel(value) {
+      const v = Number(value) || 0;
+      if (v === 0) return '原画';
+      if (v >= 2160) return '4K';
+      return v + 'p';
+    },
+    toggleQualityMenu() {
+      this.qualityMenuOpen = !this.qualityMenuOpen;
+      if (!this.qualityMenuOpen) return;
+      this.speedMenuOpen = false;
+      this.controlsHidden = false;
+      this.keepControlsVisible();
+    },
+    async setQuality(value) {
+      this.qualityMenuOpen = false;
+      const next = Number(value) || 0;
+      const active = this.activeQuality;
+      const current = active === null || active === undefined ? null : active;
+      if (current === next) return;
+      this.transcodeQuality = next;
+      // 切画质必须重新取流：换 key 后缓存命中会立刻切换，未命中则起转码
+      this.playing = false;
+      this.currentTime = 0;
+      this.duration = 0;
+      this.progressPct = 0;
+      this.videoError = '';
+      this._prepareVideoSource(true);
     },
     async startTranscode(force = false) {
       if (this._transcodeStarting) return;
@@ -1257,7 +1333,9 @@ const PreviewPage = {
         const res = await api(this.serverUrl, '/api/transcode/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ file_id: fileId, force: !!force }),
+          body: JSON.stringify({
+            file_id: fileId, force: !!force, max_height: this.transcodeQuality,
+          }),
         });
         if (res.status === 'done') {
           this._useTranscodedStream();
@@ -1285,7 +1363,8 @@ const PreviewPage = {
       const fileId = Number(this.$route.params.id);
       const tick = async () => {
         try {
-          const st = await api(this.serverUrl, '/api/transcode/status?file_id=' + fileId);
+          const st = await api(this.serverUrl,
+            '/api/transcode/status?file_id=' + fileId + '&max_height=' + this.transcodeQuality);
           if (!this.transcoding) return;
           this.transcodeProgress = Math.max(0, Math.min(100, Number(st.progress) || 0));
           if (st.message) this.transcodeMessage = st.message;
@@ -1316,7 +1395,9 @@ const PreviewPage = {
       this.transcoding = false;
       this.videoTranscoded = true;
       this.videoError = '';
-      this.streamUrl = mediaUrl(this.serverUrl, '/api/transcode/stream?file_id=' + fileId);
+      this.activeQuality = this.transcodeQuality;
+      this.streamUrl = mediaUrl(this.serverUrl,
+        '/api/transcode/stream?file_id=' + fileId + '&max_height=' + this.transcodeQuality);
       this.loading = true;
       this.buffering = true;
       this.$nextTick(() => {
@@ -1682,7 +1763,12 @@ const PreviewPage = {
       setTimeout(() => this.goBack(), T.COMMIT_MS + 40);
     },
     /* ---- Speed ---- */
-    toggleSpeedMenu() { this.speedMenuOpen = !this.speedMenuOpen; if (this.speedMenuOpen) this.controlsHidden = false; },
+    toggleSpeedMenu() {
+      this.speedMenuOpen = !this.speedMenuOpen;
+      if (!this.speedMenuOpen) return;
+      this.qualityMenuOpen = false;  // 两个弹出菜单互斥，避免叠在一起
+      this.controlsHidden = false;
+    },
     setSpeed(r) { this.playbackRate = r; if (this.videoEl) this.videoEl.playbackRate = r; this.speedMenuOpen = false; this.startHideTimer(); },
     /* ---- Fullscreen ----
      * 报告 §5 P0：iPhone Safari 无元素级 requestFullscreen，
@@ -1779,6 +1865,7 @@ const PreviewPage = {
       this._stopTranscodePoll();
       this.transcoding = false;
       this.videoTranscoded = false;
+      this.activeQuality = null;
       this.transcodeProgress = 0;
       this.transcodeMessage = '';
       this.loading = this.mediaType === 'video';
@@ -1874,7 +1961,11 @@ const PreviewPage = {
         this.posterUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/thumbnail');
         this.loading = this.mediaType === 'video';
       }
-      const data = await api(this.serverUrl, '/api/files/' + id);
+      // 画质默认值来自设置；与文件详情并行取，避免多一个 RTT
+      const [data] = await Promise.all([
+        api(this.serverUrl, '/api/files/' + id),
+        this.loadTranscodeQuality(),
+      ]);
       this.filename = data.filename || this.filename;
       this.mediaType = data.media_type || this.mediaType || 'image';
       this.streamUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/stream');

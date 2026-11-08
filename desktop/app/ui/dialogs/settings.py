@@ -114,6 +114,12 @@ class SettingsDialog(QDialog):
         migrate_btn.setToolTip("把当前数据库、缩略图缓存与访问密码复制到另一块盘/另一个目录")
         migrate_btn.clicked.connect(self._on_migrate_data_root)
         root_layout.addWidget(migrate_btn)
+        adopt_btn = QPushButton("切换…")
+        adopt_btn.setToolTip(
+            "指向一个已经存有完整数据的目录（例如电脑迁过来的移动硬盘），"
+            "直接接管那份数据：不复制、不覆盖，只登记并改配置")
+        adopt_btn.clicked.connect(self._on_adopt_data_root)
+        root_layout.addWidget(adopt_btn)
         data_form.addRow("数据根目录:", root_layout)
 
         thumb_dir_layout = QHBoxLayout()
@@ -356,6 +362,34 @@ class SettingsDialog(QDialog):
         self._migrate_worker.finished_with.connect(
             lambda result: self._on_migrate_finished(result, progress))
         self._migrate_worker.start()
+
+    def _on_adopt_data_root(self) -> None:
+        """切换/接管一个已有数据的目录（不复制、不覆盖）。
+
+        与「迁移…」的区别：迁移是"把当前这份数据搬过去"，接管是"承认那个目录
+        里本来就有一份完整数据" —— 电脑迁到移动硬盘后插到另一台机器/平板时用。
+        """
+        from app.ui.dialogs.data_location import choose_data_location
+        from app.utils import paths as app_paths
+
+        chosen = choose_data_location(
+            self._config, app_paths.resolve_paths(self._config), self,
+            title="切换数据位置",
+            message=("选择一个已经存有数据的目录（接管，不复制不覆盖），"
+                     "或一个空目录（新建空数据根）。\n"
+                     "切换后配置立刻保存，重启程序生效。"))
+        if chosen is None:
+            return
+        self._config = chosen
+        self._data_root_label.setText(
+            str(chosen.data_root) if chosen.data_root else "（未设置：使用应用目录）")
+        self._thumb_dir_edit.setText(str(chosen.thumbnail_cache_dir))
+        self._refresh_cache_stat(str(chosen.thumbnail_cache_dir))
+        self.data_root_migrated.emit(chosen)
+        QMessageBox.information(
+            self, "数据位置已切换",
+            f"新的数据位置:\n  {chosen.data_root}\n\n"
+            "配置已保存。当前窗口仍在用旧数据库，**重启程序**后生效。")
 
     _PHASE_LABELS = {
         "database": "正在复制数据库…",
