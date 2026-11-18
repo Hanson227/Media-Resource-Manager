@@ -7462,6 +7462,188 @@ def test_api_features_and_library_endpoints():
           and plan["plan"]["total_rows"] == 0)
 
 
+def test_library_root_unit_counts_are_batched():
+    """根目录单元数固定一次聚合查询，并维持只计 active 的 API 语义。"""
+    section("测试: 媒体库根目录计数批量查询")
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.pool import StaticPool
+    from sqlalchemy.orm import sessionmaker
+    from app.api.server import create_app
+    from app.db.models import Base, MediaLibraryRoot, ResourceUnit
+    from app.utils.constants import UnitStatus
+    from fastapi.testclient import TestClient
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory.begin() as session:
+        roots = [MediaLibraryRoot(path=f"/tmp/root-{i}") for i in range(4)]
+        session.add_all(roots)
+        session.flush()
+        for root in roots:
+            session.add_all([
+                ResourceUnit(path=f"{root.path}/active", name="active",
+                             library_root_id=root.id, status=UnitStatus.ACTIVE.value),
+                ResourceUnit(path=f"{root.path}/excluded", name="excluded",
+                             library_root_id=root.id, status=UnitStatus.EXCLUDED.value),
+                ResourceUnit(path=f"{root.path}/merged", name="merged",
+                             library_root_id=root.id, status=UnitStatus.MERGED.value),
+            ])
+
+    statements = []
+    def record_statement(conn, cursor, statement, parameters, context, executemany):
+        if "resource_units" in statement.lower():
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        from app.db.engine import DatabaseManager
+        old_engine, old_factory, old_path = (
+            DatabaseManager._engine, DatabaseManager._session_factory,
+            DatabaseManager._db_path,
+        )
+        DatabaseManager._engine = engine
+        DatabaseManager._session_factory = factory
+        DatabaseManager._db_path = None
+        from app.api.routes import library as library_routes
+        old_find_broken_roots = library_routes.remap_svc.find_broken_roots
+        library_routes.remap_svc.find_broken_roots = lambda: []
+        try:
+            response = TestClient(create_app(AppConfig())).get("/api/library/roots")
+        finally:
+            library_routes.remap_svc.find_broken_roots = old_find_broken_roots
+            DatabaseManager._engine = old_engine
+            DatabaseManager._session_factory = old_factory
+            DatabaseManager._db_path = old_path
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+        engine.dispose()
+
+    check("roots API 返回 200", response.status_code == 200)
+    check("所有根目录只计 active 单元",
+          [root["unit_count"] for root in response.json()["roots"]] == [1, 1, 1, 1])
+    check("根目录计数只执行一次 resource_units 查询", len(statements) == 1)
+
+
+def test_mapped_files_unit_filter():
+    """标签映射按单元在 SQL 中过滤，同时保留标签 OR 与 file_ids 交集语义。"""
+    section("测试: 标签映射按单元查询")
+    from fastapi import FastAPI
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    from app.api.routes.tags import router
+    from app.db.models import Base, MediaLibraryRoot, ResourceUnit, MediaFile
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory.begin() as session:
+        root = MediaLibraryRoot(path="/tags")
+        session.add(root)
+        session.flush()
+        units = [ResourceUnit(path=f"/tags/unit-{i}", name=f"unit-{i}", library_root_id=root.id)
+                 for i in range(3)]
+        session.add_all(units)
+        session.flush()
+        unit_a, unit_b, empty_unit = [unit.id for unit in units]
+        tags = [q.create_tag(session, name, color) for name, color in [
+            ("red", "#FF0000"), ("blue", "#0000FF"), ("green", None),
+        ]]
+        red, blue, green = [tag.id for tag in tags]
+        files = []
+        for i, unit_id in enumerate([unit_a, unit_a, unit_a] + [unit_b] * 256):
+            mf = MediaFile(path=f"/tags/file-{i}.jpg", filename=f"file-{i}.jpg",
+                           extension=".jpg", media_type="image", resource_unit_id=unit_id)
+            session.add(mf)
+            files.append(mf)
+        session.flush()
+        a_red, a_blue, a_untagged = [mf.id for mf in files[:3]]
+        q.set_file_tags(session, a_red, [red, green])
+        q.set_file_tags(session, a_blue, [blue])
+        for mf in files[3:]:
+            q.set_file_tags(session, mf.id, [red, blue])
+        expected_a = {
+            str(a_red): [{"id": red, "name": "red", "color": "#FF0000"},
+                         {"id": green, "name": "green", "color": None}],
+            str(a_blue): [{"id": blue, "name": "blue", "color": "#0000FF"}],
+        }
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    statements = []
+
+    def record_statement(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append((statement, parameters))
+
+    old_engine, old_factory, old_path = (
+        DatabaseManager._engine, DatabaseManager._session_factory, DatabaseManager._db_path,
+    )
+    DatabaseManager._engine = engine
+    DatabaseManager._session_factory = factory
+    DatabaseManager._db_path = None
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        response = client.get("/api/tags/mapped-files", params={"unit_id": unit_a})
+        check("单元映射 API 返回 200", response.status_code == 200)
+        check("只返回当前单元的完整标签映射", response.json().get("mappings") == expected_a)
+        check("无标签文件不产生映射", str(a_untagged) not in response.json().get("mappings", {}))
+        check("单元过滤仅执行一次 SELECT", len(statements) == 1)
+        check("单元条件下推到 SQL WHERE",
+              len(statements) == 1 and "media_files.resource_unit_id =" in statements[0][0]
+              and unit_a in statements[0][1])
+        scoped_size = len(response.content)
+        all_response = client.get("/api/tags/mapped-files")
+        all_mappings = all_response.json()["mappings"]
+        check("无参数仍返回两个单元的全部映射", len(all_mappings) == 258)
+        check("无参数完整映射行数维持 515", sum(map(len, all_mappings.values())) == 515)
+        check("定向返回 3 条映射而非全库 515 条",
+              sum(map(len, response.json().get("mappings", {}).values())) == 3)
+        print(f"  标签映射响应负载（合成数据）: 全库 {len(all_response.content)} B，单元 {scoped_size} B")
+
+        filtered = client.get("/api/tags/mapped-files", params={
+            "unit_id": unit_a, "tag_ids": f"{red},{blue}",
+        }).json()["mappings"]
+        check("单元与标签条件相交，多个标签仍为 OR", filtered == {
+            str(a_red): expected_a[str(a_red)][:1], str(a_blue): expected_a[str(a_blue)],
+        })
+        tag_only = client.get("/api/tags/mapped-files", params={"tag_ids": str(red)}).json()["mappings"]
+        check("仅标签筛选保持跨单元行为", len(tag_only) == 257)
+        for unit_id, label in [(unit_b, "另一单元"), (empty_unit, "空单元"), (99999, "未知单元"), (0, "零 ID")]:
+            result = client.get("/api/tags/mapped-files", params={"unit_id": unit_id})
+            expected_count = 256 if unit_id == unit_b else 0
+            check(f"{label}映射隔离且返回 200",
+                  result.status_code == 200 and len(result.json().get("mappings", {})) == expected_count)
+        check("非法单元 ID 返回 422", client.get(
+            "/api/tags/mapped-files", params={"unit_id": "invalid"}).status_code == 422)
+        check("非法标签参数仍返回 422", client.get(
+            "/api/tags/mapped-files", params={"unit_id": unit_a, "tag_ids": "invalid"}).status_code == 422)
+
+        with factory() as session:
+            check("file_ids 与单元条件相交", set(q.get_all_mapped_files(
+                session, file_ids=[a_red, files[3].id], unit_id=unit_a)) == {a_red})
+            check("空 file_ids 返回空映射", q.get_all_mapped_files(
+                session, file_ids=[], unit_id=unit_a) == {})
+            check("旧 file_ids 调用兼容", set(q.get_all_mapped_files(
+                session, file_ids=[a_red, files[3].id])) == {a_red, files[3].id})
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+        DatabaseManager._engine = old_engine
+        DatabaseManager._session_factory = old_factory
+        DatabaseManager._db_path = old_path
+        engine.dispose()
+
+
 def test_api_tags_endpoints():
     """测试 29: 标签 API 端点全覆盖（list/create/delete/get-by-file/set-by-file/mapped-files）。"""
     section("测试 29: 标签 API 端点")
@@ -8511,10 +8693,12 @@ def main():
         test_unit_metadata_queries()
         test_content_modified_at()
         test_api_tags_endpoints()
+        test_mapped_files_unit_filter()
         test_api_messages_endpoints()
         test_api_detail_endpoints()
         test_convert_batch()
         test_api_features_and_library_endpoints()
+        test_library_root_unit_counts_are_batched()
         test_api_unit_management_endpoints()
         test_desktop_navigation_rail()
         test_library_service_remove_root(temp_root)

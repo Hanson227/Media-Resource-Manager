@@ -132,6 +132,20 @@ def get_active_units_by_roots(
     return grouped
 
 
+def get_active_unit_counts_by_roots(session: Session, root_ids: list[int]) -> dict[int, int]:
+    """一次聚合查询多个根目录下的活跃单元数。"""
+    if not root_ids:
+        return {}
+    rows = session.query(
+        ResourceUnit.library_root_id,
+        func.count(ResourceUnit.id),
+    ).filter(
+        ResourceUnit.library_root_id.in_(root_ids),
+        ResourceUnit.status == UnitStatus.ACTIVE.value,
+    ).group_by(ResourceUnit.library_root_id).all()
+    return {root_id: int(count) for root_id, count in rows}
+
+
 def get_child_units(session: Session, parent_id: int) -> list[ResourceUnit]:
     """获取被合并到指定父单元的所有子单元。"""
     return session.query(ResourceUnit).filter(ResourceUnit.parent_id == parent_id).all()
@@ -1600,6 +1614,7 @@ def get_all_mapped_files(
     session: Session,
     tag_ids: Optional[list[int]] = None,
     file_ids: Optional[list[int]] = None,
+    unit_id: Optional[int] = None,
 ) -> dict[int, list[dict]]:
     """批量查询文件标签。返回 {file_id: [{id, name, color}, ...], ...}。
 
@@ -1607,6 +1622,7 @@ def get_all_mapped_files(
         tag_ids: 若提供，只返回包含这些标签中任意一个的文件。
         file_ids: 若提供，只返回这些文件的标签（树只展示前 200 个文件时用，
                   避免把整库标签都读进内存）。
+        unit_id: 若提供，在 SQL 中仅查询该单元的文件；与其他筛选条件相交。
     """
     query = session.query(
         FileTagMapping.file_id,
@@ -1614,6 +1630,10 @@ def get_all_mapped_files(
         FileTag.name,
         FileTag.color,
     ).join(FileTag, FileTag.id == FileTagMapping.tag_id)
+    if unit_id is not None:
+        query = query.join(MediaFile, MediaFile.id == FileTagMapping.file_id).filter(
+            MediaFile.resource_unit_id == unit_id,
+        )
     if tag_ids:
         query = query.filter(FileTagMapping.tag_id.in_(tag_ids))
     if file_ids is not None:

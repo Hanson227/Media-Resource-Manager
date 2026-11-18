@@ -128,10 +128,13 @@ def list_roots():
         broken = {item["id"]: item for item in remap_svc.find_broken_roots()}
         with DatabaseManager.session() as session:
             roots = q.get_all_roots(session)
-            rows = []
-            for root in roots:
-                unit_count = len(q.get_units_by_root(session, root.id))
-                rows.append((root.id, root.path, bool(root.enabled), unit_count))
+            unit_counts = q.get_active_unit_counts_by_roots(
+                session, [root.id for root in roots],
+            )
+            rows = [
+                (root.id, root.path, bool(root.enabled), unit_counts.get(root.id, 0))
+                for root in roots
+            ]
     except Exception as e:  # noqa: BLE001
         logger.error(f"读取媒体库根目录失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="内部服务器错误")

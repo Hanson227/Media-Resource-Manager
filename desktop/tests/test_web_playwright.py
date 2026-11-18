@@ -40,6 +40,9 @@ _server = None
 _server_thread = None
 _app = None
 _PORT = 19528  # 不同于主应用的端口，避免冲突
+_TEST_ROOT = Path(tempfile.mkdtemp(prefix="media_web_suite_"))
+_TEST_CONFIG = _TEST_ROOT / "config.json"
+_PREVIOUS_PIN_DIR = None
 
 
 def check(desc: str, condition: bool):
@@ -59,21 +62,8 @@ def section(title: str):
 
 
 def ensure_db():
-    """创建并填充测试数据库，并清掉**上一次跑测试残留的 PIN**。
-
-    为什么要清 PIN：PIN 文件落在 `desktop/data/.web_pin`（与库同级），上一次跑完
-    会留下它；本次运行时 API 就要求解锁，而 Playwright 的页面拿不到令牌 → 停在
-    锁屏、没有导航栏（曾把 "#35 便携版入口" 卡成 30s 超时）。测试必须自带干净
-    起点，不能依赖上一次运行的残留状态。
-    """
-    test_db = Path(__file__).parent.parent / "data" / "test_web_playwright.db"
-    stale_pin = Path(__file__).parent.parent / "data" / ".web_pin"
-    try:
-        if stale_pin.exists():
-            stale_pin.unlink()
-            print("  [INFO] 已清理上次运行残留的 data/.web_pin（避免整套用例停在锁屏）")
-    except OSError as e:
-        print(f"  [INFO] 无法清理残留 PIN 文件: {e}")
+    """在临时目录建立独立测试库；不读写用户的数据库、配置或 PIN。"""
+    test_db = _TEST_ROOT / "test_web_playwright.db"
     if test_db.exists():
         try:
             test_db.unlink()
@@ -169,22 +159,25 @@ def _thumb_cache_dir() -> Path:
     """
     global _THUMB_CACHE_DIR
     if _THUMB_CACHE_DIR is None:
-        _THUMB_CACHE_DIR = Path(tempfile.mkdtemp(prefix="web_thumbs_"))
+        _THUMB_CACHE_DIR = _TEST_ROOT / "thumbnails"
     return _THUMB_CACHE_DIR
 
 
 def start_server():
     """启动 API 服务器。"""
-    global _server, _server_thread, _app
+    global _server, _server_thread, _app, _PREVIOUS_PIN_DIR
     import requests
+    import config as config_module
+    _PREVIOUS_PIN_DIR = config_module._pin_override_dir
+    config_module.configure_pin_dir(_TEST_ROOT / "data")
     ensure_db()
     # 监听地址写成测试服务器**实际绑定**的值（127.0.0.1:19528）：
     # 设置页据此显示"手机访问"信息，与真实运行保持一致（回环地址手机连不上）。
-    config = AppConfig().with_updates(thumbnail_cache_dir=_thumb_cache_dir(),
+    config = AppConfig().with_updates(db_path=_TEST_ROOT / "test_web_playwright.db",
+                                      thumbnail_cache_dir=_thumb_cache_dir(),
                                       api_host="127.0.0.1", api_port=_PORT)
     from app.api.server import create_app
-    app = create_app(config, {"config_path": str(
-        Path(__file__).parent.parent / "data" / "test_web_playwright.json")})
+    app = create_app(config, {"config_path": str(_TEST_CONFIG)})
     _app = app
 
     import uvicorn
@@ -224,6 +217,8 @@ def stop_server():
     if _server:
         _server.should_exit = True
         _server_thread.join(timeout=5)
+    from config import configure_pin_dir
+    configure_pin_dir(_PREVIOUS_PIN_DIR)
 
 
 
@@ -337,7 +332,7 @@ def test_units_date_sort_by_content(page):
     check("降序: 内容日期较新的片段B在前", "片段B" in first_card_name())
 
     # 卡片元信息显示的是内容日期而非导入日期
-    metas = page.locator(".unit-card .meta")
+    metas = page.locator(".unit-card .card-date")
     meta_texts = [metas.nth(i).text_content() or "" for i in range(metas.count())]
     has_a = any("2024-01-01" in t for t in meta_texts)
     has_b = any("2025-06-01" in t for t in meta_texts)
@@ -396,6 +391,114 @@ def test_unit_files_page(page):
         # 检查文件名
         first_file_name = feed_items.first.locator(".name").text_content() or ""
         check(f"文件名显示: {first_file_name}", len(first_file_name.strip()) > 0)
+
+
+def test_file_tag_assignment(page):
+    """标签勾选、取消、失败重试与刷新后的筛选应反映真实持久化状态。"""
+    section("Web 测试: 文件标签分配")
+    from app.db import queries as q
+    with DatabaseManager.session() as session:
+        tag = q.create_tag(session, "Playwright,文件标签")
+        tag_id = tag.id
+
+    page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+    unit_card = page.locator(".unit-card").first
+    unit_card.wait_for(state="attached", timeout=8000)
+    unit_id = int(unit_card.get_attribute("data-unit-id"))
+    with page.expect_response(
+            lambda response: "/api/tags/mapped-files?unit_id=" in response.url) as mapping_response:
+        unit_card.click()
+    check("文件页只请求当前单元标签映射",
+          mapping_response.value.url.endswith(f"unit_id={unit_id}"))
+    page.locator(".feed-item").first.wait_for(state="attached", timeout=8000)
+    file_item = page.locator(".feed-item").first
+    file_id = int(file_item.get_attribute("data-file-id"))
+    file_name = file_item.locator(".name").inner_text()
+
+    file_item.locator(".card-more").click()
+    page.get_by_text("管理标签", exact=True).click()
+    dialog = page.get_by_role("dialog", name="管理标签")
+    checkbox = dialog.get_by_role("checkbox", name="Playwright,文件标签")
+    checkbox.check()
+    dialog.get_by_role("button", name="取消").click()
+    file_item.locator(".card-more").click()
+    page.get_by_text("管理标签", exact=True).click()
+    check("取消编辑不会保存草稿", not checkbox.is_checked())
+    checkbox.check()
+    endpoint = f"**/api/tags/by-file/{file_id}"
+    page.route(endpoint, lambda route: route.fulfill(
+        status=500, content_type="application/json", body='{"detail":"test save error"}'))
+    dialog.get_by_role("button", name="保存", exact=True).click()
+    dialog.locator("[role=alert]").wait_for()
+    check("保存失败保留勾选并显示错误", checkbox.is_checked()
+          and "test save error" in dialog.locator("[role=alert]").inner_text())
+    page.unroute(endpoint)
+    with page.expect_response(lambda response:
+            f"/api/tags/by-file/{file_id}" in response.url
+            and response.request.method == "PUT") as saved:
+        dialog.get_by_role("button", name="保存", exact=True).click()
+    dialog.wait_for(state="hidden")
+    check("含逗号的标签名称也能正常保存", saved.value.ok)
+
+    chip = page.locator(".tag-filter-bar .tag-chip", has_text="Playwright,文件标签")
+    chip.click()
+    check("添加标签后筛选命中文件", page.locator(".feed-item").count() == 1
+          and file_name in (page.locator(".feed-item").first.text_content() or ""))
+
+    chip.click()
+    page.locator(".feed-item").first.locator(".card-more").click()
+    page.get_by_text("管理标签", exact=True).click()
+    check("再次编辑显示已有标签", checkbox.is_checked())
+    dialog.get_by_role("button", name="保存", exact=True).focus()
+    page.keyboard.press("Tab")
+    check("Tab 焦点留在标签对话框内", checkbox.evaluate("el => el === document.activeElement"))
+    page.keyboard.press("Escape")
+    check("Escape 可关闭标签对话框", dialog.count() == 0)
+
+    # 模拟桌面端修改标签后手机下拉刷新，不能仍使用旧映射。
+    with DatabaseManager.session() as session:
+        q.set_file_tags(session, file_id, [])
+    with page.expect_response(lambda response: "/api/tags/mapped-files?unit_id=" in response.url):
+        page.evaluate("""() => {
+            const main = document.querySelector('.app-main');
+            main.scrollTop = 0;
+            function fire(name, y) {
+                const evt = new TouchEvent(name, { bubbles: true, cancelable: true });
+                const touches = [{ clientX: 195, clientY: y, identifier: 0 }];
+                Object.defineProperty(evt, 'touches', {
+                    get: () => name === 'touchend' ? [] : touches
+                });
+                Object.defineProperty(evt, 'changedTouches', { get: () => touches });
+                main.dispatchEvent(evt);
+            }
+            fire('touchstart', 200);
+            fire('touchmove', 330);
+            fire('touchend', 330);
+        }""")
+    page.wait_for_function("!document.querySelector('.ptr-indicator.active')")
+    chip.click()
+    check("刷新同步其他入口修改的标签", page.locator(".feed-item").count() == 0)
+    chip.click()
+    page.locator(f'.feed-item[data-file-id="{file_id}"] .card-more').click()
+    page.get_by_text("管理标签", exact=True).click()
+    checkbox.check()
+    with page.expect_response(lambda response:
+            f"/api/tags/by-file/{file_id}" in response.url
+            and response.request.method == "PUT"):
+        dialog.get_by_role("button", name="保存", exact=True).click()
+    dialog.wait_for(state="hidden")
+    page.locator(f'.feed-item[data-file-id="{file_id}"] .card-more').click()
+    page.get_by_text("管理标签", exact=True).click()
+    checkbox.uncheck()
+    with page.expect_response(lambda response:
+            f"/api/tags/by-file/{file_id}" in response.url
+            and response.request.method == "PUT"):
+        dialog.get_by_role("button", name="保存", exact=True).click()
+    dialog.wait_for(state="hidden")
+    chip.click()
+    check("移除标签后筛选不再命中文件", page.locator(".feed-item").count() == 0)
+    with DatabaseManager.session() as session:
+        q.delete_tag(session, tag_id)
 
 
 def test_preview_navigation(page):
@@ -564,8 +667,8 @@ def test_preview_swipe_gesture(page):
         check("首张右滑不切换", final_pos == 1)
 
 
-def _seed_transcode_video(name: str = "转码测试") -> tuple:
-    """建一个含真实 MKV 的临时单元（浏览器不能直接播放，必须走转码）。"""
+def _seed_preview_video(name: str = "转码测试", extension: str = ".mkv", duration: int = 1) -> tuple:
+    """在测试库中加入一个真实视频。"""
     import subprocess
     import tempfile
 
@@ -576,12 +679,12 @@ def _seed_transcode_video(name: str = "转码测试") -> tuple:
     root_dir = Path(tempfile.mkdtemp(prefix="web_transcode_"))
     unit_dir = root_dir / name
     unit_dir.mkdir(parents=True)
-    video_path = unit_dir / "clip.mkv"
+    video_path = unit_dir / ("clip" + extension)
     subprocess.run(
         [
             imageio_ffmpeg.get_ffmpeg_exe(), "-y",
             "-f", "lavfi", "-i", "testsrc=size=128x72:rate=5",
-            "-t", "1", "-pix_fmt", "yuv420p",
+            "-t", str(duration), "-pix_fmt", "yuv420p",
             "-c:v", "libx264", "-preset", "ultrafast",
             str(video_path),
         ],
@@ -599,7 +702,7 @@ def _seed_transcode_video(name: str = "转码测试") -> tuple:
         )
         mf = q.insert_media_file(
             session, path=str(video_path), filename=video_path.name,
-            extension=".mkv", media_type="video",
+            extension=extension, media_type="video",
             size_bytes=video_path.stat().st_size,
             resource_unit_id=unit.id,
         )
@@ -607,10 +710,148 @@ def _seed_transcode_video(name: str = "转码测试") -> tuple:
     return unit.id, fid, video_path
 
 
+def test_preview_playback_state(page):
+    """列表提供了可用视频源时，迟到的详情不能让待播状态重新转圈。"""
+    section("Web 测试 6a: 视频待播和缓冲状态")
+    _, fid, path = _seed_preview_video("直放测试", ".mp4", duration=12)
+    base = f"http://127.0.0.1:{_PORT}"
+    detail_pattern = f"**/api/files/{fid}"
+    hold_detail = []
+
+    def handler(route):
+        hold_detail.append(route)
+
+    page.route(detail_pattern, handler)
+    try:
+        page.goto(f"{base}/#/units")
+        page.locator(".app-main").wait_for(timeout=5000)
+        # 传入与文件列表点击相同的路由 state，避开套件中先前用例的列表筛选。
+        page.evaluate("""file => router.push({
+            path: '/preview/' + file.id,
+            state: { files: [file], fileIndex: 0 },
+        })""", {"id": fid, "filename": path.name, "media_type": "video"})
+        video = page.locator(".preview-content video")
+        spinner = page.locator(".video-status .mdi-spin")
+        play_button = page.locator(".controls-bar button").first
+        page.wait_for_function("document.querySelector('.preview-content video')?.readyState >= 1", timeout=7000)
+        check("视频已读到元数据，详情请求仍未返回", len(hold_detail) == 1)
+        with page.expect_response(detail_pattern):
+            # 用不同标题确认组件已处理详情，避免在 Vue 更新前检查。
+            hold_detail[0].fulfill(json={"filename": "detail.mp4", "media_type": "video"})
+        page.locator(".preview-top").get_by_text("detail.mp4").wait_for()
+        check("迟到的详情不会让待播视频转圈", spinner.count() == 0)
+
+        video.dispatch_event("stalled")
+        video.dispatch_event("waiting")
+        check("待播时的媒体事件不会触发缓冲提示", spinner.count() == 0)
+        play_button.click()
+        page.wait_for_function("document.querySelector('.preview-content video').currentTime > 0")
+        check("单击播放后视频开始前进", not video.evaluate("v => v.paused"))
+
+        # 用原生事件和可恢复的 readyState 模拟解码器等待，不依赖 CI 的网络速度。
+        video.evaluate("""v => {
+            Object.defineProperty(v, 'readyState', { value: 2, configurable: true });
+            v.dispatchEvent(new Event('waiting'));
+        }""")
+        check("播放中确实缺少数据时显示缓冲", spinner.count() == 1)
+        video.evaluate("""v => {
+            delete v.readyState;
+            v.dispatchEvent(new Event('playing'));
+        }""")
+        check("恢复播放时清除转圈", spinner.count() == 0)
+
+        video.evaluate("""v => {
+            Object.defineProperty(v, 'readyState', { value: 2, configurable: true });
+            v.dispatchEvent(new Event('waiting'));
+        }""")
+        play_button.click()
+        page.locator(".controls-bar .mdi-play").wait_for()
+        check("缓冲期间暂停会清除转圈", spinner.count() == 0)
+        video.evaluate("v => { delete v.readyState; }")
+    finally:
+        page.unroute(detail_pattern, handler)
+    return fid
+
+
+def test_preview_web_fullscreen(page, fid=None):
+    """容器全屏不可用时保持同一个网页播放器，不调用视频全屏接口。"""
+    section("Web 测试 6d: 视频页内全屏")
+    if fid is None:
+        _, fid, _ = _seed_preview_video("全屏测试", ".mp4", duration=12)
+    original_viewport = page.viewport_size
+    try:
+        page.set_viewport_size({"width": 390, "height": 844})
+        # 从列表页进入，重新挂载预览，避免沿用上一个用例模拟过的详情。
+        page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+        page.locator(".preview-overlay").wait_for(state="detached")
+        page.goto(f"http://127.0.0.1:{_PORT}/#/preview/{fid}")
+        overlay = page.locator(".preview-overlay")
+        video = overlay.locator("video")
+        fullscreen_button = overlay.locator(".controls-bar button").last
+        page.wait_for_function("document.querySelector('.preview-content video')?.readyState >= 1")
+        video.evaluate("v => { v.currentTime = 2; v.dataset.fullscreenTest = 'same-video'; }")
+        initial_src = video.get_attribute("src")
+        filename = overlay.locator(".preview-top > span")
+        # 量实际画面长边：object-fit: contain 下，元素盒子不等于画面尺寸。
+        picture_width = "v => Math.min(v.clientWidth, v.clientHeight * v.videoWidth / v.videoHeight)"
+        normal_width = video.evaluate(picture_width)
+        for reject in (False, True):
+            if reject:
+                page.set_viewport_size({"width": 844, "height": 390})
+            overlay.evaluate("""(el, reject) => {
+                el.requestFullscreen = reject
+                    ? () => Promise.reject(new Error('Fullscreen unavailable')) : undefined;
+                el.webkitRequestFullscreen = undefined;
+                const v = el.querySelector('video');
+                v.dataset.nativeFullscreenCalls = '0';
+                v.webkitEnterFullscreen = () => { v.dataset.nativeFullscreenCalls++; };
+            }""", reject)
+            fullscreen_button.click()
+            page.evaluate("() => new Promise(requestAnimationFrame)")
+            case = "请求被拒绝" if reject else "接口缺失"
+            check(f"容器全屏{case}时未调用系统播放器", video.get_attribute("data-native-fullscreen-calls") == "0")
+            entered = fullscreen_button.get_attribute("aria-label") == "退出全屏"
+            check(f"容器全屏{case}时进入页内全屏", entered)
+            if entered:
+                check("全屏保留返回键、文件标题和进度条", overlay.locator(".preview-back").is_visible()
+                      and filename.is_visible() and filename.inner_text() == "clip.mp4"
+                      and overlay.locator(".progress-wrap").is_visible())
+                check("全屏控件位于当前屏幕内", fullscreen_button.evaluate("""el => {
+                    const r = el.getBoundingClientRect();
+                    return r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight;
+                }"""))
+                check("全屏的原画和倍速标签各占一行且同高", overlay.locator(".controls-bar").evaluate("""bar => {
+                    const labels = [...bar.querySelectorAll('.speed-text')];
+                    return labels.length === 2 && labels[0].offsetHeight === labels[1].offsetHeight
+                        && labels.every(label => {
+                            const text = document.createRange();
+                            text.selectNodeContents(label);
+                            return text.getClientRects().length === 1 && label.offsetWidth <= label.parentElement.clientWidth;
+                        });
+                }"""))
+                if not reject:
+                    check("竖持时全屏利用屏幕长边放大横屏画面", video.evaluate(picture_width) > normal_width * 1.5)
+                    bar = overlay.locator(".progress-wrap").bounding_box()
+                    page.mouse.click(bar["x"] + bar["width"] / 2, bar["y"] + bar["height"] * 0.75)
+                    check("旋转后的进度条按画面方向定位", video.evaluate("v => Math.abs(v.currentTime - v.duration * 0.75) < 0.2"))
+                    video.evaluate("v => { v.currentTime = 2; }")
+                    page.set_viewport_size({"width": 844, "height": 390})
+                    check("手机转横后全屏控件恢复水平", overlay.locator(".progress-wrap").evaluate(
+                        "el => { const r = el.getBoundingClientRect(); return r.width > r.height * 3; }"))
+                fullscreen_button.click()
+                check("退出后回到普通预览", fullscreen_button.get_attribute("aria-label") == "全屏"
+                      and overlay.locator(".preview-top").is_visible())
+        check("全屏进出复用原视频并保留进度", video.get_attribute("data-fullscreen-test") == "same-video"
+              and video.get_attribute("src") == initial_src and video.evaluate("v => v.currentTime === 2"))
+    finally:
+        if original_viewport:
+            page.set_viewport_size(original_viewport)
+
+
 def test_preview_auto_transcode(page):
     """非浏览器格式打开预览时，应自动转码并在完成后切换到转码流。"""
     section("Web 测试 6b: 预览自动转码")
-    _uid, fid, _path = _seed_transcode_video()
+    _uid, fid, _path = _seed_preview_video()
     errors: list = []
     page.on("pageerror", lambda e: errors.append(str(e)))
     page.goto(f"http://127.0.0.1:{_PORT}/#/preview/{fid}")
@@ -632,6 +873,7 @@ def test_preview_auto_transcode(page):
         check("转码完成后切换到转码流", True)
     except Exception:
         check("转码完成后切换到转码流", False)
+    check("转码完成后待播时不显示缓冲", page.locator(".video-status .mdi-spin").count() == 0)
     check("转码期间/完成后无页面 JS 错误", not errors)
     page.goto(f"http://127.0.0.1:{_PORT}/#/units")
     page.wait_for_load_state("networkidle")
@@ -647,7 +889,7 @@ def test_preview_quality_menu(page):
         resp = requests.post(f"{base}/api/settings/transcode",
                              json={"max_height": 720}, timeout=10)
         check("设置默认画质为 720p", resp.status_code == 200)
-        _uid, fid, _path = _seed_transcode_video("画质测试")
+        _uid, fid, _path = _seed_preview_video("画质测试")
         errors: list = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.goto(f"{base}/#/preview/{fid}")
@@ -869,6 +1111,12 @@ def test_phone_viewport_access(page):
     check("底部导航在手机视口可见",
           tabs.count() > 0 and tabs.first.is_visible())
 
+    unit_grid = page.locator(".unit-grid").first
+    if unit_grid.count() > 0:
+        columns = unit_grid.evaluate(
+            "el => getComputedStyle(el).gridTemplateColumns.split(' ').length")
+        check("手机单元网格保持双列", columns == 2)
+
     # 页面主体必须真的渲染出内容（不是白屏）
     body_text = (page.locator("#app").text_content() or "").strip()
     check(f"页面有渲染内容（{len(body_text)} 字符）", len(body_text) > 20)
@@ -976,10 +1224,9 @@ def test_cancel_pin_does_not_lock_out(page):
         return
     from app.api.server import _revoke_all_auth_tokens
 
-    # change-pin 端点按 CWD 写 config.json 与 data/.web_pin（生产环境 CWD=desktop
-    # 是正确行为），测试必须备份/还原，否则会把用户 PIN 清空、api_host 改回默认值。
-    cfg_path = Path(__file__).parent.parent / "config.json"
-    pin_path = Path(__file__).parent.parent / "data" / ".web_pin"
+    # 密码变更也必须落在独立测试目录。
+    cfg_path = _TEST_CONFIG
+    pin_path = _TEST_ROOT / "data" / ".web_pin"
     cfg_backup = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else None
     pin_backup = pin_path.read_text(encoding="utf-8") if pin_path.exists() else None
 
@@ -2280,8 +2527,8 @@ def test_pin_keyboard_input(page):
         return
     from app.api.server import _revoke_all_auth_tokens
 
-    cfg_path = Path(__file__).parent.parent / "config.json"
-    pin_path = Path(__file__).parent.parent / "data" / ".web_pin"
+    cfg_path = _TEST_CONFIG
+    pin_path = _TEST_ROOT / "data" / ".web_pin"
     cfg_backup = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else None
     pin_backup = pin_path.read_text(encoding="utf-8") if pin_path.exists() else None
 
@@ -2557,7 +2804,7 @@ def test_data_root_wizard(page):
     wizard_app = create_app(
         AppConfig().with_updates(thumbnail_cache_dir=_thumb_cache_dir(),
                                  api_port=_WIZARD_PORT),
-        {"config_path": str(Path(__file__).parent.parent / "data" / "test_wizard.json"),
+        {"config_path": str(_TEST_ROOT / "test_wizard.json"),
          "data_root": "", "data_root_status": "blocked_no_root"})
     server = uvicorn.Server(uvicorn.Config(
         wizard_app, host="127.0.0.1", port=_WIZARD_PORT, log_level="error"))
@@ -2784,6 +3031,9 @@ def main():
             test_units_page_shows_data(page)
             test_units_date_sort_by_content(page)
             test_unit_files_page(page)
+            page.goto(f"http://127.0.0.1:{_PORT}/#/units")
+            page.wait_for_load_state("networkidle")
+            test_file_tag_assignment(page)
 
             # 预览导航测试
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
@@ -2800,7 +3050,8 @@ def main():
             page.wait_for_load_state("networkidle")
             test_preview_scroll_restore(page)
 
-            # 预览自动转码（非浏览器格式）
+            # 视频直放、页内全屏和自动转码
+            test_preview_web_fullscreen(page, test_preview_playback_state(page))
             page.goto(f"http://127.0.0.1:{_PORT}/#/units")
             page.wait_for_load_state("networkidle")
             test_preview_auto_transcode(page)

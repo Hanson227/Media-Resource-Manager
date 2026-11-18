@@ -189,17 +189,16 @@ const UnitsPage = {
           <span class="mdi mdi-magnify-close"></span>
           <p>没有匹配的单元<br>试试更短的关键词，或搜索路径里的日期文件夹</p>
         </div>
-        <div v-for="(group, ri) in visibleGroups()" :key="ri" class="root-group"
+        <div v-for="{ group, units } in displayedGroups" :key="group.name" class="root-group"
           :data-root="group.name">
           <div class="root-header" @click="toggleRoot(group)">
             <span class="mdi mdi-folder"></span>
             <h3>{{ group.name }}</h3>
-            <span class="count">{{ unitsOf(group).length }} 个单元</span>
+            <span class="count">{{ units.length }} 个单元</span>
             <span class="mdi mdi-chevron-down mdi-chevron" :class="{ open: group.open || searching }"></span>
           </div>
           <div v-if="group.open || searching" class="root-units">
             <div class="sort-bar">
-              <span class="count">{{ unitsOf(group).length }} 个单元</span>
               <span class="spacer"></span>
               <button class="sort-btn" :class="{ active: sortBy === 'size' }" @click.stop="setSort('size')">
                 <span class="mdi" :class="sortIcon('size')"></span> 大小
@@ -209,10 +208,10 @@ const UnitsPage = {
               </button>
             </div>
             <div class="unit-grid">
-              <div v-for="u in sortedUnits(unitsOf(group))" :key="u.id" class="unit-card"
+              <div v-for="u in units" :key="u.id" class="unit-card"
                 :data-unit-id="u.id">
                 <div class="cover">
-                  <img v-if="u.cover_file_id" :src="coverUrl(u.cover_file_id)" loading="lazy"
+                  <img v-if="u.cover_file_id" :src="coverUrl(u.cover_file_id)" loading="lazy" decoding="async" :alt="u.name"
                     @load="onCoverLoad(u.id)" @error="onCoverError(u.id)">
                   <span v-if="!u.cover_file_id || coverFailed[u.id]" class="mdi mdi-folder-image"></span>
                 </div>
@@ -220,7 +219,8 @@ const UnitsPage = {
                   <div class="info-row">
                     <div class="info-text">
                       <div class="name"><span v-if="u.is_starred" class="star-icon">⭐ </span>{{ u.name }}</div>
-                      <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}<span v-if="u.content_modified_at || u.created_at"> · {{ formatDate(u.content_modified_at || u.created_at) }}</span></div>
+                      <div class="meta">{{ u.file_count }} 个文件 · {{ formatSize(u.total_size) }}</div>
+                      <time v-if="u.content_modified_at || u.created_at" class="card-date" :datetime="u.content_modified_at || u.created_at">{{ formatDate(u.content_modified_at || u.created_at) }}</time>
                       <div v-if="searching" class="unit-path" :title="u.path">{{ parentPath(u) }}</div>
                     </div>
                     <button class="card-more" @click.stop="$root.showSheet(u.name, [
@@ -236,7 +236,7 @@ const UnitsPage = {
                         action: () => excludeUnit(u) },
                       { label: '删除文件夹', icon: 'mdi-delete-outline', danger: true,
                         action: () => deleteUnit(u) }
-                    ])" :title="u.is_starred ? '取消收藏' : '收藏'"><span class="mdi mdi-dots-horizontal"></span></button>
+                    ])" title="更多操作"><span class="mdi mdi-dots-horizontal"></span></button>
                   </div>
                 </div>
               </div>
@@ -258,9 +258,14 @@ const UnitsPage = {
   computed: {
     query() { return this.searchQuery.trim().toLowerCase(); },
     searching() { return this.query.length > 0; },
+    // 缩略图加载只更新图片状态，不再触发各组重复过滤和排序。
+    displayedGroups() {
+      return this.roots.map(group => ({ group, units: this.sortedUnits(this.unitsOf(group)) }))
+        .filter(entry => !this.searching || entry.units.length > 0);
+    },
     /** 搜索命中的单元总数（跨分组）；未搜索时就是全部 */
     matchedUnitCount() {
-      return this.visibleGroups().reduce((n, g) => n + this.unitsOf(g).length, 0);
+      return this.displayedGroups.reduce((n, entry) => n + entry.units.length, 0);
     },
   },
   methods: {
@@ -276,12 +281,6 @@ const UnitsPage = {
       return this.searching
         ? group.units.filter(u => this.matchUnit(u))
         : group.units;
-    },
-    /** 搜索时只留命中的分组（整组不命中就整组隐藏） */
-    visibleGroups() {
-      return this.searching
-        ? this.roots.filter(g => this.unitsOf(g).length > 0)
-        : this.roots;
     },
     /** 单元所在目录（搜索时用来区分同名文件夹） */
     parentPath(u) {
@@ -576,7 +575,7 @@ const UnitFilesPage = {
             :class="{ selected: selectMode && selectedIds.has(f.id) }"
             :data-file-id="f.id">
             <div class="thumb-wrap">
-              <img :src="thumbUrl(f.id)" loading="lazy"
+              <img :src="thumbUrl(f.id)" loading="lazy" decoding="async"
                 @load="onImgLoad(f.id)" @error="onImgError($event, f.id)"
                 :alt="f.filename"
                 :class="{ loaded: loaded.has(f.id) }">
@@ -598,6 +597,8 @@ const UnitFilesPage = {
                 <button v-if="!selectMode" class="card-more" @click.stop="$root.showSheet(f.filename, [
                   { label: '设为单元封面', icon: 'mdi-image-outline',
                     action: () => setAsCover(f) },
+                  { label: '管理标签', icon: 'mdi-tag-multiple-outline',
+                    action: () => manageFileTags(f) },
                   { label: '多选管理', icon: 'mdi-checkbox-multiple-marked-outline',
                     action: () => enterSelectMode(f.id) },
                   { label: '删除文件', icon: 'mdi-delete-outline', danger: true,
@@ -622,6 +623,26 @@ const UnitFilesPage = {
           删除
         </button>
       </div>
+      <div v-if="tagFile" class="pin-dialog-overlay" @click.self="closeFileTags" @keydown.esc.prevent.stop="closeFileTags">
+        <div ref="tagDialog" class="pin-dialog file-tags-dialog" role="dialog" aria-modal="true"
+          aria-labelledby="file-tags-title" tabindex="-1" @keydown.tab="trapTagFocus">
+          <h3 id="file-tags-title">管理标签</h3>
+          <p class="file-tags-name">{{ tagFile.filename }}</p>
+          <div v-if="allTags.length" class="file-tags-list">
+            <label v-for="tag in allTags" :key="tag.id" class="file-tag-option">
+              <input type="checkbox" v-model="draftTagIds" :value="tag.id" :disabled="tagsSaving">
+              <span class="tag-dot" :style="{ background: tag.color || 'var(--accent)' }"></span>
+              <span>{{ tag.name }}</span>
+            </label>
+          </div>
+          <p v-else class="file-tags-empty">还没有标签，可在设置中创建。</p>
+          <p v-if="tagError" class="file-tags-error" role="alert">{{ tagError }}</p>
+          <div class="pin-actions">
+            <button class="btn btn-secondary" @click="closeFileTags" :disabled="tagsSaving">取消</button>
+            <button class="btn btn-primary" @click="saveFileTags" :disabled="tagsSaving || !allTags.length">{{ tagsSaving ? '保存中…' : '保存' }}</button>
+          </div>
+        </div>
+      </div>
     </div>
   `,
   props: ['serverUrl'],
@@ -635,6 +656,7 @@ const UnitFilesPage = {
     allTags: [],
     activeTagIds: [],
     tagMapping: {},
+    tagFile: null, draftTagIds: [], tagsSaving: false, tagError: '',
     // 文件管理（多选删除）
     selectMode: false,
     selectedIds: new Set(),
@@ -795,6 +817,52 @@ const UnitFilesPage = {
       } catch (e) { alert('设置封面失败: ' + e.message); }
     },
 
+    manageFileTags(file) {
+      this.tagFile = file;
+      this.draftTagIds = [...(this.tagMapping[file.id] || [])];
+      this.tagError = '';
+      this.$nextTick(() => {
+        const dialog = this.$refs.tagDialog;
+        if (dialog) (dialog.querySelector('input, button') || dialog).focus();
+      });
+    },
+    closeFileTags() {
+      if (this.tagsSaving) return;
+      const fileId = this.tagFile && this.tagFile.id;
+      this.tagFile = null;
+      this.$nextTick(() => {
+        const button = this.$el.querySelector('[data-file-id="' + fileId + '"] .card-more');
+        if (button) button.focus();
+      });
+    },
+    trapTagFocus(event) {
+      const controls = [...this.$refs.tagDialog.querySelectorAll('input:not(:disabled), button:not(:disabled)')];
+      if (!controls.length) { event.preventDefault(); return; }
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault(); first.focus();
+      }
+    },
+    async saveFileTags() {
+      if (!this.tagFile || this.tagsSaving) return;
+      const fileId = this.tagFile.id;
+      const tagIds = [...this.draftTagIds];
+      this.tagsSaving = true;
+      this.tagError = '';
+      try {
+        await api(this.serverUrl, '/api/tags/by-file/' + fileId, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(tagIds),
+        });
+        this.tagMapping[fileId] = tagIds;
+        this.tagsSaving = false;
+        this.closeFileTags();
+      } catch (e) { this.tagError = '更新标签失败: ' + e.message; }
+      finally { this.tagsSaving = false; }
+    },
+
     setSort(field) {
       if (this.sortBy === field) {
         if (this.sortOrder === 'desc') {
@@ -825,36 +893,32 @@ const UnitFilesPage = {
       this.refreshing = true;
       try {
         const id = this.$route.params.id;
-        const data = await api(this.serverUrl, '/api/units/' + id + '/files');
-        this.unitName = data.unit_name || '';
-        this.files = data.files || [];
+        await this.loadFiles(id);
       } catch(e) {
         // refresh failed
       } finally {
         this.refreshing = false;
       }
     },
+    async loadFiles(id) {
+      const [data, tagsData, mapData] = await Promise.all([
+        api(this.serverUrl, '/api/units/' + id + '/files'),
+        api(this.serverUrl, '/api/tags'),
+        api(this.serverUrl, '/api/tags/mapped-files?unit_id=' + encodeURIComponent(id)),
+      ]);
+      this.unitName = data.unit_name || '';
+      this.files = data.files || [];
+      this.allTags = tagsData.tags || [];
+      this.tagMapping = Object.fromEntries(Object.entries(mapData.mappings || {})
+        .map(([id, tags]) => [id, tags.map(tag => tag.id)]));
+      this.activeTagIds = this.activeTagIds.filter(id => this.allTags.some(tag => tag.id === id));
+    },
   },
   async mounted() {
     this.$emit('loading', true);
     try {
       const id = this.$route.params.id;
-      const [data, tagsData, mapData] = await Promise.all([
-        api(this.serverUrl, '/api/units/' + id + '/files'),
-        api(this.serverUrl, '/api/tags'),
-        api(this.serverUrl, '/api/tags/mapped-files'),
-      ]);
-      this.unitName = data.unit_name || '';
-      this.files = data.files || [];
-      this.allTags = tagsData.tags || [];
-      // Build file_id → tag_ids mapping
-      const mapping = {};
-      if (mapData.mappings) {
-        for (const [fidStr, tags] of Object.entries(mapData.mappings)) {
-          mapping[parseInt(fidStr)] = tags.map(t => t.id);
-        }
-      }
-      this.tagMapping = mapping;
+      await this.loadFiles(id);
     } catch(e) {
       this.files = [];
     } finally {
@@ -900,9 +964,11 @@ const UnitFilesPage = {
 const UNSUPPORTED_VIDEO_EXTS = ['mkv', 'avi', 'flv', 'ts', 'wmv', 'rmvb', 'rm'];
 const PreviewPage = {
   template: `
-    <div class="preview-overlay" @contextmenu.prevent @gesturestart.prevent @gesturechange.prevent>
+    <div class="preview-overlay" :class="{ 'can-rotate': pageFullscreen && landscapeVideo }"
+      @contextmenu.prevent @gesturestart.prevent @gesturechange.prevent>
       <!-- 背景层：下滑退出拖动中随进度渐变透明，透出列表页（报告 §6 G_CLOSE / demo 范式） -->
       <div class="preview-backdrop" ref="backdrop"></div>
+      <div class="preview-frame">
       <div class="preview-sheet" ref="sheet">
       <div class="preview-top">
         <button class="preview-back" @click="goBack"><span class="mdi mdi-arrow-left"></span></button>
@@ -921,10 +987,11 @@ const PreviewPage = {
         </template>
         <template v-else-if="mediaType === 'video'">
           <video ref="videoEl" preload="metadata" playsinline webkit-playsinline
-            @timeupdate="onTimeUpdate" @loadedmetadata="onMeta"
+            @timeupdate="onTimeUpdate" @loadedmetadata="onMeta" @resize="onVideoResize"
+            @emptied="landscapeVideo = false"
             @play="onPlay" @pause="onPause" @ended="onPause"
-            @waiting="buffering = true" @stalled="buffering = true"
-            @canplay="onCanPlay" @error="onVideoError"
+            @waiting="onWaiting" @canplay="buffering = false" @playing="buffering = false"
+            @error="onVideoError"
             @click.stop @contextmenu.prevent :src="streamUrl" :poster="posterUrl"
   class="gesture-follow" :class="{ dragging: navSwiping }"></video>
 
@@ -939,9 +1006,9 @@ const PreviewPage = {
             <div class="transcode-bar"><span :style="{ width: transcodeProgress + '%' }"></span></div>
             <small>{{ transcodeProgress }}% · 首次播放需要一点时间，之后会直接使用缓存</small>
           </div>
-          <div class="video-status" v-if="mediaType === 'video' && !transcoding && (loading || buffering) && !videoError">
+          <div class="video-status" v-if="!transcoding && buffering && !videoError" role="status">
             <span class="mdi mdi-loading mdi-spin"></span>
-            <span>{{ loading ? '正在加载视频…' : '缓冲中…' }}</span>
+            <span>缓冲中…</span>
           </div>
           <div class="video-status error" v-if="mediaType === 'video' && !transcoding && videoError">
             <span class="mdi mdi-alert-circle-outline"></span>
@@ -980,7 +1047,7 @@ const PreviewPage = {
 
           <!-- Controls Bar -->
           <div class="controls-bar" :class="{ hidden: controlsHidden && playing }" @click.stop @touchstart="keepControlsVisible">
-            <button class="ctrl-btn" @click="togglePlay">
+            <button class="ctrl-btn" :aria-label="playing ? '暂停' : '播放'" @click="togglePlay">
               <span class="mdi" :class="playing ? 'mdi-pause' : 'mdi-play'"></span>
             </button>
             <span class="time">{{ fmtTime(currentTime) }}</span>
@@ -1003,8 +1070,8 @@ const PreviewPage = {
             <button class="ctrl-btn" @click.stop="toggleSpeedMenu">
               <span class="speed-text">{{ playbackRate }}x</span>
             </button>
-            <button class="ctrl-btn" @click="toggleFullscreen">
-              <span class="mdi mdi-fullscreen"></span>
+            <button class="ctrl-btn" :aria-label="fullscreenActive ? '退出全屏' : '全屏'" @click="toggleFullscreen">
+              <span class="mdi" :class="fullscreenActive ? 'mdi-fullscreen-exit' : 'mdi-fullscreen'"></span>
             </button>
           </div>
         </template>
@@ -1012,6 +1079,7 @@ const PreviewPage = {
           <!-- Navigation feedback toast -->
           <div class="nav-feedback" :class="{ show: !!navigateFeedback }">{{ navigateFeedback }}</div>
 
+      </div>
       </div>
       </div>
     </div>
@@ -1038,7 +1106,8 @@ const PreviewPage = {
       navigateFeedback: '',
       navigateFeedbackTimer: null,
       posterUrl: '',
-      loading: false, buffering: false, videoError: '',
+      buffering: false, videoError: '',
+      pageFullscreen: false, nativeFullscreen: false, landscapeVideo: false,
       transcoding: false, transcodeProgress: 0, transcodeMessage: '',
       transcodeTimer: null, videoTranscoded: false,
       _transcodeStarting: false,
@@ -1053,6 +1122,7 @@ const PreviewPage = {
     };
   },
   computed: {
+    fullscreenActive() { return this.pageFullscreen || this.nativeFullscreen; },
     videoEl() { return this.$refs.videoEl; },
     /** 浏览器原生不支持的容器：自动转码；这里只解释当前状态 */
     formatWarning() {
@@ -1215,18 +1285,39 @@ const PreviewPage = {
       }
     },
     /* ---- Playback ---- */
-    togglePlay() { if (!this.videoEl) return; if (this.videoEl.paused) { const p = this.videoEl.play(); if (p && p.catch) p.catch(() => {}); } else { this.videoEl.pause(); } },
+    togglePlay() {
+      const v = this.videoEl;
+      if (!v || this.transcoding || this.videoError) return;
+      if (!v.paused) { v.pause(); return; }
+      const p = v.play();
+      if (p && p.catch) p.catch(() => { if (v.paused) this.buffering = false; });
+    },
     onTimeUpdate() {
       if (!this.videoEl || this.seeking) return;
       this.currentTime = this.videoEl.currentTime;
       this.duration = this.videoEl.duration || 0;
       this.progressPct = this.duration ? (this.currentTime / this.duration) * 100 : 0;
     },
-    onMeta() { if (this.videoEl) { this.duration = this.videoEl.duration || 0; this.loading = false; } },
-    onCanPlay() { this.buffering = false; this.loading = false; this.videoError = ''; },
-    onPlay() { this.playing = true; this.buffering = false; this.startHideTimer(); },
+    onMeta() {
+      if (this.videoEl) this.duration = this.videoEl.duration || 0;
+      this.onVideoResize();
+    },
+    onVideoResize() {
+      const v = this.videoEl;
+      this.landscapeVideo = !!(v && v.videoHeight > 0 && v.videoWidth > v.videoHeight);
+    },
+    onWaiting() {
+      const v = this.videoEl;
+      this.buffering = !!(v && !v.paused && !v.ended && v.readyState < v.HAVE_FUTURE_DATA);
+    },
+    onPlay() {
+      this.playing = true;
+      this.onWaiting();
+      this.startHideTimer();
+    },
     onPause() {
       this.playing = false;
+      this.buffering = false;
       // 暂停时控制条必须常驻（旧逻辑只在 playing 时启动 4.5s 自动隐藏，
       // 暂停后控制条会被上一次计时器藏掉，用户找不到播放键）。
       this.controlsHidden = false;
@@ -1236,7 +1327,6 @@ const PreviewPage = {
       // 转码期间 video 仍挂着旧源，错误是预期内的；进度层会盖住它。
       if (this.transcoding) return;
       this.buffering = false;
-      this.loading = false;
       const err = this.videoEl && this.videoEl.error;
       const code = err ? err.code : 0;
       if (code === 4) {
@@ -1252,10 +1342,10 @@ const PreviewPage = {
     retryVideo() {
       if (!this.videoEl) return;
       this.videoError = '';
-      this.loading = true;
-      const base = this.streamUrl.split('&_r=')[0];
-      this.streamUrl = base + (base.includes('?') ? '&' : '?') + '_r=' + Date.now();
-      try { this.videoEl.load(); } catch (e) { /* 忽略 */ }
+      this.onPause();
+      const url = new URL(this.streamUrl, window.location.href);
+      url.searchParams.set('_r', Date.now());
+      this.streamUrl = url.href;
     },
     /* ---- 按需转码（MKV/AVI 等浏览器不支持的容器）----
      * 后端 /api/transcode/start 幂等；转码缓存按 file_id+size+mtime+画质 命中，
@@ -1275,12 +1365,10 @@ const PreviewPage = {
       if (unsupported || (forceTranscode && target > 0)) {
         // 先让 video 标签挂着（可能立刻报错），转码层盖住错误并显示进度。
         this.transcoding = true;
-        this.loading = true;
         this.startTranscode(false);
       } else {
         // 原生支持的容器：直接读原文件，画质标记为「原画」
         this.activeQuality = null;
-        this.loading = true;
       }
     },
     async loadTranscodeQuality() {
@@ -1329,6 +1417,8 @@ const PreviewPage = {
       const fileId = Number(this.$route.params.id);
       if (!fileId) return;
       this._transcodeStarting = true;
+      if (this.videoEl) this.videoEl.pause();
+      this.onPause();
       this.transcoding = true;
       this.videoError = '';
       this.transcodeProgress = 0;
@@ -1349,7 +1439,6 @@ const PreviewPage = {
         this._pollTranscode();
       } catch (e) {
         this.transcoding = false;
-        this.loading = false;
         const msg = String((e && e.message) || e || '');
         if (msg.includes('ffmpeg') || msg.includes('503')) {
           this.videoError = '服务端缺少 ffmpeg，无法转码；可在桌面端打开该文件。';
@@ -1378,7 +1467,6 @@ const PreviewPage = {
           } else if (st.status === 'failed' || st.status === 'canceled') {
             this._stopTranscodePoll();
             this.transcoding = false;
-            this.loading = false;
             this.videoError = st.message || (st.status === 'canceled' ? '转码已取消' : '转码失败');
           }
         } catch (e) {
@@ -1400,14 +1488,11 @@ const PreviewPage = {
       this.videoTranscoded = true;
       this.videoError = '';
       this.activeQuality = this.transcodeQuality;
-      this.streamUrl = mediaUrl(this.serverUrl,
+      this.onPause();
+      const url = mediaUrl(this.serverUrl,
         '/api/transcode/stream?file_id=' + fileId + '&max_height=' + this.transcodeQuality);
-      this.loading = true;
-      this.buffering = true;
-      this.$nextTick(() => {
-        if (!this.videoEl) return;
-        try { this.videoEl.load(); } catch (e) { /* 忽略 */ }
-      });
+      if (this.streamUrl === url && this.videoEl) this.videoEl.load();
+      else this.streamUrl = url;
     },
     /* ---- Gestures（统一手势管线，报告 §6 状态机）----
      * 引擎（js-gesture.createZone）负责：identifier 跟踪、多指中止、
@@ -1466,7 +1551,7 @@ const PreviewPage = {
 
     /* -- 长按：预反馈(250ms) → 激活(450ms)；报告 §1 优化3 / §4 优化3 -- */
     _setGestureSide(c) {
-      this.gestureSide = c.x > window.innerWidth / 2 ? 'right' : 'left';
+      this.gestureSide = c.x > c.width / 2 ? 'right' : 'left';
     },
     _onLongPressPreview(c) {
       if (!(this.mediaType === 'video' && this.playing)) return;
@@ -1774,69 +1859,78 @@ const PreviewPage = {
       this.controlsHidden = false;
     },
     setSpeed(r) { this.playbackRate = r; if (this.videoEl) this.videoEl.playbackRate = r; this.speedMenuOpen = false; this.startHideTimer(); },
-    /* ---- Fullscreen ----
-     * 报告 §5 P0：iPhone Safari 无元素级 requestFullscreen，
-     * 回退 video.webkitEnterFullscreen()（原生播放器内自定义手势不可用，需提示） */
-    toggleFullscreen() {
+    /* ---- Fullscreen ---- */
+    async toggleFullscreen() {
       const el = this.$el;
-      const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
-      if (fsEl) {
-        if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
-        if (document.exitFullscreen) document.exitFullscreen();
-        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      if (this.pageFullscreen) {
+        this.pageFullscreen = false;
+        this.startHideTimer();
         return;
       }
-      const isPortraitVideo = this.videoEl && this.videoEl.videoHeight > this.videoEl.videoWidth;
-      if (el.requestFullscreen) {
-        // 竖屏视频：锁定 portrait-primary 防止横屏（仅 Android Chrome 有效，已 catch）
-        if (isPortraitVideo && screen.orientation && screen.orientation.lock) {
-          screen.orientation.lock('portrait-primary').catch(() => {});
+      try {
+        if (this.nativeFullscreen) {
+          const exit = document.exitFullscreen || document.webkitExitFullscreen;
+          if (exit) await exit.call(document);
+        } else {
+          const request = el.requestFullscreen || el.webkitRequestFullscreen;
+          if (request) await request.call(el);
+          else this.pageFullscreen = true;
         }
-        const p = el.requestFullscreen();
-        if (p && p.catch) p.catch(() => this._iosNativeFullscreen());
-      } else {
-        this._iosNativeFullscreen();
+      } catch (e) {
+        // iPhone 等不支持容器全屏时，保留网页控件与手势。
+        if (el.isConnected && this.mediaType === 'video' && !this.nativeFullscreen) this.pageFullscreen = true;
       }
+      if (el.isConnected) this.startHideTimer();
     },
-    _iosNativeFullscreen() {
+    onFullscreenChange() {
+      const active = (document.fullscreenElement || document.webkitFullscreenElement) === this.$el;
+      if (active === this.nativeFullscreen) return;
+      this.nativeFullscreen = active;
+      const orientation = screen.orientation;
       const v = this.videoEl;
-      if (v && v.webkitEnterFullscreen) {
-        v.webkitEnterFullscreen();
-        this.showNavFeedback('系统原生全屏中，返回后可继续使用手势');
-      } else {
-        this.showNavFeedback('当前浏览器不支持全屏');
+      if (active && v && v.videoHeight > v.videoWidth && orientation && orientation.lock) {
+        orientation.lock('portrait-primary').catch(() => {});
+      } else if (!active && orientation && orientation.unlock) {
+        orientation.unlock();
       }
+      this.startHideTimer();
+    },
+    onPreviewKeydown(e) {
+      if (e.key === 'Escape' && this.pageFullscreen) this.toggleFullscreen();
+    },
+    isRotatedFullscreen() {
+      return this.pageFullscreen && this.landscapeVideo && this._portraitViewport.matches;
     },
     /* ---- Seek ---- */
     getSeekBar() { return this.$el ? this.$el.querySelector('.progress-wrap') : null; },
-    seekAt(clientX) {
+    seekAt(point) {
       if (!this.videoEl || !this.duration) return;
       const bar = this.getSeekBar();
       if (!bar) return;
       const rect = bar.getBoundingClientRect();
-      const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const fraction = this.isRotatedFullscreen()
+        ? (point.clientY - rect.top) / rect.height : (point.clientX - rect.left) / rect.width;
+      const pct = Math.max(0, Math.min(1, fraction));
       this.videoEl.currentTime = pct * this.duration;
       this.progressPct = pct * 100;
       this.seekHintPct = pct * 100;
       this.seekHintTime = pct * this.duration;
     },
-    onSeek(e) { this.seekAt(e.clientX); },
+    onSeek(e) { this.seekAt(e); },
     onSeekStart(e) {
       this.seeking = true;
-      const cx = e.clientX || (e.changedTouches && e.changedTouches[0].clientX) || 0;
-      this.seekAt(cx);
+      this.seekAt(e.changedTouches?.[0] || e);
     },
     onSeekMove(e) {
       if (!this.seeking) return;
-      const cx = e.clientX || (e.changedTouches && e.changedTouches[0].clientX) || 0;
-      this.seekAt(cx);
+      this.seekAt(e.changedTouches?.[0] || e);
     },
     onSeekEnd() { this.seeking = false; this.startHideTimer(); },
     /* ---- Mouse drag (desktop) ---- */
     onSeekMouseDown(e) {
       this.seeking = true;
-      this.seekAt(e.clientX);
-      const onMove = (ev) => { ev.preventDefault(); if (this.seeking) this.seekAt(ev.clientX); };
+      this.seekAt(e);
+      const onMove = (ev) => { ev.preventDefault(); if (this.seeking) this.seekAt(ev); };
       const onUp = () => {
         this.seeking = false; this.startHideTimer();
         document.removeEventListener('mousemove', onMove);
@@ -1856,15 +1950,16 @@ const PreviewPage = {
       _fileScrollAnchor = file.id;
       this.filename = file.filename;
       this.mediaType = file.media_type || 'image';
+      this.landscapeVideo = false;
+      if (this.mediaType !== 'video') this.pageFullscreen = false;
       this.streamUrl = mediaUrl(this.serverUrl, '/api/files/' + file.id + '/stream');
       this.posterUrl = mediaUrl(this.serverUrl, '/api/files/' + file.id + '/thumbnail');
       // Reset zoom and video state when switching
       this._resetZoom();
-      this.playing = false;
+      this.onPause();
       this.currentTime = 0;
       this.duration = 0;
       this.progressPct = 0;
-      this.buffering = false;
       this.videoError = '';
       this._stopTranscodePoll();
       this.transcoding = false;
@@ -1872,7 +1967,6 @@ const PreviewPage = {
       this.activeQuality = null;
       this.transcodeProgress = 0;
       this.transcodeMessage = '';
-      this.loading = this.mediaType === 'video';
       this._prepareVideoSource();
       // Update URL without reload — deep-clone to avoid Vue reactive proxy $el
       history.replaceState({ files: JSON.parse(JSON.stringify(this.fileList)), fileIndex: newIndex }, '', '#/preview/' + file.id);
@@ -1917,6 +2011,10 @@ const PreviewPage = {
   },
   async mounted() {
     this.$emit('loading', true);
+    this._portraitViewport = window.matchMedia('(orientation: portrait)');
+    document.addEventListener('fullscreenchange', this.onFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', this.onFullscreenChange);
+    document.addEventListener('keydown', this.onPreviewKeydown);
     // 统一手势引擎：绑定在常驻的 .preview-content 上（事件委托，
     // 媒体类型切换无需重绑），触摸 + 鼠标同一管线（报告 §6 / §5）
     this.$nextTick(() => {
@@ -1938,6 +2036,12 @@ const PreviewPage = {
       if (!this._destroyGesture) {
         this._destroyGesture = Gesture.createZone(content, {
           canStart: (t) => this._gCanStart(t),
+          pointMapper: () => {
+            if (!this.isRotatedFullscreen()) return null;
+            // 把竖屏上的触点换算到顺时针旋转后的播放器坐标。
+            const rect = content.getBoundingClientRect();
+            return (x, y) => [y - rect.top, rect.right - x];
+          },
           onLock: (axis, c) => this._gOnLock(axis, c),
           onMove: (c) => this._gOnMove(c),
           onEnd: (c) => this._gOnEnd(c),
@@ -1965,7 +2069,6 @@ const PreviewPage = {
         this.mediaType = known.media_type || 'image';
         this.streamUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/stream');
         this.posterUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/thumbnail');
-        this.loading = this.mediaType === 'video';
       }
       // 画质默认值来自设置；与文件详情并行取，避免多一个 RTT
       const [data] = await Promise.all([
@@ -1976,7 +2079,6 @@ const PreviewPage = {
       this.mediaType = data.media_type || this.mediaType || 'image';
       this.streamUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/stream');
       this.posterUrl = mediaUrl(this.serverUrl, '/api/files/' + id + '/thumbnail');
-      this.loading = this.mediaType === 'video';
       this._prepareVideoSource();
       // 如果 fileIndex 没设置，从 fileList 中查找匹配
       if (this.fileIndex < 0 && this.fileList.length) {
@@ -1987,6 +2089,10 @@ const PreviewPage = {
     } finally { this.$emit('loading', false); }
   },
   beforeUnmount() {
+    document.removeEventListener('fullscreenchange', this.onFullscreenChange);
+    document.removeEventListener('webkitfullscreenchange', this.onFullscreenChange);
+    document.removeEventListener('keydown', this.onPreviewKeydown);
+    if (this.nativeFullscreen && screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
     if (this._destroyGesture) { this._destroyGesture(); this._destroyGesture = null; }
     if (this._pinchHandlers && this.$refs.content) {
       const c = this.$refs.content;

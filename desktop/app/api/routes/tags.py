@@ -93,8 +93,11 @@ def set_file_tags(file_id: int, tag_ids: list[int]):
 
 
 @router.get("/mapped-files")
-def get_mapped_files(tag_ids: Optional[str] = Query(None, description="逗号分隔的标签ID列表")):
-    """批量查询文件标签映射。可选按标签筛选。"""
+def get_mapped_files(
+    tag_ids: Optional[str] = Query(None, description="逗号分隔的标签ID列表"),
+    unit_id: Optional[int] = Query(None, description="仅查询指定资源单元的文件"),
+):
+    """批量查询文件标签映射。可选按标签和资源单元筛选。"""
     try:
         tids = None
         if tag_ids:
@@ -104,7 +107,7 @@ def get_mapped_files(tag_ids: Optional[str] = Query(None, description="逗号分
                 raise HTTPException(status_code=422, detail="标签ID参数格式无效，请使用逗号分隔的数字列表")
 
         with DatabaseManager.session() as session:
-            result = q.get_all_mapped_files(session, tids)
+            result = q.get_all_mapped_files(session, tids, unit_id=unit_id)
             return {"mappings": result}
     except HTTPException:
         raise

@@ -95,6 +95,7 @@ function gDecideAxis(dx, dy) {
  * createZone(el, handlers) — 手势区状态机
  *   handlers:
  *     canStart(target, event)      → false 则该触点不参与手势（控件区）
+ *     pointMapper()               → 可选的坐标转换函数，在本次手势开始时选定
  *     onLock(axis, ctx)            axis: 'h' | 'v-down' | 'v-up' | 'longpress'
  *     onMove(ctx)                  仅锁定后回调（连续变换在此直写 style）
  *     onEnd(ctx)                   松手（含长按激活后的松手）
@@ -111,6 +112,7 @@ function createZone(el, h) {
   let mode = 'idle';            // idle | pending | locked | aborted
   let startX = 0, startY = 0, startT = 0;
   let touchId = null, isMouse = false, axis = null;
+  let mapPoint = null;
   let samples = [];             // 速度采样：{ x, y, t }
   let lpTimer = 0, lpPreTimer = 0;
 
@@ -127,7 +129,7 @@ function createZone(el, h) {
       elapsed: now() - startT,
       event: e,
       width: el.clientWidth || window.innerWidth,
-      height: window.innerHeight,
+      height: el.clientHeight || window.innerHeight,
     };
   }
 
@@ -135,8 +137,9 @@ function createZone(el, h) {
     if (lpTimer) { clearTimeout(lpTimer); lpTimer = 0; }
     if (lpPreTimer) { clearTimeout(lpPreTimer); lpPreTimer = 0; }
   }
-  function toIdle() { mode = 'idle'; axis = null; touchId = null; samples = []; clearLp(); }
+  function toIdle() { mode = 'idle'; axis = null; touchId = null; mapPoint = null; samples = []; clearLp(); }
   function pushSample(x, y) {
+    if (mapPoint) [x, y] = mapPoint(x, y);
     const t = now();
     samples.push({ x, y, t });
     while (samples.length > 2 && t - samples[0].t > T.VEL_WINDOW) samples.shift();
@@ -174,8 +177,10 @@ function createZone(el, h) {
     if (h.canStart && h.canStart(e.target, e) === false) return; // 控件区放行（不 preventDefault）
     touchId = mouse ? 'm' : t.identifier;
     isMouse = !!mouse;
-    startX = t.clientX; startY = t.clientY; startT = now();
-    samples = [{ x: startX, y: startY, t: startT }];
+    mapPoint = h.pointMapper ? h.pointMapper() : null;
+    samples = [];
+    pushSample(t.clientX, t.clientY);
+    ({ x: startX, y: startY, t: startT } = samples[0]);
     axis = null;
     mode = 'pending';
     if (!mouse && e.cancelable) e.preventDefault(); // 阻止双击缩放/长按菜单（touch-action 兜底）
