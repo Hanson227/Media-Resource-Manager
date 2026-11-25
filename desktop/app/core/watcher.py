@@ -50,6 +50,7 @@ class MediaFileEventHandler(FileSystemEventHandler):
         extensions: FrozenSet[str],
         on_change: Callable[[FileChangeEvent], None],
         debounce_ms: int = 2000,
+        ignored_directories: FrozenSet[str] = frozenset({".thumbnails"}),
     ) -> None:
         """初始化事件处理器。
 
@@ -57,11 +58,15 @@ class MediaFileEventHandler(FileSystemEventHandler):
             extensions: 关注的媒体扩展名集合。
             on_change: 当媒体文件变动时的回调函数。
             debounce_ms: 去抖动时间（毫秒）。
+            ignored_directories: 递归监控时要忽略的目录名。
         """
         super().__init__()
         self._extensions = extensions
         self._on_change = on_change
         self._debounce_ms = debounce_ms / 1000.0
+        self._ignored_directories = frozenset(
+            str(name).casefold() for name in ignored_directories
+        )
         self._pending_events: dict[str, tuple[threading.Timer, int]] = {}
         self._timer_counter = 0
         self._lock = threading.Lock()
@@ -87,10 +92,12 @@ class MediaFileEventHandler(FileSystemEventHandler):
         """
         src = Path(event.src_path)
         dest = Path(event.dest_path)
+        if self._is_ignored(src) and self._is_ignored(dest):
+            return
         src_is_media = is_media_file(src, self._extensions) if not event.is_directory else False
         dest_is_media = is_media_file(dest, self._extensions) if not event.is_directory else False
 
-        if dest_is_media:
+        if dest_is_media and not self._is_ignored(dest):
             # 移入或重命名为媒体文件
             change_event = FileChangeEvent(
                 path=dest,
@@ -99,7 +106,7 @@ class MediaFileEventHandler(FileSystemEventHandler):
                 is_directory=event.is_directory,
             )
             self._debounce_and_emit(str(dest), change_event)
-        elif src_is_media and not dest_is_media:
+        elif src_is_media and not dest_is_media and not self._is_ignored(src):
             # 移出监控范围或重命名为非媒体文件 → 视为删除
             change_event = FileChangeEvent(
                 path=src,
@@ -111,6 +118,8 @@ class MediaFileEventHandler(FileSystemEventHandler):
     def _handle_event(self, event: FileSystemEvent, change_type: str) -> None:
         """处理文件系统事件。"""
         path = Path(event.src_path)
+        if self._is_ignored(path):
+            return
         if not event.is_directory and not is_media_file(path, self._extensions):
             return
 
@@ -142,6 +151,11 @@ class MediaFileEventHandler(FileSystemEventHandler):
             )
             self._pending_events[key] = (timer, token)
             timer.start()
+
+    def _is_ignored(self, path: Path) -> bool:
+        """忽略缓存等内部目录，避免其生成的图片被当成媒体文件。"""
+        return any(part.casefold() in self._ignored_directories
+                   for part in path.parts)
 
     def _emit(self, key: str, event: FileChangeEvent, token: int) -> None:
         """触发回调并从待处理列表中移除（仅当 token 匹配时）。"""

@@ -661,13 +661,20 @@ def resolve_paths(
 def apply_resolved_paths(config, resolved: ResolvedPaths):
     """把解析结果写回 AppConfig（frozen dataclass，返回新实例）。
 
-    同时把 PIN 文件落点切到数据根（便携版要求"平板上不存任何数据"）。
+    同时从最终数据目录读取 PIN，再切换后续写入落点。
+    配置初读时数据根尚未确定，内存里的 PIN 可能来自程序目录的旧文件。
 
     注意：`missing_expected` 时**不能**把 `data_root` 清成 None —— 那会把
     "数据盘没插"变成"用户从没配过数据根"，下次插回盘程序就再也找不到它。
     """
     from config import configure_pin_dir
 
+    pin = config.web_pin
+    try:
+        pin = resolved.pin_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        # 尚无 PIN 文件时保留旧版配置中的密码，供后续保存迁移。
+        pass
     configure_pin_dir(resolved.pin_path.parent)
     effective_root = (resolved.data_root if resolved.data_root is not None
                       else resolved.expected_data_root)
@@ -676,6 +683,7 @@ def apply_resolved_paths(config, resolved: ResolvedPaths):
         data_root_id=resolved.data_root_id or getattr(config, "data_root_id", ""),
         db_path=resolved.db_path,
         thumbnail_cache_dir=resolved.thumbnail_cache_dir,
+        web_pin=pin,
     )
 
 

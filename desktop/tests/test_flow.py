@@ -5520,6 +5520,33 @@ def test_pin_auth_api():
         check("重建 app（改 PIN）后旧令牌失效 → 401",
               client.get("/api/units",
                          headers={"Authorization": f"Bearer {token2}"}).status_code == 401)
+
+        # Web 改密必须通知 GUI；否则桌面再保存其它设置会把旧 PIN 写回磁盘。
+        import config as config_module
+        from unittest.mock import patch
+        from app.utils import paths as app_paths
+        with tempfile.TemporaryDirectory(prefix="pin_sync_") as tmp:
+            tmp_dir = Path(tmp)
+            cfg_path = tmp_dir / "config.json"
+            with patch.object(config_module, "_pin_override_dir", tmp_dir / "data"):
+                config.to_file(cfg_path, omit=("profile",))
+                sync_app = create_app(config, {"config_path": str(cfg_path)})
+                gui_configs = [config]
+                sync_app.state.on_config_changed = gui_configs.append
+                sync_client = TestClient(sync_app)
+                changed = sync_client.post("/api/auth/change-pin", json={
+                    "old_pin": "1234", "new_pin": "5678"})
+                check("Web 改 PIN 成功", changed.status_code == 200
+                      and changed.json().get("success"))
+                check("Web 改 PIN 通知 GUI 一次", len(gui_configs) == 2)
+                check("GUI 收到新 PIN", gui_configs[-1].web_pin == "5678")
+                check("Web 改 PIN 已落盘",
+                      AppConfig.from_file(cfg_path).web_pin == "5678")
+                error = app_paths.save_config_preserving_profile(
+                    gui_configs[-1].with_updates(thumbnail_quality=81), cfg_path)
+                check("GUI 保存其它设置成功", not error)
+                check("GUI 保存其它设置不覆盖新 PIN",
+                      AppConfig.from_file(cfg_path).web_pin == "5678")
     finally:
         _revoke_all_auth_tokens()
 
@@ -7183,6 +7210,21 @@ def test_watcher_event_handler():
         img_triggered = any(e.path == test_img for e in captured)
         check("W1: 媒体文件创建触发事件", img_triggered)
 
+        # 缩略图缓存目录下的图片不是媒体库内容，不应触发变化通知。
+        captured.clear()
+        thumbnail_dir = tmp / ".thumbnails"
+        thumbnail_dir.mkdir()
+        cached_img = thumbnail_dir / "cached.jpg"
+        cached_img.write_text("cached thumbnail")
+        handler.on_created(FileCreatedEvent(str(cached_img)))
+        time.sleep(0.2)
+        check("W1: 缩略图缓存图片被忽略", not captured)
+
+        upper_cached_img = Path(str(tmp / ".THUMBNAILS" / "cached.jpg"))
+        handler.on_created(FileCreatedEvent(str(upper_cached_img)))
+        time.sleep(0.2)
+        check("W1: 大小写不同的缩略图目录也被忽略", not captured)
+
         # 去抖动：5 次修改事件应合并为少数回调
         captured.clear()
         for _ in range(5):
@@ -8271,6 +8313,29 @@ def test_p0_regressions():
     finally:
         config_module.configure_pin_dir(None)
         shutil.rmtree(tmp_pin, ignore_errors=True)
+
+    # 首次生成 config.json 前，桌面入口也必须先读取已存在的 PIN。
+    from unittest.mock import patch
+    from app.utils import paths as startup_paths
+    with tempfile.TemporaryDirectory(prefix="desktop_pin_startup_") as directory:
+        app_dir = Path(directory)
+        pin_file = app_dir / "data" / ".web_pin"
+        pin_file.parent.mkdir()
+        pin_file.write_text("0427", encoding="utf-8")
+        with patch.object(config_module, "_pin_override_dir", None), \
+                patch.object(startup_paths, "app_dir", return_value=app_dir), \
+                patch.object(desktop_main.os, "chdir"), \
+                patch.object(desktop_main, "_parse_data_root_arg", return_value=None), \
+                patch.object(desktop_main, "_ensure_database_ready",
+                             return_value=(False, None, None)) as stop_before_db:
+            desktop_main.main()
+            startup_cfg = stop_before_db.call_args.args[0]
+            check("F8 桌面首次建立配置保留运行态已有 PIN",
+                  startup_cfg.web_pin == "0427")
+            check("F8 桌面首次建立配置不覆盖 PIN 文件",
+                  pin_file.read_text(encoding="utf-8") == "0427")
+            check("F8 桌面首次配置可读回原 PIN",
+                  AppConfig.from_file(app_dir / "config.json").web_pin == "0427")
 
 
     # ---------- F3: 删除必须统一走「卷可用 + 三模式」而不是直接 send2trash ----------

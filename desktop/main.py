@@ -276,12 +276,6 @@ def main() -> None:
             config = AppConfig()
     else:
         config = AppConfig()
-        # 保存默认配置
-        try:
-            config.to_file(config_path)
-            logger.info(f"已保存默认配置到: {config_path}")
-        except Exception as e:
-            logger.warning(f"无法保存配置文件: {e}")
 
     # ============================================================
     # 1.1 数据根解析（数据库 / 缩略图 / PIN 可能放在移动盘上）
@@ -303,11 +297,14 @@ def main() -> None:
     # 记住本次发现的数据根/身份（换盘符后才能认出"还是同一个数据盘"）。
     # 只更新数据根字段：db_path / thumbnail_cache_dir 保持相对形式，
     # 否则 config.json 会被钉死在当前盘符上（换机器/换盘即失效）。
-    if (config.data_root != original_root) or (config.data_root_id != original_id):
+    if ((config.data_root != original_root) or (config.data_root_id != original_id)
+            or not config_path.exists()):
         try:
             base_config.with_updates(
                 data_root=config.data_root,
-                data_root_id=config.data_root_id).to_file(
+                data_root_id=config.data_root_id,
+                # 路径解析后才读到数据根 PIN，不能用初读配置中的空值/旧值覆盖。
+                web_pin=config.web_pin).to_file(
                     config_path,
                     omit=() if app_paths.read_explicit_profile(config_path)
                     else ("profile",))

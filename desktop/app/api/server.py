@@ -359,8 +359,8 @@ def create_app(config: AppConfig, runtime: Optional[dict] = None) -> FastAPI:
         except Exception as e:
             logger.error(f"保存配置失败: {e}")
             return JSONResponse(status_code=500, content={"success": False, "error": "保存配置失败"})
-        # 更新内存中的配置
-        request.app.state.config = new_config
+        # 与其它 Web 设置一致，同步 API 与 GUI，避免桌面保存时写回旧 PIN。
+        settings_routes._apply_runtime_config(request, new_config)
         # PIN 已变更：使旧令牌全部失效，需重新验证
         _revoke_all_auth_tokens()
         return {"success": True, "pin_required": bool(new_pin)}

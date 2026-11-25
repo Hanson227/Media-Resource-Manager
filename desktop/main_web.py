@@ -257,6 +257,8 @@ def main(argv=None) -> int:
     if need_persist:
         persist = base_config.with_updates(
             data_root=config.data_root, data_root_id=config.data_root_id,
+            # 路径解析后才读到数据根 PIN，启动保存也必须沿用它。
+            web_pin=config.web_pin,
             # 监听地址见 _config_file_host：绝不把 dataclass 的 127.0.0.1 默认值
             # 写进文件（否则等于替用户做了"只有本机能访问"的决定）。
             api_host=_config_file_host(config_path),

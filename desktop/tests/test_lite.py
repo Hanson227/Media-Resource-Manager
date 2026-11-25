@@ -219,6 +219,129 @@ def test_data_root_resolution():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_web_pin_data_root_restart():
+    """启动必须读取最终数据目录的 PIN，改密后连续重启不得重新生成。"""
+    section("测试 L2.1: 数据根 Web PIN 重启持久化")
+    from unittest.mock import patch
+    from app.services.web_security_service import ensure_web_pin
+
+    with tempfile.TemporaryDirectory(prefix="lite_pin_restart_") as directory:
+        tmp = Path(directory)
+        app_dir = tmp / "app"
+        app_dir.mkdir()
+        cfg_file = app_dir / "config.json"
+        cfg_file.write_text(json.dumps({"data_root": str(tmp / "media")}),
+                            encoding="utf-8")
+        local_pin = app_dir / "data" / ".web_pin"
+        local_pin.parent.mkdir()
+        root_pin = tmp / "media" / "data" / ".web_pin"
+        root_pin.parent.mkdir(parents=True)
+        try:
+            for local_value in (None, "", "1111"):
+                if local_value is None:
+                    local_pin.unlink(missing_ok=True)
+                else:
+                    local_pin.write_text(local_value, encoding="utf-8")
+                root_pin.write_text("0427", encoding="utf-8")
+                for restart, expected in enumerate(("0427", "0538", "0538")):
+                    configure_pin_dir(None)  # 模拟新进程，尚未解析数据目录
+                    cfg = AppConfig.from_file(cfg_file)
+                    rp = app_paths.resolve_paths(cfg, app_dir_override=app_dir,
+                                                 volumes=[])
+                    cfg = app_paths.apply_resolved_paths(cfg, rp)
+                    with patch("app.services.web_security_service.generate_pin",
+                               return_value="9876") as generate:
+                        cfg = ensure_web_pin(cfg, cfg_file, "0.0.0.0")
+                    check("重启读取数据根 PIN（本地状态 %r，第 %d 次）"
+                          % (local_value, restart + 1),
+                          cfg.web_pin == expected and not generate.called
+                          and root_pin.read_text(encoding="utf-8") == expected)
+                    if restart == 0:
+                        cfg.with_updates(web_pin="0538").to_file(cfg_file)
+
+            # 最终目录里的空文件也是明确设置，不能被程序目录旧密码复活。
+            local_pin.write_text("1111", encoding="utf-8")
+            root_pin.write_text("", encoding="utf-8")
+            configure_pin_dir(None)
+            cfg = AppConfig.from_file(cfg_file)
+            rp = app_paths.resolve_paths(cfg, app_dir_override=app_dir, volumes=[])
+            cfg = app_paths.apply_resolved_paths(cfg, rp)
+            check("数据根空 PIN 优先于程序目录旧 PIN", cfg.web_pin == "")
+
+            # 没有数据根 PIN 文件的老版本仍保留原密码，供下次保存迁移。
+            root_pin.unlink()
+            configure_pin_dir(None)
+            cfg = AppConfig.from_file(cfg_file)
+            cfg = app_paths.apply_resolved_paths(cfg, rp)
+            check("数据根尚无 PIN 时保留旧版密码", cfg.web_pin == "1111")
+        finally:
+            configure_pin_dir(None)
+
+
+def test_web_startup_preserves_data_root_pin():
+    """实际入口补写根身份、首次发现或换盘符时，配置基线也必须保留 PIN。"""
+    section("测试 L2.2: 启动保存配置不覆盖数据根 PIN")
+    from unittest.mock import patch
+    import main_web
+
+    class StartupComplete(Exception):
+        """API 服务器创建前停止测试，不监听端口、不打开浏览器。"""
+
+    previous_cwd = Path.cwd()
+    try:
+        with tempfile.TemporaryDirectory(prefix="lite_pin_startup_") as directory:
+            tmp = Path(directory)
+            app_dir = tmp / "app"
+            app_dir.mkdir()
+            volume = tmp / "volume"
+            root = volume / "MediaData"
+            root.mkdir(parents=True)
+            app_paths.write_marker(root, data_root_id="pin-restart-test")
+            root_pin = root / "data" / ".web_pin"
+            root_pin.parent.mkdir()
+            cfg_file = app_dir / "config.json"
+            for label, data in (
+                ("已配置数据根", {"data_root": str(root), "data_root_id": "pin-restart-test"}),
+                ("补写数据根身份", {"data_root": str(root)}),
+                ("首次自动发现", None),
+                ("换盘符重新发现", {"data_root": str(tmp / "removed"),
+                                       "data_root_id": "pin-restart-test"}),
+            ):
+                configure_pin_dir(None)
+                root_pin.write_text("0427", encoding="utf-8")
+                if data is None:
+                    cfg_file.unlink(missing_ok=True)
+                else:
+                    cfg_file.write_text(json.dumps(data), encoding="utf-8")
+                import app.api.server as api_server
+                with patch.object(app_paths, "app_dir", return_value=app_dir), \
+                        patch.object(app_paths, "list_volumes", return_value=[volume]), \
+                        patch.object(main_web, "_setup_logging"), \
+                        patch.object(main_web, "_find_free_port", return_value=19527), \
+                        patch.object(api_server, "APIServer", side_effect=StartupComplete) as server, \
+                        patch("app.services.web_security_service.generate_pin",
+                              return_value="9876") as generate:
+                    try:
+                        main_web.main(["--config", str(cfg_file), "--no-browser"])
+                    except StartupComplete:
+                        pass
+                    started = server.call_args.args[0] if server.called else None
+                    check(label + "不重置密码",
+                          started is not None and started.web_pin == "0427"
+                          and not generate.called
+                          and root_pin.read_text(encoding="utf-8") == "0427")
+                saved = json.loads(cfg_file.read_text(encoding="utf-8"))
+                check(label + "保留相对数据库路径与 PIN 隔离",
+                      not Path(saved.get("db_path", "data/media_manager.db")).is_absolute()
+                      and "web_pin" not in saved)
+                DatabaseManager.dispose()
+            os.chdir(previous_cwd)  # Windows 不能删除当前工作目录
+    finally:
+        os.chdir(previous_cwd)
+        DatabaseManager.dispose()
+        configure_pin_dir(None)
+
+
 # ============================================================
 # 3. 路径改库
 # ============================================================
@@ -1410,6 +1533,8 @@ def main() -> bool:
         test_no_qt_dependency()
         test_profile_resolution()
         test_data_root_resolution()
+        test_web_pin_data_root_restart()
+        test_web_startup_preserves_data_root_pin()
         test_path_remap()
         test_broken_root_and_guard()
         test_letter_change_with_root_still_present()
